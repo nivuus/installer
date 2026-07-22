@@ -58,6 +58,8 @@ class McpClient:
         ]
 
     async def call(self, name: str, arguments: dict) -> str:
+        if name not in self._whitelist:
+            raise McpToolError(f"outil {name} non autorisé")
         if not self.available or self._session is None:
             raise McpToolError("MCP indisponible")
         try:
@@ -68,8 +70,27 @@ class McpClient:
             raise McpToolError(f"outil {name} : délai dépassé")
         except Exception as e:
             raise McpToolError(f"outil {name} : {e}")
-        parts = [c.text for c in result.content if getattr(c, "text", None)]
+
+        if getattr(result, "isError", False):
+            try:
+                parts = [c.text for c in result.content if getattr(c, "text", None)]
+            except Exception:
+                parts = []
+            message = "\n".join(parts) or f"outil {name} : échec"
+            raise McpToolError(message)
+
+        try:
+            parts = [c.text for c in result.content if getattr(c, "text", None)]
+        except Exception as e:
+            raise McpToolError(f"outil {name} : réponse invalide ({e})")
         return "\n".join(parts)
+
+    async def __aenter__(self) -> "McpClient":
+        await self.start()
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        await self.aclose()
 
     async def aclose(self) -> None:
         await self._stack.aclose()
