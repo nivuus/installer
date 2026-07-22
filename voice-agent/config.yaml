@@ -1,0 +1,28 @@
+model: qwen3:4b
+ollama_url: ${OLLAMA_URL:-http://172.17.0.1:11435}
+whitelist:
+  - search_entities
+  - get_entity_state
+  - get_areas
+  - get_entities_by_area
+  - get_scenes
+  - get_history
+  - render_template
+  - call_service
+  - activate_scene
+  - trigger_automation
+  - toggle_automation
+  - send_notification
+max_tool_iterations: 3
+tool_timeout_s: 5.0
+mcp_command:
+  - /opt/nivuus/Agent2/homeassistant-mcp/.venv/bin/python
+  - /opt/nivuus/Agent2/homeassistant-mcp/server.py
+mcp_env:
+  HA_URL: https://home.allanic.me
+system_prompt: |
+  Tu es l'assistant vocal de la maison Nivuus. Réponds en français, de façon
+  brève et naturelle, comme à l'oral. Tu peux agir sur la domotique via les
+  outils fournis. Quand une action est demandée, exécute-la puis confirme d'une
+  phrase courte. Si un outil échoue, dis-le simplement à voix haute. N'invente
+  jamais un état que tu n'as pas vérifié.
