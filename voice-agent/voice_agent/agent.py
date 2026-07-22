@@ -19,10 +19,8 @@ class Agent:
         convo = [{"role": "system", "content": self._cfg.system_prompt}] + list(messages)
         tools = self._mcp.openai_tools()
 
-        for _ in range(self._cfg.max_tool_iterations + 1):
-            calls, buffered = {}, []
-            emitted_text = False
-
+        for _ in range(self._cfg.max_tool_iterations):
+            calls: dict = {}
             kwargs = dict(model=self._cfg.model, messages=convo, stream=True)
             if tools:
                 kwargs["tools"] = tools
@@ -35,19 +33,25 @@ class Agent:
                     delta = chunk.choices[0].delta
                     if getattr(delta, "tool_calls", None):
                         _accumulate_tool_calls(calls, delta.tool_calls)
+                        continue
+                    # Latency-first design decision: stream content as it arrives
+                    # while no tool call has appeared this turn. Once a tool call
+                    # is seen, suppress any further content (tool turns normally
+                    # carry no content). Fully buffering the turn would delay the
+                    # TTS, which is the whole point of this shim.
+                    if calls:
+                        continue
                     if getattr(delta, "content", None):
-                        emitted_text = True
                         yield delta.content
 
             if not calls:
                 return  # plain answer already streamed
 
-            # Execute tool calls, append results, loop for the model's final answer
             convo.append(_assistant_tool_msg(calls))
             for tc in _ordered(calls):
                 convo.append(await self._run_tool(tc))
 
-        # iteration cap hit: force a final non-tool answer
+        # iteration cap reached: force a final non-tool answer
         stream = await self._llm.chat.completions.create(
             model=self._cfg.model, messages=convo, stream=True
         )
@@ -60,6 +64,7 @@ class Agent:
         try:
             args = json.loads(tc["arguments"] or "{}")
         except json.JSONDecodeError:
+            log.warning("tool %s: invalid JSON args, using {}", tc["name"])
             args = {}
         try:
             content = await self._mcp.call(tc["name"], args)

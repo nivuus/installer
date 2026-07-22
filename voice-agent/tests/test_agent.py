@@ -52,7 +52,11 @@ class FakeLLM:
         self._streams = list(streams)
         self.chat = self
         self.completions = self
+        self.seen_messages = []
     async def create(self, **kwargs):
+        # Snapshot the messages sent on this call so tests can assert on
+        # what was actually relayed to the LLM (e.g. tool result reinjection).
+        self.seen_messages.append(list(kwargs["messages"]))
         return self._streams.pop(0)
 
 
@@ -101,10 +105,22 @@ async def test_tool_call_then_final_text():
         Chunk([Choice(Delta(content="C'est allumé."), finish_reason="stop")]),
     ])
     mcp = FakeMcp(result="success")
-    agent = make_agent(FakeLLM([tool_stream, final_stream]), mcp)
+    llm = FakeLLM([tool_stream, final_stream])
+    agent = make_agent(llm, mcp)
     out = await _collect(agent, [{"role": "user", "content": "allume la lumière"}])
     assert out == "C'est allumé."
     assert mcp.calls == [("call_service", {"domain": "light", "service": "turn_on"})]
+
+    # The re-call to the LLM must actually carry the assistant tool_calls
+    # message and the tool's result, not just "not crash".
+    second_call_messages = llm.seen_messages[1]
+    assistant_msgs = [m for m in second_call_messages
+                       if m.get("role") == "assistant" and m.get("tool_calls")]
+    assert len(assistant_msgs) == 1
+    tool_msgs = [m for m in second_call_messages if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["tool_call_id"] == "c1"
+    assert tool_msgs[0]["content"] == "success"
 
 
 async def test_tool_error_reinjected_not_fatal():
@@ -116,7 +132,54 @@ async def test_tool_error_reinjected_not_fatal():
         Chunk([Choice(Delta(content="Désolé, l'action a échoué."), finish_reason="stop")]),
     ])
     mcp = FakeMcp(raises=McpToolError("boom"))
-    agent = make_agent(FakeLLM([tool_stream, final_stream]), mcp)
+    llm = FakeLLM([tool_stream, final_stream])
+    agent = make_agent(llm, mcp)
     out = await _collect(agent, [{"role": "user", "content": "allume"}])
     assert "échoué" in out
     assert mcp.calls  # tool was attempted
+
+    # Prove the error was actually re-injected as the tool result on the
+    # re-call, not merely that the run didn't raise.
+    second_call_messages = llm.seen_messages[1]
+    tool_msgs = [m for m in second_call_messages if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["tool_call_id"] == "c1"
+    assert "boom" in tool_msgs[0]["content"]
+
+
+async def test_arguments_accumulated_across_chunks():
+    tool_stream = FakeStream([
+        Chunk([Choice(Delta(tool_calls=[ToolCallDelta(
+            0, id="c1", name="call_service", args='{"domain":"light",')]))]),
+        Chunk([Choice(Delta(tool_calls=[ToolCallDelta(
+            0, args='"service":"turn_on"}')]))]),
+        Chunk([Choice(Delta(), finish_reason="tool_calls")]),
+    ])
+    final_stream = FakeStream([
+        Chunk([Choice(Delta(content="OK."), finish_reason="stop")]),
+    ])
+    mcp = FakeMcp(result="success")
+    agent = make_agent(FakeLLM([tool_stream, final_stream]), mcp)
+    out = await _collect(agent, [{"role": "user", "content": "allume la lumière"}])
+    assert out == "OK."
+    assert mcp.calls == [("call_service", {"domain": "light", "service": "turn_on"})]
+
+
+async def test_iteration_cap_forces_final_answer():
+    tool_stream = FakeStream([
+        Chunk([Choice(Delta(tool_calls=[ToolCallDelta(0, id="c1", name="call_service", args='{}')]))]),
+        Chunk([Choice(Delta(), finish_reason="tool_calls")]),
+    ])
+    final_stream = FakeStream([
+        Chunk([Choice(Delta(content="Voici la réponse finale."), finish_reason="stop")]),
+    ])
+    mcp = FakeMcp(result="ok")
+    from voice_agent.config import Config
+    cfg = Config(model="m", ollama_url="u", ollama_api_key="k", whitelist=[],
+                 system_prompt="sys", mcp_command=[], mcp_env={},
+                 max_tool_iterations=1, tool_timeout_s=5.0)
+    llm = FakeLLM([tool_stream, final_stream])
+    agent = Agent(cfg, mcp, llm)
+    out = await _collect(agent, [{"role": "user", "content": "allume"}])
+    assert out == "Voici la réponse finale."
+    assert len(mcp.calls) == 1
