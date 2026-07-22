@@ -1,6 +1,6 @@
 """Configuration loader. Secrets come from env, never from the yaml file."""
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import yaml
 
@@ -24,15 +24,14 @@ def load_config(path: str | None = None) -> Config:
         raw = yaml.safe_load(f)
 
     # ${VAR:-default} expansion for ollama_url only (simple, no full templating)
-    ollama_url = os.path.expandvars(raw["ollama_url"]) if "${" not in raw["ollama_url"] \
-        else _expand(raw["ollama_url"])
+    ollama_url = _expand(raw["ollama_url"])
 
     mcp_env = dict(raw.get("mcp_env", {}))
     mcp_env["HA_TOKEN"] = os.environ["HA_TOKEN"]
 
     return Config(
         model=raw["model"],
-        ollama_url=os.getenv("OLLAMA_URL", ollama_url),
+        ollama_url=ollama_url,
         ollama_api_key=os.environ["OLLAMA_API_KEY"],
         whitelist=list(raw["whitelist"]),
         system_prompt=raw["system_prompt"],
