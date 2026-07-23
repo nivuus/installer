@@ -1,5 +1,5 @@
 [Unit]
-Description=CPU Thermal Optimization (P-cores 3600MHz + E-cores 2000MHz powersave)
+Description=CPU Thermal Optimization (RAPL 50W/58W + full turbo P-cores, E-cores 2000MHz powersave)
 After=multi-user.target
 
 [Service]

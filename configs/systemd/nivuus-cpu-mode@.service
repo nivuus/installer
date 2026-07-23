@@ -1,0 +1,11 @@
+[Unit]
+Description=Nivuus CPU power mode (%i)
+Documentation=file:///opt/nivuus/docs/superpowers/specs/2026-07-22-vm-aware-cpu-power-mode-design.md
+# Indirection layer for the libvirt hooks: they may only exec /usr/bin/systemctl
+# (the AppArmor libvirtd profile grants PUx on /usr/bin/* but NOT /usr/local/*),
+# so they `systemctl start nivuus-cpu-mode@<mode>` instead of calling the script
+# in /usr/local/bin directly. The unit runs outside the hook confinement.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/optimize-cpu-thermal.sh %i
