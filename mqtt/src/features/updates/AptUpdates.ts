@@ -2,7 +2,7 @@
 
 import { BaseFeature } from '../../core/BaseFeature';
 import { MqttClient, FeatureConfig } from '../../core/types';
-import { execute_command } from '../../utils/exec';
+import { execute_command, execute_argv } from '../../utils/exec';
 import logger from '../../utils/logger';
 
 interface AptUpdatesConfig extends FeatureConfig {
@@ -80,7 +80,9 @@ export class AptUpdates extends BaseFeature {
     this.lastCheckTimestamp = Date.now();
 
     try {
-      await execute_command('sudo apt-get update', true);
+      await execute_argv('sudo', ['apt-get', 'update']);
+      // Shell required for the LC_ALL env assignment + 2>/dev/null; fixed literal,
+      // no externally-controlled value is interpolated.
       const result = await execute_command('/bin/sh -c "LC_ALL=C apt list --upgradable 2>/dev/null"', false);
       this.packages = this.parseUpgradable(result.stdout);
       logger.info(`APT: ${this.packages.length} upgradable packages found`);
@@ -148,6 +150,10 @@ export class AptUpdates extends BaseFeature {
     if (this.installing || this.packages.length === 0) return;
 
     const dockerUpdated = this.packages.some(p => p.name.startsWith('docker'));
+    // These apt commands need a shell because of the leading environment
+    // assignments (DEBIAN_FRONTEND=...) and the Dpkg::Options quoting. They are
+    // only ever built from fixed literals plus package names parsed from apt's
+    // own output — never from MQTT / external input.
     const aptEnv = 'sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1';
     const dpkgOpts = '-o Dpkg::Options::="--force-confold"';
     const upgradeTimeout = 1800000; // 30 minutes
@@ -206,13 +212,13 @@ export class AptUpdates extends BaseFeature {
 
     // Wait for Docker daemon to be ready after upgrade
     for (let i = 0; i < 30; i++) {
-      const check = await execute_command('docker info', false);
+      const check = await execute_argv('docker', ['info']);
       if (check.exitCode === 0) break;
       await new Promise(r => setTimeout(r, 2000));
     }
 
     // Find all running compose projects
-    const result = await execute_command('docker compose ls --format json', false);
+    const result = await execute_argv('docker', ['compose', 'ls', '--format', 'json']);
     if (result.exitCode !== 0 || !result.stdout.trim()) {
       logger.warn('Could not list compose projects');
       return;
@@ -225,7 +231,7 @@ export class AptUpdates extends BaseFeature {
         if (!configFile) continue;
         logger.info(`Restarting compose project: ${project.Name} (${configFile})`);
         // Remove stuck containers and recreate
-        await execute_command(`docker compose -f ${configFile} up -d --force-recreate`, false, 300000);
+        await execute_argv('docker', ['compose', '-f', configFile, 'up', '-d', '--force-recreate'], { timeoutMs: 300000 });
       }
       logger.info('All compose projects restarted');
     } catch (error: any) {

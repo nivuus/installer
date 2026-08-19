@@ -1,9 +1,15 @@
 // src/websocket/WizardHandler.ts
 
 import { WizardCommand, FeatureName, FeatureHandlers, ActionHandler } from './types';
-import { execute_command } from '../utils/exec';
+import { execute_command, execute_argv } from '../utils/exec';
+import { Validators, rejectInvalid } from '../utils/validators';
 import logger from '../utils/logger';
 import { getConfigManager } from '../config';
+import * as fs from 'fs';
+
+// hostapd config files the wizard is allowed to touch. Any config path received
+// from a wizard command must be one of these (prevents arbitrary file writes).
+const ALLOWED_HOSTAPD_CONFIGS = ['/etc/hostapd/2.4Ghz.conf', '/etc/hostapd/5Ghz.conf'];
 
 /**
  * Handler for wizard commands
@@ -52,14 +58,14 @@ export class WizardHandler {
   private createNetworkHandlers(): FeatureHandlers {
     return {
       get_interfaces: async () => {
-        const linkResult = await execute_command('ip -j link show', false);
+        const linkResult = await execute_argv('ip', ['-j', 'link', 'show']);
         if (linkResult.exitCode !== 0) throw new Error('Failed to get interfaces');
 
-        const addrResult = await execute_command('ip -j addr show', false);
+        const addrResult = await execute_argv('ip', ['-j', 'addr', 'show']);
         const addresses = addrResult.exitCode === 0 ? JSON.parse(addrResult.stdout) : [];
 
         // Get firewall zones for interfaces
-        const zonesResult = await execute_command('firewall-cmd --get-active-zones', false);
+        const zonesResult = await execute_argv('firewall-cmd', ['--get-active-zones']);
         const zoneMap = new Map<string, string>();
         if (zonesResult.exitCode === 0) {
           let currentZone = '';
@@ -76,7 +82,7 @@ export class WizardHandler {
         }
 
         // Get network stats
-        const statsResult = await execute_command('cat /proc/net/dev', false);
+        const statsResult = await execute_argv('cat', ['/proc/net/dev']);
         const statsMap = new Map<string, { rx_bytes: number; tx_bytes: number }>();
         if (statsResult.exitCode === 0) {
           for (const line of statsResult.stdout.split('\n').slice(2)) {
@@ -122,7 +128,7 @@ export class WizardHandler {
       },
 
       get_zones: async () => {
-        const result = await execute_command('firewall-cmd --get-zones', false);
+        const result = await execute_argv('firewall-cmd', ['--get-zones']);
         if (result.exitCode !== 0) throw new Error('Failed to get zones');
         return result.stdout.trim().split(/\s+/);
       },
@@ -130,24 +136,28 @@ export class WizardHandler {
       set_interface_zone: async (params) => {
         const { interface: iface, zone, currentZone } = params as { interface: string; zone: string; currentZone?: string };
         if (!iface || !zone) throw new Error('Missing interface or zone parameter');
+        // Validate wizard-controlled input before it reaches firewall-cmd.
+        if (!Validators.isInterface(iface)) throw new Error('Invalid interface parameter');
+        if (!Validators.isZone(zone)) throw new Error('Invalid zone parameter');
+        if (currentZone && !Validators.isZone(currentZone)) throw new Error('Invalid currentZone parameter');
 
         // Remove from current zone if specified
         if (currentZone) {
-          await execute_command(`firewall-cmd --zone=${currentZone} --remove-interface=${iface} --permanent`, false);
+          await execute_argv('firewall-cmd', [`--zone=${currentZone}`, `--remove-interface=${iface}`, '--permanent']);
         }
 
         // Add to new zone
-        const result = await execute_command(`firewall-cmd --zone=${zone} --add-interface=${iface} --permanent`, false);
+        const result = await execute_argv('firewall-cmd', [`--zone=${zone}`, `--add-interface=${iface}`, '--permanent']);
         if (result.exitCode !== 0) throw new Error(`Failed to add interface to zone: ${result.stderr}`);
 
         // Reload firewall
-        await execute_command('firewall-cmd --reload', false);
+        await execute_argv('firewall-cmd', ['--reload']);
 
         return { success: true, interface: iface, zone };
       },
 
       get_status: async () => {
-        const activeZones = await execute_command('firewall-cmd --get-active-zones', false);
+        const activeZones = await execute_argv('firewall-cmd', ['--get-active-zones']);
         return { activeZones: activeZones.stdout };
       },
     };
@@ -159,7 +169,7 @@ export class WizardHandler {
   private createFirewallHandlers(): FeatureHandlers {
     return {
       list_zones: async () => {
-        const result = await execute_command('firewall-cmd --get-zones', false);
+        const result = await execute_argv('firewall-cmd', ['--get-zones']);
         if (result.exitCode !== 0) throw new Error('Failed to list zones');
         return result.stdout.trim().split(/\s+/);
       },
@@ -167,6 +177,7 @@ export class WizardHandler {
       get_zone_details: async (params) => {
         const { zone } = params as { zone: string };
         if (!zone) throw new Error('Missing zone parameter');
+        if (!Validators.isZone(zone)) throw new Error('Invalid zone parameter');
 
         const [forwards, services, ports, masquerade] = await Promise.all([
           this.getZonePortForwards(zone),
@@ -179,10 +190,10 @@ export class WizardHandler {
       },
 
       get_rules: async () => {
-        const activeZonesOutput = await execute_command('firewall-cmd --get-active-zones', false);
+        const activeZonesOutput = await execute_argv('firewall-cmd', ['--get-active-zones']);
         const zoneInterfaceMap = this.parseActiveZones(activeZonesOutput.stdout);
 
-        const defaultZoneResult = await execute_command('firewall-cmd --get-default-zone', false);
+        const defaultZoneResult = await execute_argv('firewall-cmd', ['--get-default-zone']);
         const defaultZone = defaultZoneResult.stdout.trim();
 
         const zones: Array<{
@@ -226,18 +237,20 @@ export class WizardHandler {
       add_port: async (params) => {
         const { port, protocol = 'tcp', zone = 'public' } = params as { port: string; protocol?: string; zone?: string };
         if (!port) throw new Error('Missing port parameter');
+        this.assertPortInputs(zone, port, protocol);
 
-        await execute_command(`firewall-cmd --zone=${zone} --add-port=${port}/${protocol} --permanent`, false);
-        await execute_command('firewall-cmd --reload', false);
+        await execute_argv('firewall-cmd', [`--zone=${zone}`, `--add-port=${port}/${protocol}`, '--permanent']);
+        await execute_argv('firewall-cmd', ['--reload']);
         return { success: true, port, protocol, zone };
       },
 
       remove_port: async (params) => {
         const { port, protocol = 'tcp', zone = 'public' } = params as { port: string; protocol?: string; zone?: string };
         if (!port) throw new Error('Missing port parameter');
+        this.assertPortInputs(zone, port, protocol);
 
-        await execute_command(`firewall-cmd --zone=${zone} --remove-port=${port}/${protocol} --permanent`, false);
-        await execute_command('firewall-cmd --reload', false);
+        await execute_argv('firewall-cmd', [`--zone=${zone}`, `--remove-port=${port}/${protocol}`, '--permanent']);
+        await execute_argv('firewall-cmd', ['--reload']);
         return { success: true, port, protocol, zone };
       },
 
@@ -246,10 +259,12 @@ export class WizardHandler {
           port: string; toAddr: string; toPort: string; protocol?: string; zone?: string;
         };
         if (!port || !toAddr || !toPort) throw new Error('Missing port, toAddr or toPort parameter');
+        this.assertForwardInputs(zone, port, protocol, toPort, toAddr);
 
+        // With argv the rule is one literal argument — no surrounding quotes.
         const rule = `port=${port}:proto=${protocol}:toport=${toPort}:toaddr=${toAddr}`;
-        await execute_command(`firewall-cmd --zone=${zone} --add-forward-port='${rule}' --permanent`, false);
-        await execute_command('firewall-cmd --reload', false);
+        await execute_argv('firewall-cmd', [`--zone=${zone}`, `--add-forward-port=${rule}`, '--permanent']);
+        await execute_argv('firewall-cmd', ['--reload']);
         return { success: true, port, toAddr, toPort, protocol, zone };
       },
 
@@ -258,10 +273,11 @@ export class WizardHandler {
           port: string; toAddr: string; toPort: string; protocol?: string; zone?: string;
         };
         if (!port || !toAddr || !toPort) throw new Error('Missing port, toAddr or toPort parameter');
+        this.assertForwardInputs(zone, port, protocol, toPort, toAddr);
 
         const rule = `port=${port}:proto=${protocol}:toport=${toPort}:toaddr=${toAddr}`;
-        await execute_command(`firewall-cmd --zone=${zone} --remove-forward-port='${rule}' --permanent`, false);
-        await execute_command('firewall-cmd --reload', false);
+        await execute_argv('firewall-cmd', [`--zone=${zone}`, `--remove-forward-port=${rule}`, '--permanent']);
+        await execute_argv('firewall-cmd', ['--reload']);
         return { success: true, port, toAddr, toPort, protocol, zone };
       },
     };
@@ -285,13 +301,13 @@ export class WizardHandler {
           configPath: string;
         }> = [];
 
-        // Check if hostapd is running
-        const hostapdStatus = await execute_command('systemctl is-active hostapd 2>/dev/null || echo inactive', false);
+        // Check if hostapd is running (argv: exit 0 + "active" means running)
+        const hostapdStatus = await execute_argv('systemctl', ['is-active', 'hostapd']);
         const hostapdActive = hostapdStatus.stdout.trim() === 'active';
 
         for (const configPath of configPaths) {
           try {
-            const result = await execute_command(`cat ${configPath}`, false);
+            const result = await execute_argv('cat', [configPath]);
             if (result.exitCode !== 0) continue;
 
             const content = result.stdout;
@@ -332,11 +348,16 @@ export class WizardHandler {
           ssid: string; password: string; security?: string; band?: string;
         };
         if (!ssid || !password) throw new Error('Missing ssid or password parameter');
+        // SSID/passphrase are written verbatim into the config file — reject
+        // control characters that would corrupt it (or inject extra directives).
+        if (!Validators.isConfigSafeLine(ssid) || !Validators.isConfigSafeLine(password)) {
+          throw new Error('Invalid characters in ssid or password');
+        }
 
         const configPath = band === '5GHz' ? '/etc/hostapd/5Ghz.conf' : '/etc/hostapd/2.4Ghz.conf';
 
         // Read existing config
-        const existing = await execute_command(`cat ${configPath}`, false);
+        const existing = await execute_argv('cat', [configPath]);
         let content = existing.stdout;
 
         // Update SSID and password
@@ -352,9 +373,8 @@ export class WizardHandler {
         }
 
         // Write config and reload
-        await execute_command(`sudo cp ${configPath} ${configPath}.backup`, false);
-        await execute_command(`echo '${content.replace(/'/g, "\\'")}' | sudo tee ${configPath}`, false);
-        await execute_command('sudo systemctl reload hostapd', false);
+        await this.writeRootFile(configPath, content);
+        await execute_argv('sudo', ['systemctl', 'reload', 'hostapd']);
 
         return { success: true, ssid, band };
       },
@@ -363,20 +383,21 @@ export class WizardHandler {
         // For simplicity, we just clear the SSID - in reality you might want to disable the interface
         const { configPath } = params as { configPath: string };
         if (!configPath) throw new Error('Missing configPath parameter');
+        // configPath is wizard-controlled — restrict it to the known hostapd files.
+        if (!ALLOWED_HOSTAPD_CONFIGS.includes(configPath)) throw new Error('Invalid configPath parameter');
 
         // Set SSID to empty or disable
-        const existing = await execute_command(`cat ${configPath}`, false);
-        let content = this.updateHostapdValue(existing.stdout, 'ssid', '');
+        const existing = await execute_argv('cat', [configPath]);
+        const content = this.updateHostapdValue(existing.stdout, 'ssid', '');
 
-        await execute_command(`sudo cp ${configPath} ${configPath}.backup`, false);
-        await execute_command(`echo '${content.replace(/'/g, "\\'")}' | sudo tee ${configPath}`, false);
-        await execute_command('sudo systemctl reload hostapd', false);
+        await this.writeRootFile(configPath, content);
+        await execute_argv('sudo', ['systemctl', 'reload', 'hostapd']);
 
         return { success: true };
       },
 
       reload: async () => {
-        await execute_command('sudo systemctl reload hostapd', false);
+        await execute_argv('sudo', ['systemctl', 'reload', 'hostapd']);
         return { success: true };
       },
     };
@@ -391,7 +412,7 @@ export class WizardHandler {
     return {
       get_credentials: async () => {
         try {
-          const result = await execute_command(`sudo cat ${nmconnectionPath}`, false);
+          const result = await execute_argv('sudo', ['cat', nmconnectionPath]);
           if (result.exitCode !== 0) return { found: false };
 
           const content = result.stdout;
@@ -407,32 +428,35 @@ export class WizardHandler {
       set_credentials: async (params) => {
         const { username, password } = params as { username: string; password: string };
         if (!username || !password) throw new Error('Missing username or password');
+        // Written verbatim into an INI line — reject control characters.
+        if (!Validators.isConfigSafeLine(username) || !Validators.isConfigSafeLine(password)) {
+          throw new Error('Invalid characters in username or password');
+        }
 
         // Read current config
-        const result = await execute_command(`sudo cat ${nmconnectionPath}`, false);
+        const result = await execute_argv('sudo', ['cat', nmconnectionPath]);
         let content = result.stdout;
 
         // Update credentials
         content = this.updateIniValue(content, 'pppoe', 'username', username);
         content = this.updateIniValue(content, 'pppoe', 'password', password);
 
-        // Backup and write
-        await execute_command(`sudo cp ${nmconnectionPath} ${nmconnectionPath}.backup`, false);
-        await execute_command(`echo '${content.replace(/'/g, "\\'")}' | sudo tee ${nmconnectionPath}`, false);
-        await execute_command('sudo chmod 600 ' + nmconnectionPath, false);
+        // Backup and write (via fs → no shell, no injection), then lock down perms
+        await this.writeRootFile(nmconnectionPath, content, 0o600);
+        await execute_argv('sudo', ['chmod', '600', nmconnectionPath]);
 
         return { success: true };
       },
 
       restart: async () => {
-        await execute_command('sudo nmcli connection reload', false);
-        await execute_command('sudo nmcli connection down pppoe-enp6s0.835 || true', false);
-        await execute_command('sudo nmcli connection up pppoe-enp6s0.835', false);
+        await execute_argv('sudo', ['nmcli', 'connection', 'reload']);
+        await execute_argv('sudo', ['nmcli', 'connection', 'down', 'pppoe-enp6s0.835']); // may fail if already down
+        await execute_argv('sudo', ['nmcli', 'connection', 'up', 'pppoe-enp6s0.835']);
         return { success: true };
       },
 
       test_connection: async () => {
-        const result = await execute_command('ip addr show ppp0', false);
+        const result = await execute_argv('ip', ['addr', 'show', 'ppp0']);
         const isUp = result.exitCode === 0 && result.stdout.includes('state UP');
         return { connected: isUp };
       },
@@ -445,7 +469,7 @@ export class WizardHandler {
   private createVmHandlers(): FeatureHandlers {
     return {
       list_vms: async () => {
-        const result = await execute_command('virsh list --all', false);
+        const result = await execute_argv('virsh', ['list', '--all']);
         if (result.exitCode !== 0) throw new Error('Failed to list VMs');
 
         const lines = result.stdout.split('\n').slice(2); // Skip header
@@ -465,21 +489,25 @@ export class WizardHandler {
             const name = parts[1];
             const state = parts.slice(2).join(' ') || 'unknown';
             if (!name) continue;
+            // name comes from virsh output; validate before it is passed back to virsh.
+            if (!Validators.isVmName(name)) continue;
 
-            // Get VM details
-            const [vcpuResult, memResult, autostartResult] = await Promise.all([
-              execute_command(`virsh vcpucount ${name} --current 2>/dev/null || echo 0`, false),
-              execute_command(`virsh dominfo ${name} 2>/dev/null | grep 'Max memory' | awk '{print $3}'`, false),
-              execute_command(`virsh dominfo ${name} 2>/dev/null | grep 'Autostart' | awk '{print $2}'`, false),
+            // Get VM details via argv, parsing the previously piped grep/awk in JS.
+            const [vcpuResult, dominfoResult, xmlResult] = await Promise.all([
+              execute_argv('virsh', ['vcpucount', name, '--current']),
+              execute_argv('virsh', ['dominfo', name]),
+              execute_argv('virsh', ['dumpxml', name]),
             ]);
 
             const cpuCount = parseInt(vcpuResult.stdout.trim()) || 0;
-            const memKb = parseInt(memResult.stdout.trim()) || 0;
-            const autostart = autostartResult.stdout.trim().toLowerCase() === 'enable';
+            const memMatch = dominfoResult.stdout.match(/^Max memory:\s*(\d+)/m);
+            const memKb = memMatch ? parseInt(memMatch[1]) : 0;
+            const autostartMatch = dominfoResult.stdout.match(/^Autostart:\s*(\S+)/m);
+            const autostart = (autostartMatch?.[1] || '').toLowerCase() === 'enable';
 
             // Try to get OS type from domain XML
-            const osResult = await execute_command(`virsh dumpxml ${name} 2>/dev/null | grep -oP '(?<=<os_type>)[^<]+'`, false);
-            const osType = osResult.stdout.trim() || undefined;
+            const osMatch = xmlResult.stdout.match(/<os_type>([^<]+)<\/os_type>/);
+            const osType = osMatch ? osMatch[1].trim() : undefined;
 
             vms.push({
               name,
@@ -498,56 +526,63 @@ export class WizardHandler {
       get_state: async (params) => {
         const { vmName } = params as { vmName: string };
         if (!vmName) throw new Error('Missing vmName parameter');
+        if (!Validators.isVmName(vmName)) throw new Error('Invalid vmName parameter');
 
-        const result = await execute_command(`virsh domstate ${vmName}`, false);
+        const result = await execute_argv('virsh', ['domstate', vmName]);
         return { vmName, state: result.stdout.trim() };
       },
 
       start_vm: async (params) => {
         const { vmName } = params as { vmName: string };
         if (!vmName) throw new Error('Missing vmName parameter');
+        if (!Validators.isVmName(vmName)) throw new Error('Invalid vmName parameter');
 
-        await execute_command(`virsh start ${vmName}`, false);
+        await execute_argv('virsh', ['start', vmName]);
         return { success: true, vmName, action: 'start' };
       },
 
       stop_vm: async (params) => {
         const { vmName } = params as { vmName: string };
         if (!vmName) throw new Error('Missing vmName parameter');
+        if (!Validators.isVmName(vmName)) throw new Error('Invalid vmName parameter');
 
-        await execute_command(`virsh shutdown ${vmName}`, false);
+        await execute_argv('virsh', ['shutdown', vmName]);
         return { success: true, vmName, action: 'stop' };
       },
 
       restart_vm: async (params) => {
         const { vmName } = params as { vmName: string };
         if (!vmName) throw new Error('Missing vmName parameter');
+        if (!Validators.isVmName(vmName)) throw new Error('Invalid vmName parameter');
 
-        await execute_command(`virsh reboot ${vmName}`, false);
+        await execute_argv('virsh', ['reboot', vmName]);
         return { success: true, vmName, action: 'restart' };
       },
 
       force_stop_vm: async (params) => {
         const { vmName } = params as { vmName: string };
         if (!vmName) throw new Error('Missing vmName parameter');
+        if (!Validators.isVmName(vmName)) throw new Error('Invalid vmName parameter');
 
-        await execute_command(`virsh destroy ${vmName}`, false);
+        await execute_argv('virsh', ['destroy', vmName]);
         return { success: true, vmName, action: 'force_stop' };
       },
 
       pause_vm: async (params) => {
         const { vmName } = params as { vmName: string };
         if (!vmName) throw new Error('Missing vmName parameter');
+        if (!Validators.isVmName(vmName)) throw new Error('Invalid vmName parameter');
 
-        await execute_command(`virsh suspend ${vmName}`, false);
+        await execute_argv('virsh', ['suspend', vmName]);
         return { success: true, vmName, action: 'pause' };
       },
 
       resume_vm: async (params) => {
         const { vmName } = params as { vmName: string };
         if (!vmName) throw new Error('Missing vmName parameter');
+        if (!Validators.isVmName(vmName)) throw new Error('Invalid vmName parameter');
 
-        await execute_command(`virsh resume ${vmName}`, false);
+        await execute_argv('virsh', ['resume', vmName]);
         return { success: true, vmName, action: 'resume' };
       },
     };
@@ -557,16 +592,19 @@ export class WizardHandler {
   // SYSTEM HANDLERS
   // ============================================
   private createSystemHandlers(): FeatureHandlers {
+    // NOTE: every command in this group is a fixed literal with NO wizard / MQTT
+    // input. Where a shell is still used (execute_command) it is only for pipes,
+    // redirections or `||` fallbacks — never with an interpolated external value.
     return {
       get_info: async () => {
         const config = getConfigManager().config;
         const [hostname, uptime, kernel, osRelease, cpuInfo, memInfo] = await Promise.all([
-          execute_command('hostname', false),
-          execute_command('uptime -p', false),
-          execute_command('uname -r', false),
+          execute_argv('hostname', []),
+          execute_argv('uptime', ['-p']),
+          execute_argv('uname', ['-r']),
           execute_command('cat /etc/os-release 2>/dev/null || echo "ID=linux"', false),
-          execute_command('lscpu', false),
-          execute_command('free -b', false),
+          execute_argv('lscpu', []),
+          execute_argv('free', ['-b']),
         ]);
 
         // Parse OS name
@@ -582,7 +620,7 @@ export class WizardHandler {
         const memMatch = memLines[1]?.match(/\d+/g);
         const memTotal = memMatch ? parseInt(memMatch[0]) : 0;
 
-        // Parse disk
+        // Parse disk (pipe chain → shell; fixed literal, no external input)
         const diskResult = await execute_command("df -B1 / | tail -1 | awk '{print $2}'", false);
         const diskTotal = parseInt(diskResult.stdout.trim()) || 0;
 
@@ -600,16 +638,16 @@ export class WizardHandler {
 
       get_status: async () => {
         const [cpuStat1, memInfo, diskInfo, loadAvg, temps] = await Promise.all([
-          execute_command("head -1 /proc/stat", false),
-          execute_command("free -b", false),
-          execute_command("df -B1 / | tail -1", false),
-          execute_command("cat /proc/loadavg", false),
-          execute_command("sensors -j 2>/dev/null || echo '{}'", false),
+          execute_argv('head', ['-1', '/proc/stat']),
+          execute_argv('free', ['-b']),
+          execute_command("df -B1 / | tail -1", false), // pipe → shell; fixed literal
+          execute_argv('cat', ['/proc/loadavg']),
+          execute_command("sensors -j 2>/dev/null || echo '{}'", false), // || → shell; fixed literal
         ]);
 
         // Wait 100ms and get second CPU reading for accurate usage
         await new Promise(resolve => setTimeout(resolve, 100));
-        const cpuStat2 = await execute_command("head -1 /proc/stat", false);
+        const cpuStat2 = await execute_argv('head', ['-1', '/proc/stat']);
 
         // Calculate CPU usage
         const parseCpuStat = (line: string) => {
@@ -671,14 +709,15 @@ export class WizardHandler {
       },
 
       check_updates: async () => {
-        await execute_command('sudo apt-get update', false);
+        await execute_argv('sudo', ['apt-get', 'update']);
+        // pipe + redirect → shell; fixed literal, no external input
         const result = await execute_command('apt list --upgradable 2>/dev/null | grep -v "^Listing"', false);
         const updates = result.stdout.trim().split('\n').filter(line => line.length > 0);
         return { count: updates.length, packages: updates };
       },
 
       apply_updates: async () => {
-        await execute_command('sudo apt-get upgrade -y', false);
+        await execute_argv('sudo', ['apt-get', 'upgrade', '-y']);
         return { success: true };
       },
     };
@@ -731,8 +770,31 @@ export class WizardHandler {
   // HELPER METHODS
   // ============================================
 
+  // ---- input validation helpers (throw on invalid wizard input) ----
+
+  private assertPortInputs(zone: string, port: string, protocol: string): void {
+    if (!Validators.isZone(zone)) { rejectInvalid('zone', zone, 'wizard'); throw new Error('Invalid zone parameter'); }
+    if (!Validators.isPort(port)) { rejectInvalid('port', port, 'wizard'); throw new Error('Invalid port parameter'); }
+    if (!Validators.isProtocol(protocol)) { rejectInvalid('protocol', protocol, 'wizard'); throw new Error('Invalid protocol parameter'); }
+  }
+
+  private assertForwardInputs(zone: string, port: string, protocol: string, toPort: string, toAddr: string): void {
+    this.assertPortInputs(zone, port, protocol);
+    if (!Validators.isPort(toPort)) { rejectInvalid('toPort', toPort, 'wizard'); throw new Error('Invalid toPort parameter'); }
+    if (!Validators.isIPv4(toAddr)) { rejectInvalid('toAddr', toAddr, 'wizard'); throw new Error('Invalid toAddr parameter'); }
+  }
+
+  // Atomically replace a root-owned file: write a temp file via fs (no shell),
+  // back up the original, then move the temp into place with sudo.
+  private async writeRootFile(targetPath: string, content: string, mode: number = 0o644): Promise<void> {
+    const tempFile = `/tmp/nivuus_wizard_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    fs.writeFileSync(tempFile, content, { mode });
+    await execute_argv('sudo', ['cp', targetPath, `${targetPath}.backup`]);
+    await execute_argv('sudo', ['mv', tempFile, targetPath]);
+  }
+
   private async getZonePortForwards(zone: string): Promise<Array<{ port: string; proto: string; toport: string; toaddr: string }>> {
-    const result = await execute_command(`firewall-cmd --zone=${zone} --list-forward-ports`, false);
+    const result = await execute_argv('firewall-cmd', [`--zone=${zone}`, '--list-forward-ports']);
     if (result.exitCode !== 0) return [];
 
     const forwards: Array<{ port: string; proto: string; toport: string; toaddr: string }> = [];
@@ -749,24 +811,24 @@ export class WizardHandler {
   }
 
   private async getZoneServices(zone: string): Promise<string[]> {
-    const result = await execute_command(`firewall-cmd --zone=${zone} --list-services`, false);
+    const result = await execute_argv('firewall-cmd', [`--zone=${zone}`, '--list-services']);
     if (result.exitCode !== 0) return [];
     return result.stdout.trim().split(/\s+/).filter(s => s.length > 0);
   }
 
   private async getZonePorts(zone: string): Promise<string[]> {
-    const result = await execute_command(`firewall-cmd --zone=${zone} --list-ports`, false);
+    const result = await execute_argv('firewall-cmd', [`--zone=${zone}`, '--list-ports']);
     if (result.exitCode !== 0) return [];
     return result.stdout.trim().split(/\s+/).filter(p => p.length > 0);
   }
 
   private async getZoneMasquerade(zone: string): Promise<boolean> {
-    const result = await execute_command(`firewall-cmd --zone=${zone} --query-masquerade`, false);
+    const result = await execute_argv('firewall-cmd', [`--zone=${zone}`, '--query-masquerade']);
     return result.exitCode === 0;
   }
 
   private async getZoneTarget(zone: string): Promise<string> {
-    const result = await execute_command(`firewall-cmd --zone=${zone} --get-target`, false);
+    const result = await execute_argv('firewall-cmd', [`--zone=${zone}`, '--get-target']);
     return result.exitCode === 0 ? result.stdout.trim() : 'default';
   }
 

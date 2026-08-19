@@ -12,7 +12,7 @@ const mockedSi = si as jest.Mocked<typeof si>;
 // Mock initializeConfigManager and getConfigManager
 jest.mock('../../../config', () => {
   const actualConfig = jest.requireActual('../../../config');
-  const mockConfigManagerInstance = {
+  const mockConfigManagerInstance: any = {
     config: {
       mqtt: { host: 'localhost', port: 1883, base_topic: 'system_agent' },
       device_info: { name: 'TestDevice', identifiers: ['test-agent-123'], manufacturer: 'Test', model: 'Agent', sw_version: '1.0' },
@@ -69,28 +69,28 @@ describe('CpuTemperature Feature', () => {
 
     let mainTempDiscovery;
     for (const msg of mockMqttClient.publishedMessages) {
-      if (msg.topic.endsWith('cpu_temperature/main_temp/config')) {
+      if (msg.topic.endsWith('cpu_temperature_main_temp/config')) {
         mainTempDiscovery = msg;
         break;
       }
     }
     expect(mainTempDiscovery).toBeDefined();
     const mainPayload = JSON.parse(mainTempDiscovery!.message.toString());
-    expect(mainPayload.name).toBe('TestDevice CPU Temperature');
+    expect(mainPayload.name).toBe('CPU Temperature');
     expect(mainPayload.device_class).toBe('temperature');
     expect(mainPayload.unit_of_measurement).toBe('°C');
     expect(mainPayload.json_attributes_topic).toBeDefined();
 
 
     const core1TempDiscovery = mockMqttClient.publishedMessages.find(
-      msg => msg.topic.endsWith('cpu_temperature/core_1_temp/config')
+      msg => msg.topic.endsWith('cpu_temperature_core_1_temp/config')
     );
     expect(core1TempDiscovery).toBeDefined();
     const core1Payload = JSON.parse(core1TempDiscovery!.message.toString());
-    expect(core1Payload.name).toBe('TestDevice CPU Core 1 Temperature');
+    expect(core1Payload.name).toBe('CPU Core 1 Temperature');
     
     const core2TempDiscovery = mockMqttClient.publishedMessages.find(
-      msg => msg.topic.endsWith('cpu_temperature/core_2_temp/config')
+      msg => msg.topic.endsWith('cpu_temperature_core_2_temp/config')
     );
     expect(core2TempDiscovery).toBeDefined();
 
@@ -127,19 +127,21 @@ describe('CpuTemperature Feature', () => {
     expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 5000);
   }, 15000);
   
-  it('should handle null or -1 main temperature gracefully during initial update', async () => {
+  it('should derive main temperature from cores when main is null or -1', async () => {
     mockedSi.cpuTemperature.mockResolvedValue({
       main: -1, cores: [45.0], max: 80, socket: [], chipset: undefined
     } as si.Systeminformation.CpuTemperatureData);
-    
+
     mockMqttClient.connect();
     await cpuTemperatureFeature.start();
     await new Promise(resolve => process.nextTick(resolve)); // Use process.nextTick
 
+    // Main temp is unavailable (-1), so the feature falls back to the max valid core temp.
     const mainStateMsg = mockMqttClient.publishedMessages.find(
       msg => msg.topic.endsWith('cpu_temperature/main/state')
     );
-    expect(mainStateMsg).toBeUndefined(); 
+    expect(mainStateMsg).toBeDefined();
+    expect(mainStateMsg!.message.toString()).toBe('45.0');
   }, 15000);
 
   it('should handle errors from systeminformation gracefully during initial update', async () => {

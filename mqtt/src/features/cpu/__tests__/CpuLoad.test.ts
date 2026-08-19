@@ -13,7 +13,7 @@ const mockedSi = si as jest.Mocked<typeof si>;
 // Mock initializeConfigManager and getConfigManager
 jest.mock('../../../config', () => {
   const actualConfig = jest.requireActual('../../../config');
-  const mockConfigManagerInstance = {
+  const mockConfigManagerInstance: any = {
     config: {
       mqtt: { host: 'localhost', port: 1883, base_topic: 'system_agent' },
       device_info: { name: 'TestDevice', identifiers: ['test-agent-123'], manufacturer: 'Test', model: 'Agent', sw_version: '1.0' },
@@ -93,18 +93,18 @@ describe('CpuLoad Feature', () => {
     // Check average load discovery
     let avgLoadDiscovery;
     for (const msg of mockMqttClient.publishedMessages) {
-      if (msg.topic.endsWith('cpu_load/avg_load/config')) {
+      if (msg.topic.endsWith('cpu_load_avg_load/config')) {
         avgLoadDiscovery = msg;
         break;
       }
     }
     expect(avgLoadDiscovery).toBeDefined();
     const avgPayload = JSON.parse(avgLoadDiscovery!.message.toString());
-    expect(avgPayload.name).toBe('TestDevice CPU Load Average');
+    expect(avgPayload.name).toBe('CPU Load Average');
 
     // Check core 1 load discovery
     const core1LoadDiscovery = mockMqttClient.publishedMessages.find(
-      msg => msg.topic.endsWith('cpu_load/core_1_load/config')
+      msg => msg.topic.endsWith('cpu_load_core_1_load/config')
     );
     expect(core1LoadDiscovery).toBeDefined();
 

@@ -316,6 +316,91 @@ class DockerClient:
             _LOGGER.error("Error getting logs for %s: %s", container_name, err)
             return None
 
+    async def _recreate_with_image(self, client, existing, new_image: str) -> bool:
+        """Recreate a container identically to itself, only swapping the image.
+
+        Reuses the container's OWN live configuration (from docker inspect):
+        mounts, environment, user, devices, capabilities, network mode, restart
+        policy, exposed/published ports, cmd/entrypoint. This keeps updates
+        generic (nothing installation-specific, no compose re-parsing) and
+        prevents the config loss that would otherwise break a container after
+        an update.
+
+        Env vars, Cmd and Entrypoint baked into the OLD image are not pinned, so
+        the NEW image's own defaults win; only user-supplied overrides are kept.
+
+        Returns True on success. On failure the old container has already been
+        removed, so the caller should fall back to compose-based creation.
+        """
+        attrs = existing.attrs
+        name = (attrs.get("Name") or "").lstrip("/")
+        config = attrs.get("Config", {}) or {}
+        host_config = attrs.get("HostConfig", {}) or {}
+        networks = (attrs.get("NetworkSettings", {}) or {}).get("Networks", {}) or {}
+
+        # Distinguish user-supplied config from what the OLD image baked in, so
+        # the new image can provide its own updated defaults.
+        old_image_cfg = {}
+        try:
+            old_image_cfg = (existing.image.attrs.get("Config", {}) or {})
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+        image_env = old_image_cfg.get("Env", []) or []
+        user_env = [e for e in (config.get("Env", []) or []) if e not in image_env]
+
+        cmd = config.get("Cmd")
+        if cmd == old_image_cfg.get("Cmd"):
+            cmd = None  # inherit from the new image
+        entrypoint = config.get("Entrypoint")
+        if entrypoint == old_image_cfg.get("Entrypoint"):
+            entrypoint = None
+
+        # Ports that must stay exposed for the preserved PortBindings to work.
+        exposed_ports = list((config.get("ExposedPorts") or {}).keys())
+
+        # Stop + remove the old container (config already captured above).
+        try:
+            await asyncio.to_thread(existing.stop, timeout=10)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Could not stop %s before recreate: %s", name, err)
+        await asyncio.to_thread(existing.remove, force=True)
+
+        create_kwargs: dict[str, Any] = {
+            "image": new_image,
+            "name": name,
+            "detach": True,
+            "environment": user_env,
+            "labels": config.get("Labels") or {},
+            "host_config": host_config,
+        }
+        if exposed_ports:
+            create_kwargs["ports"] = exposed_ports
+        if cmd is not None:
+            create_kwargs["command"] = cmd
+        if entrypoint is not None:
+            create_kwargs["entrypoint"] = entrypoint
+        if config.get("User"):
+            create_kwargs["user"] = config["User"]
+        if config.get("WorkingDir"):
+            create_kwargs["working_dir"] = config["WorkingDir"]
+        # Hostname is only settable when not sharing the host/other netns.
+        if config.get("Hostname") and host_config.get("NetworkMode", "") not in ("host",):
+            create_kwargs["hostname"] = config["Hostname"]
+
+        # Re-attach to a user-defined (non-default) network if there is one.
+        first_net = next(iter(networks), None)
+        if first_net and first_net not in ("bridge", "host", "none"):
+            create_kwargs["networking_config"] = await asyncio.to_thread(
+                client.api.create_networking_config,
+                {first_net: client.api.create_endpoint_config()},
+            )
+
+        _LOGGER.info("Recreating %s from its own config with image %s", name, new_image)
+        result = await asyncio.to_thread(client.api.create_container, **create_kwargs)
+        await asyncio.to_thread(client.api.start, result["Id"])
+        _LOGGER.info("Container %s recreated and started", name)
+        return True
+
     async def compose_up(
         self,
         compose_file: Path,
@@ -362,17 +447,20 @@ class DockerClient:
                 try:
                     existing = await asyncio.to_thread(client.containers.get, container_name)
                     if recreate:
-                        # Update path: drop the old container so the new image and
-                        # the restart policy are re-applied on (re)creation below.
-                        _LOGGER.info("Recreating container %s to apply new image", container_name)
+                        # Update path: recreate the container from its OWN live
+                        # config (inspect) with only the image swapped, so every
+                        # runtime setting is preserved. Falls back to building
+                        # from the compose file if that fails.
                         try:
-                            await asyncio.to_thread(existing.stop, timeout=10)
-                        except Exception as err:
+                            if await self._recreate_with_image(client, existing, image):
+                                continue
+                        except Exception as err:  # noqa: BLE001
                             _LOGGER.warning(
-                                "Could not stop %s before recreate: %s", container_name, err
+                                "Inspect-based recreate of %s failed (%s); "
+                                "falling back to compose-based create",
+                                container_name, err,
                             )
-                        await asyncio.to_thread(existing.remove, force=True)
-                        # fall through to (re)create a fresh container below
+                        # container is now removed -> fall through to create below
                     else:
                         if existing.status != "running":
                             await asyncio.to_thread(existing.start)

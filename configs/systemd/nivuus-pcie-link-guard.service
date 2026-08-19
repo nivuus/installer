@@ -1,0 +1,17 @@
+[Unit]
+Description=Nivuus PCIe WiFi link guard (disable ASPM L1 on the ath10k chain)
+Documentation=file:/opt/nivuus/scripts/pcie-wifi-link-guard.sh
+# No ordering against multi-user.target on purpose: combining that with a
+# Before= on a service wanted by it once deleted docker.service's start job
+# (2026-07-16). The script waits for the ath10k devices instead.
+After=sysinit.target
+Before=hostapd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/nivuus-pcie-wifi-link-guard.sh apply
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

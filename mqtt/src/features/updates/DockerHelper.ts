@@ -1,6 +1,6 @@
 // src/features/updates/DockerHelper.ts
 
-import { execute_command } from '../../utils/exec';
+import { execute_argv } from '../../utils/exec';
 import logger from '../../utils/logger';
 import https from 'https';
 import http from 'http';
@@ -33,10 +33,9 @@ export interface ChangelogResult {
  */
 export async function listWatchtowerContainers(): Promise<ContainerInfo[]> {
   const format = '{{.ID}}|{{.Names}}|{{.Image}}';
-  const result = await execute_command(
-    `docker ps --filter label=com.centurylinklabs.watchtower.enable=true --format '${format}'`,
-    false,
-  );
+  const result = await execute_argv('docker', [
+    'ps', '--filter', 'label=com.centurylinklabs.watchtower.enable=true', '--format', format,
+  ]);
 
   if (result.exitCode !== 0 || !result.stdout.trim()) return [];
 
@@ -63,7 +62,7 @@ async function inspectContainer(id: string, name: string, image: string): Promis
     '{{.Config.Image}}',
   ].join('|');
 
-  const result = await execute_command(`docker inspect --format '${format}' ${id}`, false);
+  const result = await execute_argv('docker', ['inspect', '--format', format, id]);
   if (result.exitCode !== 0 || !result.stdout.trim()) return null;
 
   const parts = result.stdout.trim().split('|');
@@ -96,7 +95,7 @@ async function inspectContainer(id: string, name: string, image: string): Promis
  * the running container's image ID with the latest pulled image ID.
  */
 export async function checkContainerUpdate(container: ContainerInfo): Promise<UpdateCheckResult> {
-  const result = await execute_command(`docker pull ${container.image}`, false, 300000);
+  const result = await execute_argv('docker', ['pull', container.image], { timeoutMs: 300000 });
   const output = result.stdout + result.stderr;
 
   if (result.exitCode !== 0 && !/Status:/i.test(output)) {
@@ -122,10 +121,7 @@ export async function checkContainerUpdate(container: ContainerInfo): Promise<Up
  * Gets the full image ID (sha256:...) of a local image.
  */
 async function getImageId(image: string): Promise<string> {
-  const result = await execute_command(
-    `docker inspect --format '{{.Id}}' ${image}`,
-    false,
-  );
+  const result = await execute_argv('docker', ['inspect', '--format', '{{.Id}}', image]);
   return result.exitCode === 0 ? result.stdout.trim() : '';
 }
 
@@ -133,10 +129,9 @@ async function getImageId(image: string): Promise<string> {
  * Reads the version label from a pulled image (not a running container).
  */
 async function getImageVersion(image: string): Promise<string> {
-  const result = await execute_command(
-    `docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' ${image}`,
-    false,
-  );
+  const result = await execute_argv('docker', [
+    'inspect', '--format', '{{index .Config.Labels "org.opencontainers.image.version"}}', image,
+  ]);
   const version = result.stdout.trim();
   return version && version !== '<no value>' ? version : '';
 }
@@ -180,20 +175,18 @@ export async function updateContainer(container: ContainerInfo): Promise<boolean
   }
 
   // Pull the service image via compose
-  const pullResult = await execute_command(
-    `docker compose -f ${container.composeFile} pull ${container.composeService}`,
-    false, 300000,
-  );
+  const pullResult = await execute_argv('docker', [
+    'compose', '-f', container.composeFile, 'pull', container.composeService,
+  ], { timeoutMs: 300000 });
   if (pullResult.exitCode !== 0) {
     logger.error(`Failed to pull ${container.composeService}: ${pullResult.stderr}`);
     return false;
   }
 
   // Recreate the service
-  const upResult = await execute_command(
-    `docker compose -f ${container.composeFile} up -d ${container.composeService}`,
-    false, 300000,
-  );
+  const upResult = await execute_argv('docker', [
+    'compose', '-f', container.composeFile, 'up', '-d', container.composeService,
+  ], { timeoutMs: 300000 });
   if (upResult.exitCode !== 0) {
     logger.error(`Failed to recreate ${container.composeService}: ${upResult.stderr}`);
     return false;
@@ -205,10 +198,9 @@ export async function updateContainer(container: ContainerInfo): Promise<boolean
   const dependents = await getDependentServices(container.composeFile, container.composeService);
   if (dependents.length > 0) {
     logger.info(`Restarting dependent services: ${dependents.join(', ')}`);
-    await execute_command(
-      `docker compose -f ${container.composeFile} restart ${dependents.join(' ')}`,
-      false, 300000,
-    );
+    await execute_argv('docker', [
+      'compose', '-f', container.composeFile, 'restart', ...dependents,
+    ], { timeoutMs: 300000 });
   }
 
   return true;
@@ -218,10 +210,7 @@ export async function updateContainer(container: ContainerInfo): Promise<boolean
  * Finds services that depend on the given service in a compose file.
  */
 async function getDependentServices(composeFile: string, serviceName: string): Promise<string[]> {
-  const result = await execute_command(
-    `docker compose -f ${composeFile} config --format json`,
-    false,
-  );
+  const result = await execute_argv('docker', ['compose', '-f', composeFile, 'config', '--format', 'json']);
   if (result.exitCode !== 0 || !result.stdout.trim()) return [];
 
   try {

@@ -29,6 +29,7 @@ import { StreamingStatus } from '../features/streaming/StreamingStatus';
 import { KvmSplitLockMonitor } from '../features/vm/KvmSplitLockMonitor';
 import { WindowsDiskUsage } from '../features/disk/WindowsDiskUsage';
 import { UpsMonitor } from '../features/ups/UpsMonitor';
+import { HardwareHealth } from '../features/health/HardwareHealth';
 
 type FeatureConstructor = new (mqttClient: MqttClientInterface, featureName: string) => BaseFeature;
 
@@ -55,6 +56,7 @@ const availableFeatures: { [key: string]: FeatureConstructor } = {
   kvm_split_lock_monitor: KvmSplitLockMonitor,
   windows_disk_usage: WindowsDiskUsage,
   ups_monitor: UpsMonitor,
+  hardware_health: HardwareHealth,
 };
 
 export class Agent {

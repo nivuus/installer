@@ -2,7 +2,7 @@
 
 import { BaseFeature } from '../../core/BaseFeature';
 import { MqttClient, HaDiscoveryPayload } from '../../core/types';
-import { execute_command } from '../../utils/exec';
+import { execute_argv } from '../../utils/exec';
 import logger from '../../utils/logger';
 
 interface MotherboardSensors {
@@ -98,7 +98,7 @@ export class MotherboardTemperature extends BaseFeature {
 
   async update(): Promise<void> {
     try {
-      const result = await execute_command('sensors -A', false);
+      const result = await execute_argv('sensors', ['-A']);
 
 
       if (result.exitCode !== 0 || !result.stdout) {

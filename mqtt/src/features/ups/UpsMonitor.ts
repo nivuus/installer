@@ -2,7 +2,7 @@
 
 import { BaseFeature } from '../../core/BaseFeature';
 import { MqttClient, FeatureConfig } from '../../core/types';
-import { execute_command } from '../../utils/exec';
+import { execute_argv } from '../../utils/exec';
 import logger from '../../utils/logger';
 
 interface UpsMonitorConfig extends FeatureConfig {
@@ -129,7 +129,7 @@ export class UpsMonitor extends BaseFeature {
     if (command === 'battery_test' && message === 'TEST') {
       logger.info(`[${this.featureName}] Battery test requested`);
       const upsName = this.upsConfig.ups_name || 'myups@localhost';
-      const result = await execute_command(`upscmd -u admin -p admin ${upsName} test.battery.start`, true);
+      const result = await execute_argv('upscmd', ['-u', 'admin', '-p', 'admin', upsName, 'test.battery.start']);
       if (result.exitCode === 0) {
         logger.info(`[${this.featureName}] Battery test initiated`);
       } else {
@@ -172,7 +172,7 @@ export class UpsMonitor extends BaseFeature {
   }
 
   private async fetchUpsData(upsName: string): Promise<UpsData | null> {
-    const result = await execute_command(`upsc ${upsName}`, false);
+    const result = await execute_argv('upsc', [upsName]);
     if (result.exitCode !== 0) {
       logger.error(`[${this.featureName}] Failed to query UPS: ${result.stderr}`);
       await this.publishState(`${this.featureName}/status/state`, 'unavailable', true);
@@ -270,7 +270,7 @@ export class UpsMonitor extends BaseFeature {
   private async triggerShutdown(): Promise<void> {
     const script = this.upsConfig.shutdown_script || '/opt/mqtt-system-agent/scripts/ups-shutdown.sh';
     logger.warn(`[${this.featureName}] Triggering graceful shutdown via ${script}`);
-    const result = await execute_command(`sudo ${script}`, true);
+    const result = await execute_argv('sudo', [script]);
     if (result.exitCode !== 0) {
       logger.error(`[${this.featureName}] Shutdown script failed: ${result.stderr}`);
     }

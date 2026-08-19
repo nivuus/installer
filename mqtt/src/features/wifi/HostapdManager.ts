@@ -2,8 +2,10 @@
 
 import { BaseFeature } from '../../core/BaseFeature';
 import { MqttClient, FeatureConfig } from '../../core/types';
-import { execute_command } from '../../utils/exec';
+import { execute_argv } from '../../utils/exec';
+import { Validators } from '../../utils/validators';
 import logger from '../../utils/logger';
+import * as fs from 'fs';
 
 interface HostapdManagerFeatureConfig extends FeatureConfig {
   config_paths?: string[]; // Changed from config_path to config_paths, array of paths
@@ -164,9 +166,19 @@ export class HostapdManager extends BaseFeature {
       await this.publishState(`${this.featureName}/last_action/state`, 'Adding new hotspot...', true);
 
       // Read current form values from MQTT state
-      const ssidResult = await execute_command(`mosquitto_sub -h 192.168.0.1 -u mqtt -P CHANGE_ME_MQTT_PASSWORD -t "${this.prefixTopic(`${this.featureName}/new_ssid_input/state`)}" -C 1 -W 1`, false);
-      const passwordResult = await execute_command(`mosquitto_sub -h 192.168.0.1 -u mqtt -P CHANGE_ME_MQTT_PASSWORD -t "${this.prefixTopic(`${this.featureName}/new_password_input/state`)}" -C 1 -W 1`, false);
-      const securityResult = await execute_command(`mosquitto_sub -h 192.168.0.1 -u mqtt -P CHANGE_ME_MQTT_PASSWORD -t "${this.prefixTopic(`${this.featureName}/new_security_select/state`)}" -C 1 -W 1`, false);
+      // Broker credentials come from the agent config (env-overridable via
+      // MQTT_PASSWORD) — never hard-coded in source.
+      const mqtt = this.agentConfig.mqtt;
+      const mqttArgs = (topic: string) => {
+        const args = ['-h', mqtt.host, '-p', String(mqtt.port)];
+        if (mqtt.username) args.push('-u', mqtt.username);
+        if (mqtt.password) args.push('-P', mqtt.password);
+        args.push('-t', topic, '-C', '1', '-W', '1');
+        return args;
+      };
+      const ssidResult = await execute_argv('mosquitto_sub', mqttArgs(this.prefixTopic(`${this.featureName}/new_ssid_input/state`)));
+      const passwordResult = await execute_argv('mosquitto_sub', mqttArgs(this.prefixTopic(`${this.featureName}/new_password_input/state`)));
+      const securityResult = await execute_argv('mosquitto_sub', mqttArgs(this.prefixTopic(`${this.featureName}/new_security_select/state`)));
 
       const newSsid = ssidResult.stdout.trim() || 'NewNetwork';
       const newPassword = passwordResult.stdout.trim() || 'password123';
@@ -221,7 +233,7 @@ export class HostapdManager extends BaseFeature {
 
   // Add a new network as BSS to a config file
   private async addNetworkToConfig(filePath: string, ssid: string, password: string, securityType: SecurityType): Promise<void> {
-    const readResult = await execute_command(`cat ${filePath}`, false);
+    const readResult = await execute_argv('cat', [filePath]);
     if (readResult.exitCode !== 0) {
       throw new Error(`Failed to read config file: ${filePath}`);
     }
@@ -264,11 +276,12 @@ export class HostapdManager extends BaseFeature {
     updatedLines.push(...lines);
     updatedLines.push(...bssSection);
 
-    // Backup and write
-    await execute_command(`sudo cp ${filePath} ${filePath}.backup`, false);
+    // Backup and write. The temp file is written via fs (no shell → the SSID /
+    // passphrase cannot inject a command), then moved into place with sudo.
+    await execute_argv('sudo', ['cp', filePath, `${filePath}.backup`]);
     const tempFile = `/tmp/hostapd_${Date.now()}.conf`;
-    await execute_command(`echo '${updatedLines.join('\n').replace(/'/g, "'\\''")}' > ${tempFile}`, false);
-    await execute_command(`sudo mv ${tempFile} ${filePath}`, false);
+    fs.writeFileSync(tempFile, updatedLines.join('\n'));
+    await execute_argv('sudo', ['mv', tempFile, filePath]);
 
     logger.info(`Added new network ${ssid} to ${filePath} as ${newBssInterface}`);
   }
@@ -277,7 +290,7 @@ export class HostapdManager extends BaseFeature {
     try {
       await this.publishState(`${this.featureName}/last_action/state`, 'Reloading hostapd...', true);
 
-      await execute_command('sudo systemctl reload hostapd', false);
+      await execute_argv('sudo', ['systemctl', 'reload', 'hostapd']);
 
       await this.publishState(`${this.featureName}/last_action/state`, 'Hostapd reloaded successfully', true);
 
@@ -385,9 +398,18 @@ export class HostapdManager extends BaseFeature {
       return 'SSID must be between 1 and 32 characters';
     }
 
+    // Reject control characters that would corrupt the hostapd config file
+    // (values are written verbatim as `ssid=` / passphrase lines).
+    if (!Validators.isConfigSafeLine(ssid)) {
+      return 'SSID contains invalid characters';
+    }
+
     if (securityType !== 'Open') {
       if (!password || password.length < 8 || password.length > 63) {
         return 'Password must be between 8 and 63 characters for secured networks';
+      }
+      if (!Validators.isConfigSafeLine(password)) {
+        return 'Password contains invalid characters';
       }
     }
 
@@ -397,7 +419,7 @@ export class HostapdManager extends BaseFeature {
   // Update a specific network in a config file
   private async updateConfigFile(filePath: string, oldSsid: string, newSsid: string, newPassword: string, newSecurityType: SecurityType): Promise<void> {
     // Read config file
-    const readResult = await execute_command(`cat ${filePath}`, false);
+    const readResult = await execute_argv('cat', [filePath]);
     if (readResult.exitCode !== 0) {
       throw new Error(`Failed to read config file: ${filePath}`);
     }
@@ -470,18 +492,19 @@ export class HostapdManager extends BaseFeature {
       throw new Error(`Network ${oldSsid} not found in ${filePath}`);
     }
 
-    // Backup and write
-    await execute_command(`sudo cp ${filePath} ${filePath}.backup`, false);
+    // Backup and write. The temp file is written via fs (no shell → the SSID /
+    // passphrase cannot inject a command), then moved into place with sudo.
+    await execute_argv('sudo', ['cp', filePath, `${filePath}.backup`]);
     const tempFile = `/tmp/hostapd_${Date.now()}.conf`;
-    await execute_command(`echo '${updatedLines.join('\n').replace(/'/g, "'\\''")}' > ${tempFile}`, false);
-    await execute_command(`sudo mv ${tempFile} ${filePath}`, false);
+    fs.writeFileSync(tempFile, updatedLines.join('\n'));
+    await execute_argv('sudo', ['mv', tempFile, filePath]);
 
     logger.info(`Updated network ${oldSsid} -> ${newSsid} in ${filePath}`);
   }
 
   // Remove a network from a config file
   private async removeNetworkFromConfig(filePath: string, ssid: string): Promise<void> {
-    const readResult = await execute_command(`cat ${filePath}`, false);
+    const readResult = await execute_argv('cat', [filePath]);
     if (readResult.exitCode !== 0) {
       throw new Error(`Failed to read config file: ${filePath}`);
     }
@@ -524,11 +547,12 @@ export class HostapdManager extends BaseFeature {
       updatedLines.push(line);
     }
 
-    // Backup and write
-    await execute_command(`sudo cp ${filePath} ${filePath}.backup`, false);
+    // Backup and write. The temp file is written via fs (no shell → the SSID /
+    // passphrase cannot inject a command), then moved into place with sudo.
+    await execute_argv('sudo', ['cp', filePath, `${filePath}.backup`]);
     const tempFile = `/tmp/hostapd_${Date.now()}.conf`;
-    await execute_command(`echo '${updatedLines.join('\n').replace(/'/g, "'\\''")}' > ${tempFile}`, false);
-    await execute_command(`sudo mv ${tempFile} ${filePath}`, false);
+    fs.writeFileSync(tempFile, updatedLines.join('\n'));
+    await execute_argv('sudo', ['mv', tempFile, filePath]);
 
     logger.info(`Removed network ${ssid} from ${filePath}`);
   }
@@ -743,7 +767,7 @@ export class HostapdManager extends BaseFeature {
 
     for (const configPath of configPaths) {
       try {
-        const configFileContent = await execute_command(`cat ${configPath}`, false);
+        const configFileContent = await execute_argv('cat', [configPath]);
         if (configFileContent.exitCode === 0 && !configFileContent.stderr) {
           const networksFromFile = this.parseNetworkConfig(configFileContent.stdout, configPath);
           networksFromFile.forEach((network, ssid) => {
@@ -851,7 +875,7 @@ export class HostapdManager extends BaseFeature {
 
     for (const configPath of configPaths) {
       try {
-        const configFileContent = await execute_command(`cat ${configPath}`, false);
+        const configFileContent = await execute_argv('cat', [configPath]);
         if (configFileContent.exitCode !== 0 || configFileContent.stderr) {
             logger.error(`Error reading hostapd config ${configPath}: ${configFileContent.stderr || `Exit code ${configFileContent.exitCode}`}`);
             errorOccurred = true;

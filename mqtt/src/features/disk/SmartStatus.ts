@@ -2,7 +2,7 @@
 
 import { BaseFeature } from '../../core/BaseFeature';
 import { MqttClient, FeatureConfig } from '../../core/types';
-import { execute_command } from '../../utils/exec';
+import { execute_argv } from '../../utils/exec';
 import * as si from 'systeminformation'; // Keep for si.blockDevices if still used by getMonitoredDisks and potentially for SiDisksIoData type if needed elsewhere
 import logger from '../../utils/logger';
 import { getNativeDiskIOStats, DiskIOStats as NativeDiskIOStats } from '../../utils/diskStats';
@@ -297,7 +297,7 @@ export class SmartStatus extends BaseFeature {
         // Get all SMART data in JSON format (requires sudo)
         logger.debug(`[${this.featureName}] Getting SMART data (JSON) for /dev/${diskName}`);
         // Using -j for JSON output. -H (health) and -A (attributes) are implicitly included or can be derived from full JSON.
-        const smartctlOutput = await execute_command(`sudo smartctl -j -a /dev/${diskName}`, true); 
+        const smartctlOutput = await execute_argv('sudo', ['smartctl', '-j', '-a', `/dev/${diskName}`]);
         logger.debug(`[${this.featureName}] SMART JSON output for /dev/${diskName}:`, smartctlOutput.stdout);
 
         // Check if stdout is valid

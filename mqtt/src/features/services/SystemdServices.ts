@@ -2,7 +2,8 @@
 
 import { BaseFeature } from '../../core/BaseFeature';
 import { MqttClient, HaDiscoveryPayload } from '../../core/types';
-import { execute_command } from '../../utils/exec';
+import { execute_argv } from '../../utils/exec';
+import { Validators, rejectInvalid } from '../../utils/validators';
 import logger from '../../utils/logger';
 import * as fs from 'fs';
 
@@ -99,7 +100,12 @@ export class SystemdServices extends BaseFeature {
     debugLog(`checkService(${serviceName}) called`);
     try {
       debugLog(`Executing systemctl is-active ${serviceName}.service`);
-      const result = await execute_command(`systemctl is-active ${serviceName}.service`, false);
+      const unit = `${serviceName}.service`;
+      if (!Validators.isSystemdUnit(unit)) {
+        rejectInvalid('systemd_unit', unit, 'systemd_services');
+        return;
+      }
+      const result = await execute_argv('systemctl', ['is-active', unit]);
       const serviceId = serviceName.toLowerCase().replace(/[^a-z0-9]/g, '_');
 
       const state = result.stdout?.trim() || 'unknown';
@@ -174,7 +180,12 @@ export class SystemdServices extends BaseFeature {
     logger.info(`Restarting service: ${serviceName}`);
 
     try {
-      const result = await execute_command(`sudo systemctl restart ${serviceName}.service`, false);
+      const unit = `${serviceName}.service`;
+      if (!Validators.isSystemdUnit(unit)) {
+        rejectInvalid('systemd_unit', unit, 'systemd_services');
+        return;
+      }
+      const result = await execute_argv('sudo', ['systemctl', 'restart', unit]);
 
       if (result.exitCode === 0) {
         logger.info(`Service ${serviceName} restarted successfully`);

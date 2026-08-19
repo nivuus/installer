@@ -1,7 +1,7 @@
 # VM-aware CPU power mode
 
 **Date**: 2026-07-22 (extended the same day with the C-state dimension)
-**Status**: implemented 2026-07-22 (mode-aware script, nivuus-cpu-latency + nivuus-cpu-mode@ units, hooks wired, `intel_idle.max_cstate=3` removed from the default BLS entry). Reboot-pending: verification steps 3/4/6/9 (deep C-states, idle package power, boot resolving to idle) — all require the cmdline change to take effect. Live-verified: mode switching, PM QoS constraint (250 µs), EPP persistence.
+**Status**: implemented and fully verified (2026-07-22 build, 2026-07-23 post-reboot verification). All verification steps pass: mode switching + PM QoS 250 µs + EPP persistence (live), deep C-states exist and are entered (`CPU%c7`≈35 % vs 0.00), hooks flip gaming↔idle end-to-end on a real VM cycle, boot resolves to idle. **Idle package power 8.6 W vs the 12.7 W baseline (−32 %)** measured 2026-07-23 on the always-on host; `Pkg%pc2` now non-zero (`Pkg%pc6` stays 0 — the always-on services never idle all cores at once, the per-core savings already deliver the −32 %). Only the thermald follow-up remains.
 
 ## Problem
 

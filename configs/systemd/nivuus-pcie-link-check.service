@@ -1,0 +1,13 @@
+[Unit]
+Description=Nivuus PCIe WiFi link check (sample AER counters)
+Documentation=file:/opt/nivuus/scripts/pcie-wifi-link-guard.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nivuus-pcie-wifi-link-guard.sh check
+# Alerts go to stderr so journald records them at error priority and syncs them
+# to disk immediately — a buffered message would be lost in the freeze it is
+# meant to explain.
+StandardError=journal
+Nice=10
+TimeoutStartSec=60

@@ -1,6 +1,6 @@
 // src/utils/vmState.ts
 
-import { execute_command } from './exec';
+import { execute_argv } from './exec';
 import logger from './logger';
 
 let cachedState: { state: string; timestamp: number } | null = null;
@@ -12,7 +12,7 @@ export async function isWindowsVmRunning(): Promise<boolean> {
     return cachedState.state === 'running';
   }
   try {
-    const result = await execute_command('virsh -c qemu:///system domstate Windows', false);
+    const result = await execute_argv('virsh', ['-c', 'qemu:///system', 'domstate', 'Windows']);
     const state = result.stdout.trim();
     cachedState = { state, timestamp: now };
     return state === 'running';

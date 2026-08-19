@@ -3,6 +3,7 @@
 import { BaseFeature } from '../../core/BaseFeature';
 import { MqttClient, FeatureConfig } from '../../core/types';
 import { execute_command } from '../../utils/exec';
+import { Validators } from '../../utils/validators';
 import { MacVendorLookup } from '../../utils/macVendor';
 import logger from '../../utils/logger';
 
@@ -228,6 +229,10 @@ export class ConnectedDevices extends BaseFeature {
 
   private async resolveHostname(ip: string): Promise<string | undefined> {
     try {
+      // Defence in depth: only ever pass a strict dotted-quad to the shell
+      // lookups below. IPs already come from strict regexes, but guard anyway.
+      if (!Validators.isIPv4(ip)) return undefined;
+
       // Skip common Docker/virtual IPs to avoid unnecessary timeouts
       if (ip.startsWith('172.17.') || ip.startsWith('172.18.') || ip.startsWith('172.19.') || 
           ip.startsWith('172.20.') || ip.startsWith('169.254.') || ip === '127.0.0.1') {
