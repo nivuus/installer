@@ -129,6 +129,22 @@ check("marker no longer disables autologon", "AutoAdminLogon" in marker, False)
 check("marker verifies the agent session", "agent-session.txt" in marker, True)
 check("marker verifies Apollo runs", "ApolloService" in marker, True)
 check("marker verifies Steam", "steam.exe" in marker, True)
+# FIX 1 (review round 1): the closing stage is the LAST place a loose match
+# belongs - it must match the same precise hardware ID as 25-apollo.ps1, not
+# a ROOT\DISPLAY\* wildcard that would accept any root-enumerated display.
+check("marker matches the virtual display by its precise hardware ID",
+      "Root\\SudoMaker\\SudoVDA" in marker, True)
+check("marker no longer uses the loose ROOT\\DISPLAY\\* wildcard",
+      "ROOT\\DISPLAY\\*" in marker, False)
+# FIX 2 (review round 1): the session file only proves the agent ran once, at
+# stage-40 time. The durable property is that it will run again - a
+# registered, enabled scheduled task - not that agent.exe is alive right now
+# (it legitimately exits when it cannot reach its signalling server, which is
+# not part of this appliance, so a live-process check would be flaky).
+check("marker verifies the agent scheduled task is registered",
+      "Get-ScheduledTask" in marker, True)
+check("marker verifies the agent task is not disabled",
+      "-eq 'Disabled'" in marker, True)
 # 5985 opens last, after every check: the host reads a reachable 5985 as
 # "provisioned", and a premature open already lied once.
 check("marker opens 5985 last",
@@ -150,10 +166,24 @@ apollo_stage = texts["25-apollo.ps1"]
 check("Apollo config is junctioned", "mklink /J" in apollo_stage, True)
 check("Apollo install location is read, not assumed",
       "InstallLocation" in apollo_stage, True)
+# FIX 3 (review round 1): 20-sudovda.ps1's certificate-trust coverage moved
+# here, not away - install.bat seeds the driver's own certificate. Assert the
+# behaviour follows the file it moved into, instead of evaporating with the
+# file that used to hold it.
+check("Apollo runs the bundled SudoVDA installer (certificate trust delegated to it)",
+      "install.bat" in apollo_stage, True)
 
 # Every stage must accept the payload root, or run-all cannot drive it.
 for name in STAGES:
     check(f"{name} takes PayloadRoot", "$PayloadRoot" in texts[name], True)
+
+# FIX 4 (review round 1): the converse guard. A stage dropped on disk and
+# forgotten in STAGES/run-all's $stages would be silently skipped by
+# run-all.ps1 (it only indexes the named array, never globs the directory)
+# with nothing anywhere reporting it.
+disk_stages = sorted(p.name for p in PROVISION.glob("*.ps1") if p.name != "run-all.ps1")
+check("every provision stage on disk is listed in STAGES",
+      all(name in STAGES for name in disk_stages), True)
 
 if failures:
     print(f"FAIL ({len(failures)})")
