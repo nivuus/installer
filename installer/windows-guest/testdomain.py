@@ -110,7 +110,9 @@ def assert_gpu_free() -> None:
 
 
 def create_disk(path: str = DISK_PATH, size_gib: int = 120) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    # qemu runs as libvirt-qemu and must traverse this directory; libvirt's
+    # dynamic ownership fixes the image file but never its parent.
+    Path(path).parent.mkdir(parents=True, exist_ok=True, mode=0o755)
     if Path(path).exists():
         raise DomainError(f"{path} already exists; run teardown first")
     subprocess.run(["qemu-img", "create", "-f", "qcow2", path, f"{size_gib}G"],

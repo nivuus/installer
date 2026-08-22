@@ -2604,6 +2604,66 @@ reproduirait les défauts qu'ils corrigent — lire `git log` comme référence.
 | 11 | `provision/99-marker.ps1` | `Copy-Item -Destination 'C:\nivuus\probe'` | **`-Destination 'C:\nivuus'`** : le chemin `\probe` imbriquait en `...\probe\probe` quand la destination existait déjà (ce qui est le cas courant, `C:\nivuus` étant créé par `00-bootstrap.ps1`) |
 | 12 | `testdomain.py` | `assert_gpu_free()` ne vérifiait que l'état du domaine `Windows`, aucun contrôle des détenteurs de `/dev/nvidia*` | **`gpu_holders()` ajoutée**, refusant le `define` si un processus tient encore `/dev/nvidia*` — ce domaine jetable n'a aucun hook libvirt pour les arrêter, contrairement à la VM de production. Mesuré en conditions réelles sur cet hôte : `find /proc -lname '/dev/nvidia*'` (les deux formes, y compris celle documentée dans `CLAUDE.md`) **sort en erreur systématiquement pour des raisons sans rapport avec un vrai détenteur** ; un `returncode != 0` interprété comme un échec de scan aurait donc refusé tout `define`, même GPU libre. L'énumération est en Python pur (`os.listdir`/`glob.glob`/`os.readlink`), sans code de retour à mésinterpréter, et n'échoue que si `/proc` lui-même est illisible |
 
+## Pièges découverts au premier démarrage réel (2026-08-22)
+
+Quatre défauts que **seul un vrai démarrage pouvait révéler** — ni les tests, ni
+`virt-xml-validate`, ni la revue finale ne pouvaient les voir.
+
+### 1. Le média Windows exige une frappe clavier pour démarrer — bloquant
+
+Premier démarrage : `Press any key to boot from CD or DVD......`, puis le délai
+expire et `BdsDxe: No bootable option or device was found.` L'installation ne
+commence jamais. C'est le comportement normal de l'image d'amorçage UEFI que
+Microsoft place sur ses médias (`efisys.bin`), qui attend une touche.
+
+**Contournement retenu ici** : après `virsh start`, envoyer des frappes pendant
+la fenêtre d'amorçage —
+
+```bash
+for i in $(seq 1 60); do virsh send-key <domaine> KEY_ENTER; sleep 0.5; done
+```
+
+**Ce n'est pas une solution durable** : c'est un geste de l'hôte, pas une
+propriété du média. Pour le sous-projet D, deux vraies options : remplacer
+l'image d'amorçage El Torito du média par `efisys_noprompt.bin` — mais on a
+justement renoncé à reconstruire le média (voir l'écart UDF / 4 GiB) — ou
+intégrer l'envoi de frappes à l'étape du moteur qui démarre l'invité. La seconde
+est cohérente avec l'architecture à deux médias.
+
+### 2. `<driver name='vfio'/>` est obligatoire dans les `hostdev`
+
+Sans lui, `virsh start` échoue sur « l'hôte ne prend pas en charge le
+passe-système des périphériques PCI » : libvirt retombe sur le backend hérité,
+supprimé depuis longtemps. Le domaine de production le déclare ; le template ne
+le faisait pas. `virt-xml-validate` ne pouvait pas l'attraper — il valide le
+schéma, pas la sémantique. Corrigé, avec une assertion de non-régression.
+
+### 3. `create_disk` créait un répertoire que qemu ne peut pas traverser
+
+`Path(path).parent.mkdir(...)` sans mode donne `drwxr-x--- root:root` ; qemu
+tourne en `libvirt-qemu` et échoue sur « Permission non accordée ». La propriété
+dynamique de libvirt corrige le fichier image, **jamais son répertoire parent**.
+Corrigé : `mode=0o755`.
+
+### 4. Le durcissement de l'ISO se retourne contre lui-même
+
+Le correctif I2 met l'ISO en `0600` dans un répertoire `0700` — ce qui empêche
+aussi qemu de la lire. Résolu par ACL, qui préserve l'intention (l'ISO reste
+illisible pour tout le monde d'autre) en n'accordant que le principal qui en a
+besoin :
+
+```bash
+setfacl -m u:libvirt-qemu:x /media/data/iso
+setfacl -m u:libvirt-qemu:r /media/data/iso/nivuus-unattend.iso
+```
+
+À intégrer dans `build.py` : poser l'ACL à l'écriture, plutôt que de laisser
+l'opérateur la découvrir au premier démarrage.
+
+⚠️ Noté au passage : libvirt applique sa propriété dynamique **au média LTSC
+lui-même** (`mallanic` → `libvirt-qemu`) et ne la rend pas si le démarrage échoue
+en cours de route. Le rétablir fait partie du démontage.
+
 ### Levée des vérifications dues (2026-08-22, après fusion)
 
 Les trois points laissés en suspens ci-dessus ont été traités :

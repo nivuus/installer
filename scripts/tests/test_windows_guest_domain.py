@@ -76,6 +76,12 @@ check("e1000e nic (no inbox virtio driver)", nic.get("type"), "e1000e")
 
 addrs = [h.find("source/address") for h in root.findall("devices/hostdev")]
 slots = sorted((a.get("bus"), a.get("slot"), a.get("function")) for a in addrs)
+# Without an explicit vfio backend libvirt falls back to the removed legacy
+# one and refuses to start the domain with "host doesn't support passthrough
+# of host PCI devices" - a semantic failure virt-xml-validate cannot catch.
+drivers = [h.find("driver") for h in root.findall("devices/hostdev")]
+check("every hostdev names the vfio backend",
+      [d is not None and d.get("name") == "vfio" for d in drivers], [True, True])
 check("gpu and its audio function are passed", slots,
       [("0x01", "0x00", "0x0"), ("0x01", "0x00", "0x1")])
 # The Samsung NVMe stays with the production VM: Server 2022 is the rollback.
