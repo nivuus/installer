@@ -15,20 +15,41 @@ $MinDataGiB = 100
 $DataMarker = 'D:\state\NIVUUS-DATA.id'
 
 # The answer file assigns D: on a fresh install. On a rebuild the letter can
-# drift, so repair it from the volume label rather than assume it.
+# drift. Repair it by label first (which persists across rebuilds), or by
+# size as a fallback.
 if (-not (Test-Path 'D:\')) {
-    # Use -not $_.DriveLetter (not $_.DriveLetter -eq $null) because Get-Partition
-    # returns an unassigned partition's DriveLetter as [char]0, not $null.
-    # -not is true for both, so this correctly matches unlettered partitions.
+    # Try to find an unlettered partition with label "Data" — the most reliable
+    # discriminator, since the answer file labels it and rebuilds preserve labels.
     $part = Get-Partition | Where-Object {
-        -not $_.DriveLetter -and $_.Size -gt ($MinDataGiB * 1GB)
-    } | Sort-Object -Property Size -Descending | Select-Object -First 1
-    if (-not $part) { throw 'no unlettered volume large enough to be D:' }
+        -not $_.DriveLetter -and $_.AccessPaths -match 'Data'
+    } | Select-Object -First 1
+
+    if (-not $part) {
+        # Fallback: select the largest unlettered partition if it meets size.
+        # Use -ge to match the validation below, so a 100 GiB partition is accepted.
+        $part = Get-Partition | Where-Object {
+            -not $_.DriveLetter -and $_.Size -ge ($MinDataGiB * 1GB)
+        } | Sort-Object -Property Size -Descending | Select-Object -First 1
+        if (-not $part) { throw 'no unlettered volume large enough to be D:' }
+        Write-Host "D: assignment: using size heuristic (label not found)"
+    }
+    else {
+        Write-Host "D: assignment: using label-based detection"
+    }
     Write-Host "assigning D: to partition $($part.PartitionNumber)"
     Set-Partition -InputObject $part -NewDriveLetter D
 }
 
-$vol = Get-Volume -DriveLetter D
+# Poll for the volume to appear after assignment, with a 10-second timeout.
+# Set-Partition is generally synchronous, but enumeration is not guaranteed.
+$deadline = (Get-Date).AddSeconds(10)
+$vol = $null
+while ((Get-Date) -lt $deadline) {
+    $vol = Get-Volume -DriveLetter D -ErrorAction SilentlyContinue
+    if ($vol) { break }
+    Start-Sleep -Milliseconds 500
+}
+if (-not $vol) { throw "D: drive not found in volume enumeration after 10 seconds" }
 if ($vol.FileSystem -ne 'NTFS') {
     throw "D: is $($vol.FileSystem), expected NTFS - wrong volume?"
 }
@@ -53,5 +74,9 @@ if (-not (Test-Path $DataMarker)) {
     Write-Host 'D: initialised (first install)'
 }
 else {
-    Write-Host "D: carries an existing Nivuus marker: $((Get-Content $DataMarker)[1])"
+    # Read the marker file and extract the created line explicitly (not by indexing,
+    # which would read characters from a single-line file).
+    $content = @(Get-Content $DataMarker -ErrorAction SilentlyContinue)
+    $createdLine = if ($content.Count -ge 2) { $content[1] } else { '(corrupted)' }
+    Write-Host "D: carries an existing Nivuus marker: $createdLine"
 }
