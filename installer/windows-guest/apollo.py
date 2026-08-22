@@ -30,7 +30,6 @@ from jinja2 import Environment, FileSystemLoader
 TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 
 STEAM_DIR = "D:\\Steam"
-STATE_DIR = "D:\\state\\apollo"
 
 
 class ApolloError(ValueError):
@@ -39,10 +38,13 @@ class ApolloError(ValueError):
 
 @dataclass(frozen=True)
 class ApolloParams:
-    ui_username: str
-    ui_password: str
+    # render_conf() takes no parameters (sunshine.conf carries no path and
+    # no secret); render_apps() reads steam_dir. Web-manager credentials and
+    # the D:\state\apollo path used to live here too, but nothing read them
+    # - render_secrets() takes its own arguments and never touches this
+    # object, and the state path is a literal in 25-apollo.ps1. Keep only
+    # what a renderer actually reads.
     steam_dir: str = STEAM_DIR
-    state_dir: str = STATE_DIR
 
 
 def _env() -> Environment:
@@ -51,7 +53,7 @@ def _env() -> Environment:
                        keep_trailing_newline=True)
 
 
-def render_conf(params: ApolloParams) -> str:
+def render_conf() -> str:
     # sunshine.conf carries no path and no secret: the config directory is a
     # junction to D:, so Apollo's own relative defaults already land there.
     return _env().get_template("sunshine.conf.j2").render()

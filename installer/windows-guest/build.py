@@ -67,6 +67,8 @@ def parse_args(argv=None):
     ap.add_argument("--key-file", default=DEFAULT_KEY_FILE)
     ap.add_argument("--password-file", default=DEFAULT_PASSWORD_FILE)
     ap.add_argument("--apollo-password-file", default=DEFAULT_APOLLO_PASSWORD_FILE)
+    # A username, not a secret - deliberately fine on argv/in --help. Only
+    # the Apollo web-manager PASSWORD comes from a mode-0600 file, below.
     ap.add_argument("--apollo-user", default="nivuus")
     ap.add_argument("--disk-mode", default="wipe",
                     choices=list(autounattend.DISK_MODES),
@@ -138,10 +140,8 @@ def main(argv=None) -> int:
             # secrets file must never exist on disk outside this build.
             config = Path(tmp) / "config"
             config.mkdir()
-            ap_params = apollo.ApolloParams(ui_username=args.apollo_user,
-                                            ui_password=apollo_password)
-            (config / "sunshine.conf").write_text(apollo.render_conf(ap_params))
-            (config / "apps.json").write_text(apollo.render_apps(ap_params))
+            (config / "sunshine.conf").write_text(apollo.render_conf())
+            (config / "apps.json").write_text(apollo.render_apps(apollo.ApolloParams()))
             (config / "secrets.psd1").write_text(
                 apollo.render_secrets(password, args.apollo_user, apollo_password))
             sources = payload.PayloadSources(

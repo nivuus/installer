@@ -34,8 +34,15 @@ def check_raises(label, exc_type, fn):
     failures.append(f"{label}: raised nothing, want {exc_type.__name__}")
 
 
-params = apollo.ApolloParams(ui_username="nivuus", ui_password="p4ssw0rd")
-conf = apollo.render_conf(params)
+# FIX 9 (final review): ApolloParams used to carry ui_username/ui_password/
+# state_dir, none of which any renderer read - render_secrets() takes its
+# own arguments and never touches the object. Pin that the dead fields stay
+# gone, not just that the surviving one (steam_dir) still works.
+check_raises("ApolloParams no longer accepts ui_username", TypeError,
+             lambda: apollo.ApolloParams(ui_username="nivuus"))
+
+params = apollo.ApolloParams()
+conf = apollo.render_conf()
 conf_map = {}
 for raw in conf.splitlines():
     raw = raw.strip()
