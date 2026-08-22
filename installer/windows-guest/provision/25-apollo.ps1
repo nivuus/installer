@@ -88,17 +88,44 @@ New-Item -ItemType Directory -Force -Path $ApolloState | Out-Null
 
 $item = Get-Item -Path $config -ErrorAction SilentlyContinue
 $isJunction = $item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
-if (-not $isJunction) {
+
+# A junction that merely exists is not enough: it must point at $ApolloState,
+# or every write below lands on D: while Apollo's real (stale) target is what
+# it actually reads. Compare the resolved target, not just the attribute.
+$pointsAtApolloState = $false
+if ($isJunction) {
+    $currentTarget = ($item.Target | Select-Object -First 1)
+    if ($currentTarget) { $currentTarget = $currentTarget.TrimEnd('\') }
+    $pointsAtApolloState = ($currentTarget -eq $ApolloState.TrimEnd('\'))
+    if (-not $pointsAtApolloState) { Write-Host "config junction points at '$currentTarget', not '$ApolloState': re-pointing it" }
+}
+
+if (-not $pointsAtApolloState) {
     if ($item) {
-        # Seed if absent, never overwrite: on a rebuild D: already holds the
-        # pairings, and the freshly installed config is the empty one.
+        # Seed if absent, never overwrite: $config (fresh dir, or a junction
+        # pointing somewhere stale) may hold files D: doesn't have yet. Only
+        # top-level names are compared - accepted: a nested-only new file
+        # would be missed, but that only bites a fresh Apollo version on a
+        # rebuilt C: whose D: predates it; an ordinary upgrade already has a
+        # correct junction and never reaches here.
         foreach ($f in Get-ChildItem -Path $config -Force -ErrorAction SilentlyContinue) {
-            $target = Join-Path $ApolloState $f.Name
-            if (-not (Test-Path $target)) { Copy-Item -Path $f.FullName -Destination $target -Recurse }
+            $seedTarget = Join-Path $ApolloState $f.Name
+            if (-not (Test-Path $seedTarget)) { Copy-Item -Path $f.FullName -Destination $seedTarget -Recurse }
         }
-        Remove-Item -Path $config -Recurse -Force
+        if ($isJunction) {
+            # .Delete() unlinks the reparse point only. Remove-Item -Recurse
+            # on a junction is a known PS 5.1 trap: it follows the link and
+            # deletes the TARGET's contents - real state, at the stale path.
+            (Get-Item -Path $config).Delete()
+        }
+        else {
+            Remove-Item -Path $config -Recurse -Force
+        }
     }
-    cmd.exe /c "mklink /J `"$config`" `"$ApolloState`"" | Out-Null
+    $mklinkOutput = cmd.exe /c "mklink /J `"$config`" `"$ApolloState`"" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "mklink /J failed (exit $LASTEXITCODE) linking '$config' -> '$ApolloState': $mklinkOutput"
+    }
 }
 $item = Get-Item -Path $config
 if (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
@@ -146,11 +173,25 @@ Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'install-service.bat' `
               -WorkingDirectory $scripts -Wait -PassThru | Out-Null
 Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'autostart-service.bat' `
               -WorkingDirectory $scripts -Wait -PassThru | Out-Null
+# Its exit code is a thin cmd/sc wrapper, not reliably meaningful; check the
+# effect. Without this, a transient "sc config" failure leaves Apollo running
+# today (the Status check below still passes) but dead after the next reboot,
+# with nothing reported - and this appliance hibernates/wakes constantly.
+$startType = (Get-Service -Name 'ApolloService').StartType
+if ($startType -ne 'Automatic') {
+    throw "ApolloService StartType is $startType, expected Automatic: it would not survive a reboot"
+}
+
 # Delete first: netsh happily creates a duplicate rule on every rebuild.
 Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'delete-firewall-rule.bat' `
               -WorkingDirectory $scripts -Wait -PassThru | Out-Null
 Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'add-firewall-rule.bat' `
               -WorkingDirectory $scripts -Wait -PassThru | Out-Null
+# Same reasoning as StartType above: a netsh failure here would leave the
+# guest silently unreachable by Moonlight, the machine's entire purpose.
+if (-not (Get-NetFirewallRule -DisplayName 'Apollo' -ErrorAction SilentlyContinue)) {
+    throw "no firewall rule named 'Apollo' after add-firewall-rule.bat"
+}
 
 Start-Service -Name 'ApolloService' -ErrorAction SilentlyContinue
 $svc = Get-Service -Name 'ApolloService'

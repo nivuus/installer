@@ -87,6 +87,18 @@ check_raises("an empty UI password is refused", apollo.ApolloError,
 # codepage, silently corrupting the password.
 check_raises("non-ASCII in a secret is refused", apollo.ApolloError,
              lambda: apollo.render_secrets("adminpäss", "nivuus", "p4ssw0rd"))
+# ApolloPassword crosses a Start-Process -ArgumentList boundary on the guest
+# (Windows PowerShell 5.1 does not quote array elements containing a space),
+# so a space or double quote there must be refused, not just single quotes.
+check_raises("a space in ApolloPassword is refused", apollo.ApolloError,
+             lambda: apollo.render_secrets("adminpass", "nivuus", "p4ss w0rd"))
+check_raises("a double quote in ApolloPassword is refused", apollo.ApolloError,
+             lambda: apollo.render_secrets("adminpass", "nivuus", 'p4ss"w0rd'))
+# AdminPassword never reaches a command line (XML answer file, Set-ItemProperty)
+# so it is deliberately NOT restricted the same way - pin the asymmetry.
+admin_with_space = apollo.render_secrets("admin pass", "nivuus", "p4ssw0rd")
+check("a space in AdminPassword is still accepted",
+      "admin pass" in admin_with_space, True)
 
 if failures:
     print(f"FAIL ({len(failures)})")

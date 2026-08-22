@@ -82,5 +82,20 @@ def render_secrets(admin_password: str, ui_username: str,
                 f"{name} must contain only ASCII characters (Windows PowerShell "
                 f"5.1 reads the .psd1 with the system codepage, not UTF-8)"
             )
+        # ApolloPassword only: 25-apollo.ps1 passes it as a Start-Process
+        # -ArgumentList element to `sunshine.exe --creds`. Windows PowerShell
+        # 5.1 joins -ArgumentList array elements with a bare space and does
+        # NOT quote an element that contains one, so a space would silently
+        # split the password across two argv tokens with no error anywhere.
+        # AdminPassword is deliberately exempt: it never reaches a command
+        # line (the answer file carries it as XML, Set-ItemProperty writes it
+        # directly), so restricting it here would only cost passphrase room.
+        if name == "ApolloPassword" and any(c.isspace() or c == '"' for c in value):
+            raise ApolloError(
+                "ApolloPassword must not contain whitespace or a double quote: "
+                "it is passed as a command-line argument to sunshine.exe "
+                "--creds, and Windows PowerShell 5.1 does not quote "
+                "-ArgumentList elements for you"
+            )
     body = "\n".join(f"    {k} = '{v}'" for k, v in values.items())
     return "@{\n" + body + "\n}\n"
