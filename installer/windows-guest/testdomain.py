@@ -4,6 +4,13 @@
 Server 2022 stays untouched on the NVMe: this domain only ever writes a qcow2
 on /media/data, and never receives the Samsung NVMe hostdev.
 
+OPERATIONAL TRAPS:
+- assert_gpu_free() guards the `define` action only, not manual `virsh start`;
+  protection at start time relies on libvirt/vfio refusing a second GPU attach.
+- This domain has no libvirt hooks, so no automatic GPU-holder stopping; any
+  process holding /dev/nvidia* must be stopped by hand before starting it.
+- Only domain_xml() and assert_gpu_free() have automated test coverage.
+
 Usage:
     python3 testdomain.py xml
     sudo python3 testdomain.py define --windows-iso ... --unattend-iso ...
@@ -61,8 +68,17 @@ def domain_xml(*, disk_path: str = DISK_PATH, windows_iso: str,
 
 def assert_gpu_free() -> None:
     """The production VM owns the GPU while it runs; refuse rather than fight."""
-    state = _virsh("domstate", "Windows").stdout.strip()
-    if state and state != "shut off":
+    proc = _virsh("domstate", "Windows")
+    if proc.returncode != 0:
+        raise DomainError(
+            f"could not determine Windows domain state: {proc.stderr.strip()}"
+        )
+    state = proc.stdout.strip()
+    if not state:
+        raise DomainError(
+            "could not determine Windows domain state: domstate returned empty"
+        )
+    if state != "shut off":
         raise DomainError(
             f"the Windows domain is {state!r}: shut it down first, the GPU "
             "cannot be assigned to two domains"

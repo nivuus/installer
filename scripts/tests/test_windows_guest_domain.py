@@ -84,6 +84,47 @@ check("nvme is never passed", "0x03" in [a.get("bus") for a in addrs], False)
 check("an emulated console exists", root.find("devices/graphics") is not None, True)
 check("hugepages are not claimed", root.find("memoryBacking"), None)
 
+# Test assert_gpu_free() guard with monkeypatched _virsh.
+class MockProc:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+original_virsh = testdomain._virsh
+try:
+    # Case 1: VM shut off, safe to proceed.
+    testdomain._virsh = lambda *a: MockProc(0, "shut off", "")
+    testdomain.assert_gpu_free()
+
+    # Case 2: VM running, must raise.
+    testdomain._virsh = lambda *a: MockProc(0, "running", "")
+    try:
+        testdomain.assert_gpu_free()
+        failures.append("guard: running VM did not raise")
+    except testdomain.DomainError:
+        pass
+
+    # Case 3: virsh error, must raise with stderr in message.
+    err_msg = "libvirtd unreachable"
+    testdomain._virsh = lambda *a: MockProc(1, "", err_msg)
+    try:
+        testdomain.assert_gpu_free()
+        failures.append("guard: virsh error did not raise")
+    except testdomain.DomainError as e:
+        if err_msg not in str(e):
+            failures.append(f"guard: error message missing stderr: {e}")
+
+    # Case 4: virsh succeeds but empty stdout, must raise.
+    testdomain._virsh = lambda *a: MockProc(0, "", "")
+    try:
+        testdomain.assert_gpu_free()
+        failures.append("guard: empty stdout did not raise")
+    except testdomain.DomainError:
+        pass
+finally:
+    testdomain._virsh = original_virsh
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
