@@ -49,8 +49,12 @@ class UnattendParams:
     # only the keyboard and regional formats become French.
     setup_language: str = "en-US"
     user_locale: str = "fr-FR"
-    # The NVIDIA driver reboots, so provisioning must survive at least two
-    # extra logons before the automatic logon is turned off again.
+    # The NVIDIA driver (and any other stage that requests one) reboots the
+    # guest mid-provisioning, so this must count high enough for automatic
+    # logon to survive every reboot before run-all.ps1 reaches 50-power.ps1,
+    # which makes autologon permanent. Unlike sub-project A, B never turns
+    # autologon back off: 99-marker.ps1 deliberately keeps it on forever,
+    # since Apollo needs a permanently open interactive session to capture.
     autologon_count: int = 5
     # "wipe" partitions the whole disk; "rebuild" reformats C: and leaves the
     # games partition alone. Rebuild is safe only when run deliberately against

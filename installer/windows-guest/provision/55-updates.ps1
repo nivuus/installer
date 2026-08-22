@@ -21,7 +21,11 @@ New-Item -Path $wu -Force | Out-Null
 # drivers from the monthly security rollup. This is the primary control.
 Set-ItemProperty -Path $wu -Name 'ExcludeWUDriversInQualityUpdate' -Value 1 -Type DWord
 
-# Verify ExcludeWUDriversInQualityUpdate was written.
+# Verify ExcludeWUDriversInQualityUpdate was written. Only this one is read
+# back: it is the load-bearing value named above (the other two set below -
+# NoAutoRebootWithLoggedOnUsers and SearchOrderConfig - are comfort and
+# defense-in-depth respectively, not what protects the NVIDIA/SudoVDA driver
+# chain this stage exists for).
 $check = Get-ItemProperty -Path $wu -Name 'ExcludeWUDriversInQualityUpdate'
 if ($check.ExcludeWUDriversInQualityUpdate -ne 1) {
     throw "ExcludeWUDriversInQualityUpdate not set to 1, got '$($check.ExcludeWUDriversInQualityUpdate)'"
