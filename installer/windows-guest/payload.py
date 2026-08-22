@@ -58,6 +58,12 @@ def missing_binaries(drivers_dir: Path) -> list[str]:
 def _walk(src_dir: Path, prefix: str) -> list[tuple[Path, str]]:
     entries = []
     for path in sorted(src_dir.rglob("*")):
+        # Any dot-directory (e.g. drivers/virtio/.build-cache/, where
+        # fetch_payload.py keeps the source virtio-win.iso and its manifest)
+        # is host-side bookkeeping, not something the guest needs - one rule
+        # keeps the payload exactly "what the guest receives".
+        if any(part.startswith(".") for part in path.relative_to(src_dir).parts[:-1]):
+            continue
         if path.is_file():
             entries.append((path, f"{prefix}/{path.relative_to(src_dir).as_posix()}"))
     return entries
@@ -129,6 +135,9 @@ def verify_staged(dest_root: Path) -> None:
         "provision/run-all.ps1",
         "provision/00-bootstrap.ps1",
         "provision/99-marker.ps1",
+        "provision/assets/run-agent.ps1",
+        "provision/assets/maximize-steam.ps1",
+        "provision/assets/apollo-junction.ps1",
         "probe/advanced-color.ps1",
         "config/sunshine.conf",
         "config/apps.json",

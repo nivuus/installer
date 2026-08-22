@@ -27,6 +27,10 @@ def make_tree(root: pathlib.Path) -> "payload.PayloadSources":
     (root / "provision" / "run-all.ps1").write_text("# run-all\n")
     (root / "provision" / "00-bootstrap.ps1").write_text("# bootstrap\n")
     (root / "provision" / "99-marker.ps1").write_text("# marker\n")
+    (root / "provision" / "assets").mkdir()
+    (root / "provision" / "assets" / "run-agent.ps1").write_text("# run-agent\n")
+    (root / "provision" / "assets" / "maximize-steam.ps1").write_text("# maximize\n")
+    (root / "provision" / "assets" / "apollo-junction.ps1").write_text("# junction\n")
     (root / "probe").mkdir()
     (root / "probe" / "advanced-color.ps1").write_text("# probe\n")
     drivers = root / "drivers"
@@ -156,6 +160,47 @@ with tempfile.TemporaryDirectory() as tmp:
             failures.append(
                 f"verify_staged error doesn't name config/sunshine.conf: {e}")
 
+# FIX 6 (final review): provision/assets/*.ps1 scripts are artefacts
+# consumed by 40-agent.ps1 and 25-apollo.ps1 (which also dot-sources
+# apollo-junction.ps1), and must be declared in verify_staged's required
+# list just like any other stage script - a rename would otherwise fail
+# deep inside the offline guest instead of at build time.
+for asset in ["run-agent.ps1", "maximize-steam.ps1", "apollo-junction.ps1"]:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        sources = make_tree(root / "src")
+        dest = root / "staging" / "nivuus"
+        marker = payload.marker_text("Windows 11", "20260822")
+        payload.stage_payload(dest, sources, marker)
+        (dest / "provision" / "assets" / asset).unlink()
+        try:
+            payload.verify_staged(dest)
+            failures.append(
+                f"verify_staged: accepted a staged tree missing assets/{asset}")
+        except payload.PayloadError as e:
+            if f"assets/{asset}" not in str(e):
+                failures.append(
+                    f"verify_staged error doesn't name assets/{asset}: {e}")
+
+# FIX 7 (final review): a dot-directory anywhere under a source tree (e.g.
+# fetch_payload.py's .build-cache/, which holds the source virtio-win.iso
+# and the build manifest) is host-side bookkeeping and must never reach the
+# staged payload - previously ~700 MB of dead weight rode along in every
+# built image.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    sources = make_tree(root / "src")
+    cache = sources.drivers_dir / "virtio" / ".build-cache"
+    cache.mkdir(parents=True)
+    (cache / "virtio-win.iso").write_bytes(b"not actually an iso")
+    dests = [rel for _, rel in payload.plan_payload(sources)]
+    check("dot-directory contents are excluded from the payload plan",
+          any(".build-cache" in d for d in dests), False)
+    dest = root / "staging" / "nivuus"
+    payload.stage_payload(dest, sources, payload.marker_text("Windows 11", "20260822"))
+    check("dot-directory contents are not staged",
+          (dest / "drivers" / "virtio" / ".build-cache").exists(), False)
+
 # --- Sous-projet B : la charge utile déclare ses artefacts en un seul endroit.
 # ⚠️ PROVISION_VERSION n'est PAS touché ici : test_windows_guest_provision.py
 # le recoupe avec la chaîne écrite par 99-marker.ps1, donc les deux doivent
@@ -238,6 +283,10 @@ with tempfile.TemporaryDirectory() as tmp:
     (src / "provision" / "run-all.ps1").write_text("x")
     (src / "provision" / "00-bootstrap.ps1").write_text("x")
     (src / "provision" / "99-marker.ps1").write_text("x")
+    (src / "provision" / "assets").mkdir()
+    (src / "provision" / "assets" / "run-agent.ps1").write_text("x")
+    (src / "provision" / "assets" / "maximize-steam.ps1").write_text("x")
+    (src / "provision" / "assets" / "apollo-junction.ps1").write_text("x")
     (src / "probe").mkdir()
     (src / "probe" / "advanced-color.ps1").write_text("x")
     drivers = src / "drivers"

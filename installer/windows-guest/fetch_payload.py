@@ -45,6 +45,13 @@ WINFSP_URL = ("https://github.com/winfsp/winfsp/releases/download/"
 # a path is recorded here, and any later mismatch fails loudly.
 MANIFEST_NAME = "payload-manifest.txt"
 
+# Host-side build bookkeeping that the guest never needs: the source
+# virtio-win.iso (already mined for its two drivers by extract_virtio) and
+# the fetch manifest. Kept under a dot-directory inside drivers_dir so
+# payload._walk (which skips dot-directories) never ships either of them to
+# the guest - ~700 MB of dead ISO otherwise rode along in every image.
+BUILD_CACHE_DIRNAME = ".build-cache"
+
 
 def plan_downloads(drivers_dir: Path) -> list[Download]:
     """Pure: what would be fetched, and where each file would land."""
@@ -53,13 +60,13 @@ def plan_downloads(drivers_dir: Path) -> list[Download]:
         Download("winfsp", WINFSP_URL,
                  drivers_dir / "winfsp" / "winfsp-2.0.23075.msi"),
         Download("virtio-iso", VIRTIO_ISO_URL,
-                 drivers_dir / "virtio" / "virtio-win.iso"),
+                 drivers_dir / BUILD_CACHE_DIRNAME / "virtio-win.iso"),
     ]
 
 
 def load_manifest(drivers_dir: Path) -> dict[str, tuple[str, str]]:
     """Parse the trust-on-first-use manifest: relative path -> (sha256, date)."""
-    path = drivers_dir / MANIFEST_NAME
+    path = drivers_dir / BUILD_CACHE_DIRNAME / MANIFEST_NAME
     entries: dict[str, tuple[str, str]] = {}
     if not path.exists():
         return entries
@@ -76,7 +83,7 @@ def load_manifest(drivers_dir: Path) -> dict[str, tuple[str, str]]:
 
 def _check_manifest(drivers_dir: Path, item: Download, digest: str) -> None:
     """Record a first-seen digest, or fail loudly if it changed since."""
-    manifest_path = drivers_dir / MANIFEST_NAME
+    manifest_path = drivers_dir / BUILD_CACHE_DIRNAME / MANIFEST_NAME
     rel = item.dest.relative_to(drivers_dir).as_posix()
     recorded = load_manifest(drivers_dir).get(rel)
     if recorded is None:
@@ -187,7 +194,7 @@ def main(argv=None) -> int:
     try:
         for item in plan_downloads(drivers):
             print(f"  {item.name} sha256 {fetch(item, drivers)}")
-        extract_virtio(drivers / "virtio" / "virtio-win.iso", drivers)
+        extract_virtio(drivers / BUILD_CACHE_DIRNAME / "virtio-win.iso", drivers)
     except FetchError as exc:
         raise SystemExit(str(exc))
     print("\nNot fetched, and never fetchable: agent/agent.exe must be "

@@ -31,6 +31,12 @@ check("no download lands outside the drivers dir",
       all(str(d.dest).startswith("/tmp/x") for d in plans), True)
 names = [d.name for d in plans]
 check("downloads are uniquely named", len(names), len(set(names)))
+# The source virtio-win.iso is mined for two drivers and then dead weight -
+# it must land under the dot-directory build cache, never in the payload
+# tree proper, or _walk() would ship it to the guest.
+virtio_iso = next(d for d in plans if d.name == "virtio-iso")
+check("virtio-win.iso lands under the build cache",
+      fetch_payload.BUILD_CACHE_DIRNAME in virtio_iso.dest.parts, True)
 
 # fetch() must fail loudly (never silently ship a changed artefact) when a
 # path already recorded in the manifest comes back with a different digest.
@@ -40,7 +46,9 @@ with tempfile.TemporaryDirectory() as tmp:
     dest = drivers / "steam" / "SteamSetup.exe"
     dest.parent.mkdir(parents=True)
     dest.write_bytes(b"a newer build of the installer")
-    (drivers / fetch_payload.MANIFEST_NAME).write_text(
+    manifest_dir = drivers / fetch_payload.BUILD_CACHE_DIRNAME
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / fetch_payload.MANIFEST_NAME).write_text(
         "steam/SteamSetup.exe\tdeadbeef00000000000000000000000000000000000000000000000000\t2026-01-01\n"
     )
     item = fetch_payload.Download("steam", "https://example.invalid/x", dest)
