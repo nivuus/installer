@@ -288,11 +288,26 @@ d'être créés à l'étape 25, vides. La TV doit donc être appairée à **ce**
 domaine de test comme un nouvel hôte, distinct de la production (une IP
 différente de `192.168.3.2`) : ouvrir Moonlight sur la TV, ajouter l'hôte
 `$GUEST_IP`, saisir le code PIN affiché sur la TV dans l'IHM web d'Apollo
-(joignable en HTTPS sur `$GUEST_IP`, identifiants `--apollo-user`/le contenu
-de `apollo-ui.pass` — le port exact de cette IHM, habituellement 47990 chez
-Sunshine/Apollo, n'est vérifié nulle part dans ce dépôt : à confirmer au
-premier essai, pas à supposer). Lancer ensuite l'application « Desktop » ou
-« Steam Big Picture » depuis la TV.
+(HTTPS, port **47990** — établi par la route de production
+`/opt/nivuus/Pomerium/config.yaml`, `from: https://game.allanic.me` →
+`to: https://192.168.3.2:47990`, identifiants `--apollo-user`/le contenu de
+`apollo-ui.pass`). Cette même route porte `tls_skip_verify: true` : Apollo y
+présente un certificat auto-signé, donc toute commande utilisée pour
+atteindre l'IHM pendant cette recette doit tolérer ce certificat (`curl -k`,
+ou accepter l'avertissement du navigateur) — sans quoi l'échec de validation
+TLS se lit à tort comme un problème d'Apollo lui-même.
+
+⚠️ **Ne PAS passer par `game.allanic.me` pour cette recette.** Apollo 0.4.6
+rejette l'authentification HTTP Basic sur `/api/*` (mesuré le 2026-08-22 :
+`GET /api/config` et `POST /api/pin` renvoient tous deux 401 ; l'IHM
+authentifie désormais via `POST /api/login`, qui pose un cookie `auth`). La
+route Pomerium ci-dessus injecte un en-tête `Authorization: Basic` sur
+`game.allanic.me` — un opérateur qui passerait par là pendant cette recette
+verrait donc un 401 qui n'a rien à voir avec ses identifiants. Atteindre
+l'IHM **directement sur l'invité** (`https://$GUEST_IP:47990`) pendant
+l'acceptation ; corriger la route Pomerium appartient à la bascule, pas à
+cette recette. Lancer ensuite l'application « Desktop » ou « Steam Big
+Picture » depuis la TV.
 
 ```bash
 python3 winrm_exec.py cmd 'type D:\state\apollo\sunshine.log' > /tmp/sunshine-test1.log
