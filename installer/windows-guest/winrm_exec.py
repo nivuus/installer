@@ -28,14 +28,22 @@ def main() -> int:
     if len(sys.argv) < 3 or sys.argv[1] not in ("cmd", "ps"):
         print(__doc__, file=sys.stderr)
         return 2
-    with open(PASS_FILE) as fh:
-        password = fh.read().strip()
-    session = winrm.Session(
-        f"http://{IP}:5985/wsman",
-        auth=(USER, password),
-        transport="ntlm",
-        server_cert_validation="ignore",
-    )
+    try:
+        with open(PASS_FILE) as fh:
+            password = fh.read().strip()
+    except FileNotFoundError:
+        print(f"error: password file not found: {PASS_FILE}", file=sys.stderr)
+        return 1
+    try:
+        session = winrm.Session(
+            f"http://{IP}:5985/wsman",
+            auth=(USER, password),
+            transport="ntlm",
+            server_cert_validation="ignore",
+        )
+    except Exception as e:
+        print(f"error: cannot reach guest at {IP}:5985: {e}", file=sys.stderr)
+        return 1
     command = " ".join(sys.argv[2:])
     result = (session.run_cmd if sys.argv[1] == "cmd" else session.run_ps)(command)
     out = result.std_out.decode("utf-8", "replace").strip()

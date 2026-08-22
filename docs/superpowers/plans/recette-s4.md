@@ -12,6 +12,15 @@ allumée en permanence et tout le travail d'économie d'énergie tombe.
 ## Préparation
 
 ```bash
+# 0. Arrêter le domaine de production (le temps de la recette, la VM gaming est hors ligne)
+virsh shutdown --mode acpi Windows
+for i in $(seq 1 60); do
+  [ "$(LC_ALL=C virsh domstate Windows)" = "shut off" ] && break
+  sleep 1
+done
+```
+
+```bash
 # 1. Libérer le GPU (aucun crochet ne le fait pour un domaine jetable)
 docker stop mediamanager-tdarr-node-nvenc-1 mediamanager-tdarr-node-1 \
             mediamanager-tdarr-1 nivuus-ollama
@@ -36,8 +45,21 @@ for i in $(seq 1 40); do
 done
 ```
 
-⚠️ Attendre le **marqueur**, jamais le port 5985 : `00-bootstrap.ps1` l'ouvre
-transitoirement au début du provisionnement.
+Attendre que le provisionnement finisse. Le port WinRM 5985 s'ouvre à la fin et
+c'est le signal conçu (voir `testdomain.py wait_ready()`). Il existe une étroite
+course dans `00-bootstrap.ps1` : entre l'activation de la communication à distance
+et la désactivation de la règle pare-feu, le port peut être brièvement accessible
+avant que le provisionnement soit vraiment fini. Comme mesure conservatrice,
+confirmer que `PROVISION.done` existe une fois `wait-ready` revient :
+
+```bash
+GUEST_IP=$(cd installer/windows-guest && python3 testdomain.py wait-ready)
+GUEST_IP=$GUEST_IP python3 installer/windows-guest/winrm_exec.py cmd 'type C:\nivuus\state\PROVISION.done'
+```
+
+(Note : la course elle-même est un défaut du script de bootstrap du sous-projet A,
+fermée en désactivant la règle *avant* d'activer PSRemoting. C'est un sujet de
+suivi en dehors de ce périmètre.)
 
 ## Ajouter le bloc `<pm>` au domaine jetable
 
@@ -56,9 +78,6 @@ virsh start Windows-LTSC-test
 ## La mesure
 
 ```bash
-# 0. Le domaine jetable prend un bail DHCP, pas l'adresse epinglee de la production
-export GUEST_IP=$(ip neigh show dev internalBridge | awk '/52:54:00:4c:54:53/ {print $1}' | head -1)
-
 # 1. Activer l'hibernation dans l'invité et poser un témoin de session
 python3 installer/windows-guest/winrm_exec.py ps "powercfg /hibernate on"
 python3 installer/windows-guest/winrm_exec.py ps "Set-Content C:\\temoin-s4.txt (Get-Date -Format o)"
