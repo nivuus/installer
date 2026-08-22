@@ -30,14 +30,14 @@ def vcpu_plan(pool: list[int], reserve: int = 2) -> dict:
     SMT pairs are not value-adjacent (e.g., real pairs (0,8),(1,9)) requires a
     code change here, not a differently-ordered argument.
     """
-    if len(pool) < reserve + 2:
-        raise DomainError(
-            f"need at least {reserve + 2} isolated CPUs, got {len(pool)}"
-        )
-
     # Validate contiguity: sorted unique pool must be [min..max] with no gaps.
     # This prevents emulator_cpuset from silently naming CPUs not in the pool.
+    # Size check is done on the unique set to reject degenerate inputs.
     unique_sorted = sorted(set(pool))
+    if len(unique_sorted) < reserve + 2:
+        raise DomainError(
+            f"need at least {reserve + 2} isolated CPUs, got {len(unique_sorted)}"
+        )
     expected_range = list(range(unique_sorted[0], unique_sorted[-1] + 1))
     if unique_sorted != expected_range:
         gaps = set(expected_range) - set(unique_sorted)
