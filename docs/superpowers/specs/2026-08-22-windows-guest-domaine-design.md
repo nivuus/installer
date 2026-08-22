@@ -59,6 +59,17 @@ déjà cassé l'hibernation S4 sur cette machine : les descripteurs OVMF de
 Debian ne déclarent que `acpi-s3`, et libvirt refuse alors S4 alors qu'OVMF
 le gère. `<loader>` et `<nvram>` sont **explicites**, toujours.
 
+🔴 **Le fichier `<nvram>` cible doit être absent, ou fraîchement issu du
+template Secure Boot, jamais un varstore préexistant sans-Secure-Boot.**
+libvirt ne recopie `template=` dans le fichier cible qu'à sa création ; s'il
+existe déjà, il est réutilisé tel quel. Un varstore créé avant l'introduction
+de Secure Boot (comme celui de la VM `Windows` de production, vérifié sans
+clé Microsoft) associé au chargeur `secboot` fait démarrer l'invité en Setup
+Mode, avec Secure Boot silencieusement désactivé — `Confirm-SecureBootUEFI`
+rend `False`, sans erreur ailleurs dans la chaîne. C'est pour ça que la
+bascule prescrit `virsh undefine Windows --nvram` : c'est la seule façon
+d'obtenir un varstore neuf à la prochaine définition.
+
 **vTPM 2.0** : `<tpm model='tpm-crb'><backend type='emulator' version='2.0'/>`,
 exigé par Windows 11 et absent du domaine actuel.
 
@@ -124,7 +135,7 @@ virtiofs exige, en plus de `<hugepages/>` et `<locked/>`.
 | **NVMe à passer à l'invité** | — | **à ajouter** : le disque est lié à `vfio-pci`, donc invisible de `list_disks()`. Détection par classe PCI `0108`, en excluant celui qui porte la racine de l'hôte |
 | Cœurs performants → `vcpupin` | `cpu_topology().performance_cpus` | existe |
 | Cœurs restants → `emulatorpin`, `iothreadpin` | dérivé | trivial |
-| Dimensionnement hugepages | mémoire de l'invité | à calculer |
+| Dimensionnement hugepages | mémoire de l'invité | **différé** : `MEMORY_KIB` reste codé en dur à 16 GiB, cohérent avec le pool statique `vm.nr_hugepages = 8448` de `/etc/sysctl.d/50-virsh.conf` sur cette machine, mais ce n'est pas une détection. Le pool est un sysctl hôte géré hors de ce module ; une version future devrait le lire (ou le dimensionner et l'appliquer) plutôt que supposer qu'il correspond déjà à `memory_kib` |
 
 🔴 **`cputune` doit rester analysable par `vm-cpu-partition.sh`.** Ce script
 dérive le cpuset de l'hôte depuis `vcpupin` + `emulatorpin` du XML que libvirt
