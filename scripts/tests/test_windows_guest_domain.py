@@ -52,7 +52,10 @@ check("tpm model", root.find("devices/tpm").get("model"), "tpm-crb")
 disks = root.findall("devices/disk")
 system = [d for d in disks if d.get("device") == "disk"]
 check("one system disk", len(system), 1)
-# The LTSC medium carries no virtio driver: a virtio disk would be invisible.
+# The LTSC medium carries no inbox virtio block driver: a virtio disk would
+# be invisible during Setup. The NIC is different - stage 15 installs NetKVM
+# after Setup completes, so the test domain must give it a virtio NIC to
+# exercise (and require) the same driver path as production.
 check("system disk on sata", system[0].find("target").get("bus"), "sata")
 check("system disk is qcow2", system[0].find("driver").get("type"), "qcow2")
 check("system disk lives on /media/data",
@@ -72,7 +75,19 @@ check("windows medium boots first",
       "/media/backup/en-us_windows_11_iot_enterprise_ltsc_2024_x64_dvd_f6b14814.iso")
 
 nic = root.find("devices/interface/model")
-check("e1000e nic (no inbox virtio driver)", nic.get("type"), "e1000e")
+# Must match production (domain.xml.j2): a virtio NIC. 15-virtio.ps1 requires
+# a VirtIO/Red Hat network device to reach OK status or the whole recipe
+# aborts - an e1000e test domain would test a machine production never uses.
+check("virtio nic (matches production, exercises stage 15)", nic.get("type"), "virtio")
+
+# Hibernation: 50-power.ps1 makes `powercfg /hibernate on` fatal, and
+# recette-b.md asserts S4. Without this block the guest may not be offered
+# S4 at all - matching domain.xml.j2 exactly.
+pm = root.find("pm")
+check("pm block present", pm is not None, True)
+check("suspend-to-mem disabled", pm.find("suspend-to-mem").get("enabled"), "no")
+check("suspend-to-disk enabled (S4, matches production)",
+      pm.find("suspend-to-disk").get("enabled"), "yes")
 
 addrs = [h.find("source/address") for h in root.findall("devices/hostdev")]
 slots = sorted((a.get("bus"), a.get("slot"), a.get("function")) for a in addrs)
