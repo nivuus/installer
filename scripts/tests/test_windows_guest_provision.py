@@ -52,6 +52,12 @@ check("run-all lists every stage", all(p >= 0 for p in positions), True)
 check("run-all keeps the stages ordered", positions, sorted(positions))
 check("run-all skips stages already done", ".done" in runall, True)
 check("run-all takes PayloadRoot", "$PayloadRoot" in runall, True)
+check("run-all mentions reboot.requested", "reboot.requested" in runall, True)
+check("run-all mentions Restart-Computer", "Restart-Computer" in runall, True)
+# The .done file must be written before the reboot sentinel is consumed, or a
+# stage that needs a reboot would rerun from scratch on every resume.
+check("run-all writes .done before consuming the reboot sentinel",
+      runall.find("Set-Content -Path $done") < runall.find("reboot.requested"), True)
 
 boot = texts["00-bootstrap.ps1"]
 check("bootstrap enables PSRemoting", "Enable-PSRemoting" in boot, True)
@@ -73,10 +79,24 @@ check("marker opens 5985", "Enable-NetFirewallRule" in marker, True)
 check("marker disables autologon", "AutoAdminLogon" in marker, True)
 check("marker clears the resume entry", "Remove-ItemProperty" in marker, True)
 check("marker writes PROVISION.done", "PROVISION.done" in marker, True)
+# The marker is what makes "5985 reachable" mean "guest is provisioned", so it
+# must be written strictly before the firewall rule that opens 5985.
+check("marker writes PROVISION.done before opening 5985",
+      marker.find("PROVISION.done") < marker.find("Enable-NetFirewallRule"), True)
+# 10-nvidia.ps1 may have deferred its device check to survive a driver reboot;
+# this is where that deferred verification must land, before port 5985 opens.
+check("marker verifies the NVIDIA device", "Get-PnpDevice" in marker, True)
+check("marker verifies the NVIDIA device before opening 5985",
+      marker.find("Get-PnpDevice") < marker.find("Enable-NetFirewallRule"), True)
 
 nvidia = texts["10-nvidia.ps1"]
 check("nvidia installs silently", "-noreboot" in nvidia, True)
 check("nvidia verifies the device afterwards", "Get-PnpDevice" in nvidia, True)
+check("nvidia writes reboot.requested", "reboot.requested" in nvidia, True)
+# The sentinel must only be written on the "success, reboot required" path
+# (ExitCode 1), never unconditionally.
+check("nvidia requests reboot only on the ExitCode -eq 1 path",
+      nvidia.find("-eq 1") < nvidia.find("reboot.requested"), True)
 
 sudovda = texts["20-sudovda.ps1"]
 check("sudovda trusts the publisher certificate", "TrustedPublisher" in sudovda, True)

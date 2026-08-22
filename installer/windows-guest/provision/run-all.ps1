@@ -12,6 +12,7 @@ $StateDir = 'C:\nivuus\state'
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 Set-Content -Path (Join-Path $StateDir 'provision.started') -Value (Get-Date -Format o)
 
+$rebootPending = $false
 Start-Transcript -Path 'C:\nivuus\provision.log' -Append | Out-Null
 try {
     $stages = @('00-bootstrap.ps1', '10-nvidia.ps1', '20-sudovda.ps1', '99-marker.ps1')
@@ -26,9 +27,22 @@ try {
         Write-Host "=== $stage ==="
         & $script -PayloadRoot $PayloadRoot
         Set-Content -Path $done -Value (Get-Date -Format o)
+
+        # A stage that needs a reboot leaves this sentinel. The .done file
+        # above is written first, so on resume the stage is skipped instead of
+        # rerunning and requesting another reboot forever.
+        $reboot = Join-Path $StateDir 'reboot.requested'
+        if (Test-Path $reboot) {
+            Remove-Item -Path $reboot -Force
+            Write-Host "$stage requested a reboot, restarting"
+            $rebootPending = $true
+            break
+        }
     }
-    Write-Host 'provisioning complete'
+    if (-not $rebootPending) { Write-Host 'provisioning complete' }
 }
 finally {
     Stop-Transcript | Out-Null
 }
+
+if ($rebootPending) { Restart-Computer -Force }
