@@ -2469,14 +2469,35 @@ La ligne de référence `target=24832 rc=31 supported=0 enabled=0 bpc=0` diffèr
 d'une ligne saine `rc=0 supported=0` **par le seul champ `rc`** ; ne lire que
 `supported=` confond les deux — c'est exactement l'erreur que corrige ce tableau.
 
-**Question ouverte, non résolue ici** : SudoVDA ne crée un moniteur qu'à la
-demande d'Apollo (sous-projet B) ; tant que rien ne le sollicite, la sonde ne
-mesure que le VGA émulé et le dongle HDMI. Deux options, à trancher au moment de
-l'exécution de cette tâche, pas avant : (a) un appel client minimal vers SudoVDA
-qui force la création d'un moniteur, ou (b) avancer juste assez d'Apollo (B) pour
-qu'il crée l'écran virtuel avant que la sonde tourne. Sans l'un des deux, la sonde
-ne peut mesurer que le VGA émulé et le dongle HDMI factice — jamais l'écran
-virtuel, qui est pourtant celui qui compte pour le streaming.
+**Question tranchée le 2026-08-22 — on ne mesure PAS SudoVDA dans ce sous-projet.**
+
+SudoVDA ne crée un moniteur qu'à la demande d'Apollo, et Apollo ne le crée qu'au
+**démarrage d'un flux**, à la résolution demandée par un client. Les deux options
+envisagées au cadrage sont donc rejetées : (a) écrire un client SudoVDA minimal
+mettrait du code C neuf, compilé en croisé et inexécutable depuis Linux, sur le
+chemin critique d'un passage unique ; (b) avancer Apollo exigerait de l'installer,
+d'appairer un client Moonlight et d'ouvrir un flux pendant la fenêtre GPU — chaque
+étape étant une façon de la perdre.
+
+**Ce que A doit trancher est une question d'OS, pas d'écran.** Le blocage sur
+Server 2022 est `rc=31 ERROR_GEN_FAILURE`, et l'API échoue *quel que soit
+l'affichage* (mesuré, voir CLAUDE.md). Donc `rc=0` sur le dongle HDMI — même avec
+`supported=0` — prouve que l'OS et la pile NVIDIA participent : le verrou saute,
+la migration est justifiée. Que SudoVDA expose ensuite le HDR est une question
+*SudoVDA-sur-24H2*, à laquelle ses mainteneurs répondent déjà oui, et que le
+sous-projet B exercera dans sa vraie configuration avec un vrai client — un
+meilleur test qu'un test synthétique.
+
+**Trou assumé** : si tout répond `rc=0 supported=0`, on prouve que l'API
+fonctionne sans jamais observer un « oui ». Le contrôle positif le moins cher est
+**physique** : débrancher le dongle HDMI et brancher un vrai câble vers la TV le
+temps du test. Son EDID HDR est authentique, et une ligne `supported=1 bpc>=10`
+sur ce chemin serait une preuve directe de bout en bout. À défaut, on s'en tient
+à `rc=0` et on consigne l'hypothèse résiduelle.
+
+**L'installeur Apollo est présent dans la charge utile** (`\nivuus\drivers\apollo\`)
+mais **aucune étape ne l'exécute** : il est là pour permettre un essai manuel de
+SudoVDA dans la même fenêtre si `rc=0` tombe, sans refabriquer l'ISO.
 
 - [ ] **Step 9: Vérifier l'activation dans le même passage**
 
@@ -2583,10 +2604,27 @@ reproduirait les défauts qu'ils corrigent — lire `git log` comme référence.
 | 11 | `provision/99-marker.ps1` | `Copy-Item -Destination 'C:\nivuus\probe'` | **`-Destination 'C:\nivuus'`** : le chemin `\probe` imbriquait en `...\probe\probe` quand la destination existait déjà (ce qui est le cas courant, `C:\nivuus` étant créé par `00-bootstrap.ps1`) |
 | 12 | `testdomain.py` | `assert_gpu_free()` ne vérifiait que l'état du domaine `Windows`, aucun contrôle des détenteurs de `/dev/nvidia*` | **`gpu_holders()` ajoutée**, refusant le `define` si un processus tient encore `/dev/nvidia*` — ce domaine jetable n'a aucun hook libvirt pour les arrêter, contrairement à la VM de production. Mesuré en conditions réelles sur cet hôte : `find /proc -lname '/dev/nvidia*'` (les deux formes, y compris celle documentée dans `CLAUDE.md`) **sort en erreur systématiquement pour des raisons sans rapport avec un vrai détenteur** ; un `returncode != 0` interprété comme un échec de scan aurait donc refusé tout `define`, même GPU libre. L'énumération est en Python pur (`os.listdir`/`glob.glob`/`os.readlink`), sans code de retour à mésinterpréter, et n'échoue que si `/proc` lui-même est illisible |
 
-Deux vérifications restent dues et ne pouvaient pas être faites : la charge utile
-hors-ligne n'existe pas encore (ni pilote NVIDIA ni SudoVDA rassemblés), donc
-**aucune ISO n'a jamais été produite**, et le contrôle « la clé n'apparaît nulle
-part ailleurs que dans le fichier de réponses » de l'étape 4 de la tâche 6 est à
-faire à la première fabrication réelle. `/root/.config/nivuus/windows-admin.pass`
-n'a **pas** été créé : son contenu devient le mot de passe Administrateur de
-l'invité, c'est au propriétaire de le choisir.
+### Levée des vérifications dues (2026-08-22, après fusion)
+
+Les trois points laissés en suspens ci-dessus ont été traités :
+
+- **La charge utile est assemblée** dans `/media/data/nivuus-win-payload/` :
+  pilote GeForce Game Ready **610.88** (28/07/2026, DCH, 979 651 304 o, taille
+  conforme à celle annoncée par NVIDIA), `sudovda/` extrait de l'installeur
+  **Apollo 0.4.6** (certificat `CN=sudovda@su.mk`, valide jusqu'en 2030), et
+  l'installeur Apollo lui-même, non exécuté.
+- **L'ISO a été produite** : `/media/data/iso/nivuus-unattend.iso`, 975 140 Kio,
+  `sha256 b52395712615b2b881a1e4689c8e9f62d8cdbda5901a333cc37d425e1e270367`,
+  mode 0600 dans un répertoire 0700. L'inspection a bien sélectionné l'image **#2**
+  (`IoTEnterpriseS`, build 26100) parmi les trois éditions du média.
+- **Le confinement des secrets est vérifié** : la clé produit et le mot de passe
+  Administrateur apparaissent **2 fois chacun dans l'image entière, et ces 2
+  occurrences sont dans `/autounattend.xml`** — nulle part ailleurs. C'est le
+  contrôle de l'étape 4 de la tâche 6, désormais fait sur l'artefact réel.
+- `/root/.config/nivuus/windows-admin.pass` a été créé sur demande explicite du
+  propriétaire : 24 caractères base62 tirés de `/dev/urandom`, mode 0600. Base62
+  seul et non un jeu étendu, pour satisfaire la complexité Windows (majuscule,
+  minuscule, chiffre) **sans aucun caractère à échapper** en XML, `cmd`,
+  PowerShell ou WinRM.
+
+Reste dû : le test d'acceptation lui-même (tâche 8), qui immobilise le GPU.
