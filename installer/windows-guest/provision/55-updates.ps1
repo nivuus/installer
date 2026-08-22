@@ -17,7 +17,15 @@ $ErrorActionPreference = 'Stop'
 
 $wu = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
 New-Item -Path $wu -Force | Out-Null
+# ExcludeWUDriversInQualityUpdate is the load-bearing setting: it blocks
+# drivers from the monthly security rollup. This is the primary control.
 Set-ItemProperty -Path $wu -Name 'ExcludeWUDriversInQualityUpdate' -Value 1 -Type DWord
+
+# Verify ExcludeWUDriversInQualityUpdate was written.
+$check = Get-ItemProperty -Path $wu -Name 'ExcludeWUDriversInQualityUpdate'
+if ($check.ExcludeWUDriversInQualityUpdate -ne 1) {
+    throw "ExcludeWUDriversInQualityUpdate not set to 1, got '$($check.ExcludeWUDriversInQualityUpdate)'"
+}
 
 $au = Join-Path $wu 'AU'
 New-Item -Path $au -Force | Out-Null
@@ -27,6 +35,9 @@ Set-ItemProperty -Path $au -Name 'NoAutoRebootWithLoggedOnUsers' -Value 1 -Type 
 
 $search = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching'
 New-Item -Path $search -Force | Out-Null
+# SearchOrderConfig may be a legacy Windows XP-era key that is silently
+# ignored on build 26100, but if honoured it adds defense-in-depth on top of
+# ExcludeWUDriversInQualityUpdate. Keep it: it costs nothing and does not hurt.
 Set-ItemProperty -Path $search -Name 'SearchOrderConfig' -Value 0 -Type DWord
 
 Write-Host 'security updates on, driver updates excluded, no unattended reboot'

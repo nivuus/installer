@@ -16,13 +16,22 @@ param([Parameter(Mandatory = $true)][string]$PayloadRoot)
 $ErrorActionPreference = 'Stop'
 
 powercfg.exe /hibernate on
+if ($LASTEXITCODE -ne 0) {
+    throw "powercfg /hibernate on failed with exit code $LASTEXITCODE"
+}
 # SCHEME_MIN, the built-in High Performance plan. The guest is a gaming host;
 # its power saving is the host hibernating the whole domain, not the guest
 # downclocking itself.
 powercfg.exe /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "warning: powercfg /setactive failed with exit code $LASTEXITCODE"
+}
 foreach ($what in @('monitor-timeout-ac', 'standby-timeout-ac',
                     'disk-timeout-ac', 'hibernate-timeout-ac')) {
     powercfg.exe /change $what 0
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "warning: powercfg /change $what failed with exit code $LASTEXITCODE"
+    }
 }
 
 # "Require a password on wakeup" - the powercfg CONSOLELOCK alias does not
@@ -36,6 +45,12 @@ $perso = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization'
 New-Item -Path $perso -Force | Out-Null
 Set-ItemProperty -Path $perso -Name 'NoLockScreen' -Value 1 -Type DWord
 
+# Disable screensaver-triggered lock (LTSC ships without screensaver, but
+# this prevents a screensaver-with-logon-on-resume from locking the desktop).
+$desktop = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Control Panel\Desktop'
+New-Item -Path $desktop -Force | Out-Null
+Set-ItemProperty -Path $desktop -Name 'ScreenSaveActive' -Value '0' -Type String
+
 # --- Permanent autologon. The answer file's <LogonCount> counts DOWN and
 # deletes AutoAdminLogon when it reaches zero; only these registry values,
 # with no AutoLogonCount alongside them, survive indefinitely.
@@ -47,8 +62,16 @@ $secrets = Import-PowerShellDataFile -Path (Join-Path $PayloadRoot 'config\secre
 $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
 Set-ItemProperty -Path $winlogon -Name 'AutoAdminLogon' -Value '1' -Type String
 Set-ItemProperty -Path $winlogon -Name 'DefaultUserName' -Value 'Administrator' -Type String
+Set-ItemProperty -Path $winlogon -Name 'DefaultDomainName' -Value $env:COMPUTERNAME -Type String
 Set-ItemProperty -Path $winlogon -Name 'DefaultPassword' -Value $secrets.AdminPassword -Type String
 Remove-ItemProperty -Path $winlogon -Name 'AutoLogonCount' -ErrorAction SilentlyContinue
+
+# Verify AutoAdminLogon was written. This only proves the bytes landed in the
+# registry, not that Windows reads it — a reboot is the real test.
+$check = Get-ItemProperty -Path $winlogon -Name 'AutoAdminLogon'
+if ($check.AutoAdminLogon -ne '1') {
+    throw "AutoAdminLogon not set to '1', got '$($check.AutoAdminLogon)'"
+}
 Write-Host 'permanent autologon configured'
 
 if (-not (Test-Path 'C:\hiberfil.sys')) {
