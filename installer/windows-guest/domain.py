@@ -11,6 +11,28 @@ Usage:
 """
 from __future__ import annotations
 
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+HERE = Path(__file__).resolve().parent
+TEMPLATES_DIR = HERE / "templates"
+
+DOMAIN_NAME = "Windows"
+# dhcp-host pins this MAC to 192.168.3.2 in
+# /etc/NetworkManager/dnsmasq-shared.d/domain.conf. Changing it silently breaks
+# game.allanic.me, the firewalld stream forwards and wake-on-demand.
+MAC = "52:54:00:48:e0:3e"
+BRIDGE = "internalBridge"
+NVRAM_PATH = "/var/lib/libvirt/qemu/nvram/Windows_VARS.fd"
+VIRTIOFS_SOURCE = "/media/data"
+VIRTIOFS_TAG = "Data"
+MEMORY_KIB = 16777216
+
 
 class DomainError(RuntimeError):
     """Raised when the domain cannot be built safely."""
@@ -57,3 +79,24 @@ def vcpu_plan(pool: list[int], reserve: int = 2) -> dict:
         "vcpupin": [(i, cpu) for i, cpu in enumerate(guest)],
         "emulator_cpuset": f"{emulator[0]}-{emulator[-1]}",
     }
+
+
+def domain_xml(*, gpu_functions: list[dict], nvme: dict, plan: dict,
+               memory_kib: int = MEMORY_KIB, name: str = DOMAIN_NAME,
+               mac: str = MAC, bridge: str = BRIDGE,
+               nvram_path: str = NVRAM_PATH,
+               virtiofs_source: str = VIRTIOFS_SOURCE,
+               virtiofs_tag: str = VIRTIOFS_TAG) -> str:
+    """Render the production domain XML."""
+    if len(gpu_functions) < 1:
+        raise DomainError("no GPU function to pass through")
+    env = Environment(
+        loader=FileSystemLoader(str(TEMPLATES_DIR)),
+        autoescape=select_autoescape(["xml"]),
+        keep_trailing_newline=True,
+    )
+    return env.get_template("domain.xml.j2").render(
+        name=name, memory_kib=memory_kib, plan=plan, mac=mac, bridge=bridge,
+        nvram_path=nvram_path, gpu_functions=gpu_functions, nvme=nvme,
+        virtiofs_source=virtiofs_source, virtiofs_tag=virtiofs_tag,
+    )

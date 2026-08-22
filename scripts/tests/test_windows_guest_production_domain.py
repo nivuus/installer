@@ -82,6 +82,75 @@ check_raises("non-contiguous pool is refused", domain.DomainError,
 check_raises("all-duplicate pool is refused", domain.DomainError,
              lambda: domain.vcpu_plan([5, 5, 5, 5]))
 
+import xml.etree.ElementTree as ET  # noqa: E402
+
+GPU = [
+    {"address": "0000:01:00.0", "domain": "0x0000", "bus": "0x01",
+     "slot": "0x00", "function": "0x0", "id": "10de:2786", "description": "GPU"},
+    {"address": "0000:01:00.1", "domain": "0x0000", "bus": "0x01",
+     "slot": "0x00", "function": "0x1", "id": "10de:22bc", "description": "audio"},
+]
+NVME = {"address": "0000:03:00.0", "domain": "0x0000", "bus": "0x03",
+        "slot": "0x00", "function": "0x0", "id": "144d:a808", "description": "nvme"}
+
+xml_text = domain.domain_xml(gpu_functions=GPU, nvme=NVME, plan=plan)
+root = ET.fromstring(xml_text)
+
+check("domain name", root.findtext("name"), "Windows")
+check("kvm domain", root.get("type"), "kvm")
+check("vcpu count", root.findtext("vcpu"), "14")
+
+topo = root.find("cpu/topology")
+check("cores", topo.get("cores"), "7")
+check("threads", topo.get("threads"), "2")
+
+check("emulatorpin", root.find("cputune/emulatorpin").get("cpuset"), "14-15")
+check("vcpupin entries", len(root.findall("cputune/vcpupin")), 14)
+
+loader = root.find("os/loader")
+check("secure boot loader", loader.text,
+      "/usr/share/OVMF/OVMF_CODE_4M.secboot.fd")
+check("loader is secure", loader.get("secure"), "yes")
+check("nvram template", root.find("os/nvram").get("template"),
+      "/usr/share/OVMF/OVMF_VARS_4M.ms.fd")
+check("firmware autoselect absent", root.find("os").get("firmware"), None)
+check("smm on", root.find("features/smm").get("state"), "on")
+
+check("tpm model", root.find("devices/tpm").get("model"), "tpm-crb")
+check("tpm version", root.find("devices/tpm/backend").get("version"), "2.0")
+
+check("mac address", root.find("devices/interface/mac").get("address"),
+      "52:54:00:48:e0:3e")
+check("nic model", root.find("devices/interface/model").get("type"), "virtio")
+
+hostdevs = root.findall("devices/hostdev")
+check("three hostdevs", len(hostdevs), 3)
+for hd in hostdevs:
+    check("hostdev managed", hd.get("managed"), "yes")
+    check("hostdev vfio driver", hd.find("driver").get("name"), "vfio")
+
+check("s4 enabled", root.find("pm/suspend-to-disk").get("enabled"), "yes")
+check("s3 disabled", root.find("pm/suspend-to-mem").get("enabled"), "no")
+
+check("hugepages", root.find("memoryBacking/hugepages") is not None, True)
+check("locked", root.find("memoryBacking/locked") is not None, True)
+check("shared access", root.find("memoryBacking/access").get("mode"), "shared")
+
+check("emulated video present", root.find("devices/video/model").get("type"), "vga")
+check("vnc listens locally", root.find("devices/graphics").get("listen"), "127.0.0.1")
+
+check("virtiofs target", root.find("devices/filesystem/target").get("dir"), "Data")
+
+# Everything the spec forbids must be absent, checked individually so a
+# failure names the offender.
+check("no kvm hidden", root.find("features/kvm") is None, True)
+check("no vendor_id", root.find("features/hyperv/vendor_id") is None, True)
+check("no sysinfo", root.find("sysinfo") is None, True)
+check("no smbios mode", root.find("os/smbios") is None, True)
+check("no vBIOS override", root.find("devices/hostdev/rom") is None, True)
+check("no i6300esb watchdog",
+      [w.get("model") for w in root.findall("devices/watchdog")], ["itco"])
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
