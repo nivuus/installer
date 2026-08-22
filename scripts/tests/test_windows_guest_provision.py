@@ -37,8 +37,12 @@ if failures:
         print("  -", f)
     sys.exit(1)
 
+# Recursive: provision/assets/*.ps1 (run-agent.ps1, maximize-steam.ps1) are
+# shipped and executed inside the guest just like the numbered stages, and
+# must not escape the 200-line, hardcoded-drive-letter and session-0 guards
+# below just because they live one directory deeper.
 texts = {p.name: p.read_text(encoding="utf-8")
-         for p in list(PROVISION.iterdir()) + list(PROBE.iterdir()) if p.is_file()}
+         for p in list(PROVISION.rglob("*")) + list(PROBE.iterdir()) if p.is_file()}
 
 for name, text in texts.items():
     check(f"{name} under 200 lines", len(text.splitlines()) <= 200, True)
@@ -60,6 +64,17 @@ check("run-all mentions Restart-Computer", "Restart-Computer" in runall, True)
 # stage that needs a reboot would rerun from scratch on every resume.
 check("run-all writes .done before consuming the reboot sentinel",
       runall.find("Set-Content -Path $done") < runall.find("reboot.requested"), True)
+# FIX 14 (final review): a failed stage must leave a diagnosable trace
+# instead of nothing - no marker, closed 5985, VNC as the only recourse.
+check("run-all writes PROVISION.failed on a failed stage",
+      "PROVISION.failed" in runall, True)
+check("run-all mirrors the failure marker onto D: when it is mounted",
+      "D:\\state\\PROVISION.failed" in runall, True)
+# The failure marker must never be mistaken for readiness: 5985 only opens
+# from 99-marker.ps1, never from this catch block.
+check("run-all's catch block does not open 5985",
+      "Enable-NetFirewallRule" in runall[runall.find("catch"):runall.find("finally")],
+      False)
 
 boot = texts["00-bootstrap.ps1"]
 check("bootstrap enables PSRemoting", "Enable-PSRemoting" in boot, True)
@@ -163,7 +178,13 @@ steam = texts["30-steam.ps1"]
 check("Steam installs onto D:", "/D=$SteamDir" in steam, True)
 
 apollo_stage = texts["25-apollo.ps1"]
-check("Apollo config is junctioned", "mklink /J" in apollo_stage, True)
+apollo_junction = texts["apollo-junction.ps1"]
+# The junction maneuver itself was split into provision/assets/
+# apollo-junction.ps1 to keep 25-apollo.ps1 under 200 lines; the stage still
+# dot-sources and calls it.
+check("Apollo config is junctioned", "mklink /J" in apollo_junction, True)
+check("25-apollo.ps1 dot-sources the junction helper",
+      "apollo-junction.ps1" in apollo_stage, True)
 check("Apollo install location is read, not assumed",
       "InstallLocation" in apollo_stage, True)
 # FIX 3 (review round 1): 20-sudovda.ps1's certificate-trust coverage moved
@@ -172,6 +193,36 @@ check("Apollo install location is read, not assumed",
 # file that used to hold it.
 check("Apollo runs the bundled SudoVDA installer (certificate trust delegated to it)",
       "install.bat" in apollo_stage, True)
+
+# FIX 11 (final review): cross-check the literals that were only recoupled
+# by convention until now - the same guard the PROVISION_VERSION check above
+# already applies, extended to the other repeated constants. A future edit
+# to only one side would otherwise drift silently.
+import autounattend  # noqa: E402
+import apollo  # noqa: E402
+
+winrm_exec_text = (GUEST / "winrm_exec.py").read_text(encoding="utf-8")
+check("Administrator: 40-agent.ps1 trigger matches autounattend.ADMIN_ACCOUNT",
+      f"-User '{autounattend.ADMIN_ACCOUNT}'" in agent, True)
+check("Administrator: 40-agent.ps1 principal matches autounattend.ADMIN_ACCOUNT",
+      f"-UserId '{autounattend.ADMIN_ACCOUNT}'" in agent, True)
+check("Administrator: 50-power.ps1 autologon user matches autounattend.ADMIN_ACCOUNT",
+      f"-Value '{autounattend.ADMIN_ACCOUNT}'" in power, True)
+check("Administrator: winrm_exec.py default GUEST_USER matches autounattend.ADMIN_ACCOUNT",
+      f'"{autounattend.ADMIN_ACCOUNT}"' in winrm_exec_text, True)
+
+check("guacamole-agent: 40-agent.ps1 and 99-marker.ps1 name the same scheduled task",
+      "'guacamole-agent'" in agent and "'guacamole-agent'" in marker, True)
+
+check(r"D:\Steam: 30-steam.ps1 matches apollo.STEAM_DIR",
+      apollo.STEAM_DIR in steam, True)
+check(r"D:\Steam: 99-marker.ps1 matches apollo.STEAM_DIR",
+      apollo.STEAM_DIR in marker, True)
+
+for name in ["run-all.ps1", "25-apollo.ps1", "40-agent.ps1", "99-marker.ps1",
+             "run-agent.ps1"]:
+    check(rf"C:\nivuus\state: {name} uses the canonical state directory",
+          "C:\\nivuus\\state" in texts[name], True)
 
 # Every stage must accept the payload root, or run-all cannot drive it.
 for name in STAGES:
