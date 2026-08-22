@@ -86,7 +86,8 @@ provisionnement, et une URL qui périme casserait des installations futures.
 ```
 00-bootstrap   (existe) WinRM, découverte de la charge utile
 10-nvidia      (existe) pilote, jeton de redémarrage
-15-virtio      NetKVM ; puis WinFsp + viofs — ÉTAPE NON BLOQUANTE
+15-virtio      NetKVM — ÉTAPE BLOQUANTE (voir la table des risques) ; puis
+               WinFsp + viofs, non bloquant
 20-disque      assigne D:, crée D:\Steam et D:\state
 25-apollo      installe Apollo (donc SudoVDA), jonctionne sa config vers D:,
                écrit sunshine.conf et apps.json, sème les identifiants
@@ -134,7 +135,10 @@ continue de fonctionner sans retoucher Pomerium.
 sur l'hôte, lu à la fabrication, **jamais depuis la ligne de commande** — même
 posture que le mot de passe administrateur et la clé produit en A. Ils sont
 **distincts** du mot de passe administrateur Windows, que la bascule sépare.
-L'étape 25 les sème seulement si `D:\state\apollo` est vide.
+L'étape 25 les sème seulement si son propre marqueur
+(`D:\state\apollo\.nivuus-creds-seeded`) est absent — pas si le répertoire est
+vide : un nom de fichier interne à Apollo pourrait changer sans préavis à une
+mise à jour, alors que ce marqueur n'appartient qu'à nous.
 
 ⚠️ **Aucun identifiant Steam n'entre jamais dans l'image.** Le propriétaire se
 connecte une fois. Steam Guard peut redemander une validation après une
@@ -237,7 +241,7 @@ Policies\...\WindowsUpdate\AU\NoAutoRebootWithLoggedOnUsers = 1
 | `installer/windows-guest/provision/run-all.ps1` | étendu (jeton de redémarrage inchangé) |
 | `installer/windows-guest/payload.py` | artefacts de B ; `PROVISION_VERSION = "B1"` |
 | `installer/windows-guest/templates/sunshine.conf.j2`, `apps.json.j2` | configuration d'Apollo |
-| `installer/windows-guest/tests/` | tests de rendu et de la déclaration d'artefacts |
+| `scripts/tests/test_windows_guest_*.py` | tests de rendu et de la déclaration d'artefacts |
 
 ## Tests d'acceptation
 
