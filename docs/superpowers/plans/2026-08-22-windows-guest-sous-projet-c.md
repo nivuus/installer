@@ -1163,10 +1163,9 @@ M="--system --print-reply --dest=org.freedesktop.systemd1 /org/freedesktop/syste
 dbus-send $M.StopUnit string:"nvidia-persistenced.service" string:"replace"
 
 # 2. Installer un invité jetable (sous-projet A)
-cd installer/windows-guest
-sudo python3 testdomain.py define \
+(cd installer/windows-guest && sudo python3 testdomain.py define \
   --windows-iso /media/backup/en-us_windows_11_iot_enterprise_ltsc_2024_x64_dvd_f6b14814.iso \
-  --unattend-iso /media/data/iso/nivuus-unattend.iso
+  --unattend-iso /media/data/iso/nivuus-unattend.iso)
 virsh start Windows-LTSC-test
 ```
 
@@ -1180,12 +1179,20 @@ for i in $(seq 1 40); do
 done
 ```
 
-Attendre que le provisionnement finisse. Le port WinRM 5985 s'ouvre à la fin et
-c'est le signal conçu (voir `testdomain.py wait_ready()`). Il existe une étroite
-course dans `00-bootstrap.ps1` : entre l'activation de la communication à distance
-et la désactivation de la règle pare-feu, le port peut être brièvement accessible
-avant que le provisionnement soit vraiment fini. `wait-ready` sert à la fois à
-attendre et à dériver l'adresse IP, et sera relancé après le redémarrage pour <pm>.
+Attendre que le provisionnement finisse avant de toucher au domaine :
+
+```bash
+# Wait for provisioning to finish before touching the domain.
+(cd installer/windows-guest && python3 testdomain.py wait-ready) >/dev/null
+```
+
+Le port WinRM 5985 s'ouvre à la fin et c'est le signal conçu (voir
+`testdomain.py wait_ready()`) : `wait-ready` bloque jusqu'à ce qu'il s'ouvre.
+Il existe une étroite course dans `00-bootstrap.ps1` : entre l'activation de la
+communication à distance et la désactivation de la règle pare-feu, le port peut
+être brièvement accessible avant que le provisionnement soit vraiment fini.
+`wait-ready` sera rappelé après le redémarrage du domaine pour dériver
+l'adresse IP à jour (un bail DHCP peut changer).
 
 (Note : la course elle-même est un défaut du script de bootstrap du sous-projet A,
 fermée en désactivant la règle *avant* d'activer PSRemoting. C'est un sujet de
