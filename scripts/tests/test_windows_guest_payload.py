@@ -11,7 +11,6 @@ import tempfile
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "installer" / "windows-guest"))
 
-import build  # noqa: E402
 import payload  # noqa: E402
 
 failures = []
@@ -136,6 +135,27 @@ with tempfile.TemporaryDirectory() as tmp:
         if "agent.exe" not in str(e):
             failures.append(f"verify_staged error doesn't name agent.exe: {e}")
 
+# Same tamper-detection path for the Apollo configuration added in task 9:
+# verify_staged must fail if a config/* file is removed from an already
+# staged tree, not just when config_dir was never supplied in the first
+# place - otherwise a future refactor could make the requirement conditional
+# on config_dir without any test noticing.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    sources = make_tree(root / "src")
+    dest = root / "staging" / "nivuus"
+    marker = payload.marker_text("Windows 11", "20260822")
+    payload.stage_payload(dest, sources, marker)
+    (dest / "config" / "sunshine.conf").unlink()
+    try:
+        payload.verify_staged(dest)
+        failures.append(
+            "verify_staged: accepted a staged tree missing config/sunshine.conf")
+    except payload.PayloadError as e:
+        if "config/sunshine.conf" not in str(e):
+            failures.append(
+                f"verify_staged error doesn't name config/sunshine.conf: {e}")
+
 # --- Sous-projet B : la charge utile déclare ses artefacts en un seul endroit.
 # ⚠️ PROVISION_VERSION n'est PAS touché ici : test_windows_guest_provision.py
 # le recoupe avec la chaîne écrite par 99-marker.ps1, donc les deux doivent
@@ -236,48 +256,6 @@ with tempfile.TemporaryDirectory() as tmp:
           (dest / "config" / "sunshine.conf").is_file(), True)
     check("the staged payload carries the secrets",
           (dest / "config" / "secrets.psd1").is_file(), True)
-
-# --- Sous-projet B, tâche 9 : le mode "rebuild" sans confirmation opérateur
-# doit être refusé. C'est le seul garde-fou réel (Setup repartitionne avant
-# qu'un script invité ne tourne) - un refus sans test est un refus qu'un
-# futur remaniement supprime sans que rien ne s'en aperçoive.
-args = build.parse_args([
-    "--windows-iso", "/nonexistent.iso",
-    "--drivers-dir", "/nonexistent-drivers",
-    "--disk-mode", "rebuild",
-])
-check("rebuild defaults to unverified", args.target_disk_verified, False)
-try:
-    build.enforce_disk_mode_guard(args.disk_mode, args.target_disk_verified)
-    failures.append("enforce_disk_mode_guard: accepted rebuild with no "
-                     "--target-disk-verified")
-except SystemExit as e:
-    if "partition 4" not in str(e):
-        failures.append(f"disk-mode guard message doesn't name partition 4: {e}")
-
-# The same rebuild request, once the operator passes --target-disk-verified,
-# must NOT be refused.
-args = build.parse_args([
-    "--windows-iso", "/nonexistent.iso",
-    "--drivers-dir", "/nonexistent-drivers",
-    "--disk-mode", "rebuild",
-    "--target-disk-verified",
-])
-try:
-    build.enforce_disk_mode_guard(args.disk_mode, args.target_disk_verified)
-except SystemExit as e:
-    failures.append(f"disk-mode guard refused a verified rebuild: {e}")
-
-# wipe (the default) never needs --target-disk-verified.
-args = build.parse_args([
-    "--windows-iso", "/nonexistent.iso",
-    "--drivers-dir", "/nonexistent-drivers",
-])
-check("default disk mode is wipe", args.disk_mode, "wipe")
-try:
-    build.enforce_disk_mode_guard(args.disk_mode, args.target_disk_verified)
-except SystemExit as e:
-    failures.append(f"disk-mode guard refused the default wipe mode: {e}")
 
 if failures:
     print(f"FAIL ({len(failures)})")

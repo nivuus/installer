@@ -102,6 +102,14 @@ def enforce_disk_mode_guard(disk_mode: str, target_disk_verified: bool) -> None:
 
 
 def main(argv=None) -> int:
+    # The umask is the real guarantee: it makes every file this process
+    # creates (in particular the multi-hundred-MB ISO xorriso writes, which
+    # otherwise inherits the ambient umask - typically world-readable) come
+    # into existence already mode 0600, for the entire time it takes to
+    # write it, not just after the fact. The os.chmod(out, ...) below is
+    # kept too, as a belt-and-braces assertion of the same invariant, not
+    # as the mechanism that provides it.
+    os.umask(0o077)
     args = parse_args(argv)
     enforce_disk_mode_guard(args.disk_mode, args.target_disk_verified)
     key = read_secret(args.key_file, "product key file")
@@ -150,6 +158,10 @@ def main(argv=None) -> int:
             out.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             unattend_iso.build_iso(stage, out)
 
+        # Belt and braces: the umask above is what actually keeps the ISO
+        # private while it is being written; this chmod only re-asserts the
+        # same mode afterwards, in case something in the write path (e.g. an
+        # external tool restoring its own default mode) ever weakens it.
         os.chmod(out, 0o600)
         unattend_iso.verify_iso(out)
         print(f"\nwrote {out} ({out.stat().st_size // 1024} KiB)")

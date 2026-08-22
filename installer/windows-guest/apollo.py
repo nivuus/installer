@@ -8,12 +8,17 @@ The Web-manager credentials are NOT rendered into sunshine.conf: Apollo hashes
 them itself through `sunshine.exe --creds`, which is why this module ships them
 separately in a PowerShell data file the guest steps read.
 
-ENCODING CONTRACT: render_secrets() produces a UTF-8 string intended for a
+ENCODING CONTRACT: render_secrets() produces a string intended for a
 PowerShell data file (.psd1). On Windows PowerShell 5.1 (the target guest OS),
 Import-PowerShellDataFile reads a file without a UTF-8 BOM as ANSI (system
-codepage). To preserve secret values correctly, the caller MUST write the result
-as UTF-8 with a BOM (utf-8-sig). This module defensively restricts all secret
-values to ASCII to eliminate encoding dependencies regardless of writer behavior.
+codepage), which would misdecode non-ASCII bytes. render_secrets() closes that
+question at the source instead of pushing it onto the caller: it REFUSES any
+secret value that is not pure ASCII. ASCII is byte-identical across UTF-8 and
+every ANSI codepage, so the caller may write the result with a plain
+`write_text()` - no BOM, no explicit encoding - and it is still read back
+correctly. Do not reintroduce a BOM requirement here without first relaxing
+the ASCII restriction below; the two are the same trade-off and must move
+together.
 """
 from __future__ import annotations
 
