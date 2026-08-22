@@ -140,7 +140,11 @@ en `exit 0` par conception, et l'échec ne paraît que dans
 | `installer/windows-guest/domain.py` | détection complémentaire + rendu ; CLI `xml` / `define` |
 | `installer/windows-guest/templates/domain.xml.j2` | le gabarit |
 | `installer/common/hardware.py` | étendu : fonctions PCI d'un slot, NVMe passthrough |
-| `installer/windows-guest/tests/test_domain.py` | tests du rendu et de la détection |
+| `scripts/tests/test_windows_guest_hardware.py` | tests des analyseurs de détection |
+| `scripts/tests/test_windows_guest_production_domain.py` | tests du plan CPU et du rendu |
+
+Les tests vont dans `scripts/tests/`, où vivent déjà les six suites du
+sous-projet A : scripts Python autonomes lancés directement, **sans pytest**.
 
 Le domaine de test de A (`testdomain.py`, `domain-test.xml.j2`) **reste** : il
 sert de banc jetable et n'est pas remplacé par C.
