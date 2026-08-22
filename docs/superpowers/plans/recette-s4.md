@@ -12,7 +12,7 @@ allumée en permanence et tout le travail d'économie d'énergie tombe.
 ## Préparation
 
 ```bash
-# 0. Arrêter le domaine de production (le temps de la recette, la VM gaming est hors ligne — roughly ninety minutes)
+# 0. Arrêter le domaine de production (le temps de la recette, la VM gaming est hors ligne — environ quatre-vingt-dix minutes)
 virsh shutdown --mode acpi Windows
 for i in $(seq 1 60); do
   [ "$(LC_ALL=C virsh domstate Windows)" = "shut off" ] && break
@@ -49,13 +49,8 @@ Attendre que le provisionnement finisse. Le port WinRM 5985 s'ouvre à la fin et
 c'est le signal conçu (voir `testdomain.py wait_ready()`). Il existe une étroite
 course dans `00-bootstrap.ps1` : entre l'activation de la communication à distance
 et la désactivation de la règle pare-feu, le port peut être brièvement accessible
-avant que le provisionnement soit vraiment fini. Comme mesure conservatrice,
-confirmer que `PROVISION.done` existe une fois `wait-ready` revient :
-
-```bash
-export GUEST_IP=$(cd installer/windows-guest && python3 testdomain.py wait-ready)
-python3 installer/windows-guest/winrm_exec.py cmd 'type C:\nivuus\state\PROVISION.done'
-```
+avant que le provisionnement soit vraiment fini. `wait-ready` sert à la fois à
+attendre et à dériver l'adresse IP, et sera relancé après le redémarrage pour <pm>.
 
 (Note : la course elle-même est un défaut du script de bootstrap du sous-projet A,
 fermée en désactivant la règle *avant* d'activer PSRemoting. C'est un sujet de
@@ -73,6 +68,9 @@ virsh dumpxml Windows-LTSC-test > /tmp/s4-test.xml
 virsh destroy Windows-LTSC-test
 virsh define /tmp/s4-test.xml
 virsh start Windows-LTSC-test
+
+# Redériver l'adresse IP après le redémarrage (DHCP peut avoir changé)
+export GUEST_IP=$(cd installer/windows-guest && python3 testdomain.py wait-ready)
 ```
 
 ## La mesure
