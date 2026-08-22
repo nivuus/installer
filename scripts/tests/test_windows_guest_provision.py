@@ -14,7 +14,9 @@ GUEST = REPO / "installer" / "windows-guest"
 PROVISION = GUEST / "provision"
 PROBE = GUEST / "probe"
 
-STAGES = ["00-bootstrap.ps1", "10-nvidia.ps1", "20-sudovda.ps1", "99-marker.ps1"]
+STAGES = ["00-bootstrap.ps1", "10-nvidia.ps1", "15-virtio.ps1", "20-disk.ps1",
+          "25-apollo.ps1", "30-steam.ps1", "40-agent.ps1", "50-power.ps1",
+          "55-updates.ps1", "99-marker.ps1"]
 
 failures = []
 
@@ -76,7 +78,6 @@ import payload  # noqa: E402
 check("marker version matches payload.PROVISION_VERSION",
       f"provision_version={payload.PROVISION_VERSION}" in marker, True)
 check("marker opens 5985", "Enable-NetFirewallRule" in marker, True)
-check("marker disables autologon", "AutoAdminLogon" in marker, True)
 check("marker clears the resume entry", "Remove-ItemProperty" in marker, True)
 check("marker writes PROVISION.done", "PROVISION.done" in marker, True)
 # The marker is what makes "5985 reachable" mean "guest is provisioned", so it
@@ -98,10 +99,6 @@ check("nvidia writes reboot.requested", "reboot.requested" in nvidia, True)
 check("nvidia requests reboot only on the ExitCode -eq 1 path",
       nvidia.find("-eq 1") < nvidia.find("reboot.requested"), True)
 
-sudovda = texts["20-sudovda.ps1"]
-check("sudovda trusts the publisher certificate", "TrustedPublisher" in sudovda, True)
-check("sudovda verifies the device afterwards", "ROOT\\DISPLAY" in sudovda, True)
-
 cs = texts["AdvancedColor.cs"]
 for symbol in ("GetDisplayConfigBufferSizes", "QueryDisplayConfig",
                "DisplayConfigGetDeviceInfo", "QDC_ONLY_ACTIVE_PATHS"):
@@ -118,6 +115,45 @@ check("probe queries the target device name (self-identification)",
 # compiles and still returns rc=0, but silently names the wrong display.
 check("target device name info type is 2 (GET_TARGET_NAME)",
       "INFO_TYPE_TARGET_DEVICE_NAME = 2;" in cs, True)
+
+# --- Sub-project B.
+# R1: the version lives in two languages and must move in one step.
+check("provision version is B1", payload.PROVISION_VERSION, "B1")
+check("the standalone SudoVDA stage is gone",
+      (PROVISION / "20-sudovda.ps1").exists(), False)
+
+marker = texts["99-marker.ps1"]
+# A kept autologon is the whole point of the appliance: Apollo captures an
+# interactive desktop and the agent lives in session 1. A had to disable it.
+check("marker no longer disables autologon", "AutoAdminLogon" in marker, False)
+check("marker verifies the agent session", "agent-session.txt" in marker, True)
+check("marker verifies Apollo runs", "ApolloService" in marker, True)
+check("marker verifies Steam", "steam.exe" in marker, True)
+# 5985 opens last, after every check: the host reads a reachable 5985 as
+# "provisioned", and a premature open already lied once.
+check("marker opens 5985 last",
+      marker.rfind("Enable-NetFirewallRule") > marker.rfind("throw"), True)
+
+power = texts["50-power.ps1"]
+check("power stage enables permanent autologon",
+      "AutoAdminLogon" in power and "AutoLogonCount" in power, True)
+check("power stage enables hibernation", "/hibernate on" in power, True)
+
+agent = texts["40-agent.ps1"]
+check("agent runs interactively", "LogonType Interactive" in agent, True)
+check("agent task carries no password", "-Password" in agent, False)
+
+steam = texts["30-steam.ps1"]
+check("Steam installs onto D:", "/D=$SteamDir" in steam, True)
+
+apollo_stage = texts["25-apollo.ps1"]
+check("Apollo config is junctioned", "mklink /J" in apollo_stage, True)
+check("Apollo install location is read, not assumed",
+      "InstallLocation" in apollo_stage, True)
+
+# Every stage must accept the payload root, or run-all cannot drive it.
+for name in STAGES:
+    check(f"{name} takes PayloadRoot", "$PayloadRoot" in texts[name], True)
 
 if failures:
     print(f"FAIL ({len(failures)})")

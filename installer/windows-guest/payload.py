@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MARKER_NAME = "PAYLOAD.id"
-PROVISION_VERSION = "A1"
+PROVISION_VERSION = "B1"
 TARGET_BUILD = "26100"
 
 

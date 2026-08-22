@@ -1,10 +1,17 @@
 <#
     Stage 99: close the provisioning.
 
-    Order matters: everything else must be true before port 5985 opens, because
-    the host treats a reachable 5985 as "the guest is provisioned". This is
-    also where 10-nvidia.ps1's device check lands when that stage had to defer
-    it to survive a driver-install reboot.
+    Order matters: everything else must be true before port 5985 opens,
+    because the host treats a reachable 5985 as "the guest is provisioned".
+    This is also where 10-nvidia.ps1's device check lands when that stage had
+    to defer it to survive a driver-install reboot.
+
+    ⚠️ Unlike sub-project A, this stage does NOT disable the automatic logon.
+    The appliance holds a session open permanently: Apollo captures an
+    interactive desktop and the agent must live in session 1. With the dummy
+    plug removed, that desktop is reachable only through Apollo (paired
+    client), the agent (authenticated platform) or the VNC console, which
+    listens on 127.0.0.1 and is therefore root-on-the-host only.
 #>
 param([Parameter(Mandatory = $true)][string]$PayloadRoot)
 
@@ -20,18 +27,36 @@ Copy-Item -Path (Join-Path $PayloadRoot 'probe') -Destination 'C:\nivuus' `
 $gpu = Get-PnpDevice -Class Display | Where-Object { $_.FriendlyName -match 'NVIDIA' }
 if (-not $gpu) { throw 'no NVIDIA display device at end of provisioning' }
 if ($gpu.Status -ne 'OK') { throw "NVIDIA device status is $($gpu.Status)" }
-Write-Host "NVIDIA device OK: $($gpu.FriendlyName)"
 
-$winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
-Set-ItemProperty -Path $winlogon -Name 'AutoAdminLogon' -Value '0'
-Remove-ItemProperty -Path $winlogon -Name 'DefaultPassword' -ErrorAction SilentlyContinue
+$vda = Get-PnpDevice -InstanceId 'ROOT\DISPLAY\*' -ErrorAction SilentlyContinue |
+       Where-Object { $_.Status -eq 'OK' } | Select-Object -First 1
+if (-not $vda) { throw 'no working virtual display at end of provisioning' }
+
+$svc = Get-Service -Name 'ApolloService' -ErrorAction SilentlyContinue
+if (-not $svc -or $svc.Status -ne 'Running') {
+    throw "ApolloService is $(if ($svc) { $svc.Status } else { 'absent' })"
+}
+
+if (-not (Test-Path 'D:\Steam\steam.exe')) { throw 'no steam.exe on D:' }
+if (-not (Test-Path 'D:\state\NIVUUS-DATA.id')) { throw 'D: carries no Nivuus marker' }
+
+# The session-1 proof. check-session.sh cannot be used on an appliance: it
+# needs the CIFS mount the cutover removes and a C:\dev development build.
+$sessionFile = Join-Path $StateDir 'agent-session.txt'
+if (-not (Test-Path $sessionFile)) { throw 'the agent never reported a session id' }
+$sid = (Get-Content $sessionFile -Raw).Trim()
+if ($sid -ne '1') {
+    throw "the agent runs in session '$sid', not 1: window capture and input injection would both fail"
+}
+
 Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' `
                     -Name 'NivuusProvision' -ErrorAction SilentlyContinue
 
 $marker = @(
-    "provision_version=A1",
+    "provision_version=B1",
     "completed=$(Get-Date -Format o)",
-    "computer=$env:COMPUTERNAME"
+    "computer=$env:COMPUTERNAME",
+    "agent_session=$sid"
 )
 Set-Content -Path (Join-Path $StateDir 'PROVISION.done') -Value $marker -Encoding ASCII
 

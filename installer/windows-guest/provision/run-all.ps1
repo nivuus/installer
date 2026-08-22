@@ -15,7 +15,10 @@ Set-Content -Path (Join-Path $StateDir 'provision.started') -Value (Get-Date -Fo
 $rebootPending = $false
 Start-Transcript -Path 'C:\nivuus\provision.log' -Append | Out-Null
 try {
-    $stages = @('00-bootstrap.ps1', '10-nvidia.ps1', '20-sudovda.ps1', '99-marker.ps1')
+    $stages = @('00-bootstrap.ps1', '10-nvidia.ps1', '15-virtio.ps1',
+                '20-disk.ps1', '25-apollo.ps1', '30-steam.ps1',
+                '40-agent.ps1', '50-power.ps1', '55-updates.ps1',
+                '99-marker.ps1')
     foreach ($stage in $stages) {
         $done = Join-Path $StateDir "$stage.done"
         if (Test-Path $done) {
