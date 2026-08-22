@@ -40,6 +40,11 @@ check("emulator cpuset", plan["emulator_cpuset"], "14-15")
 check("first pin", plan["vcpupin"][0], (0, 0))
 check("last pin", plan["vcpupin"][-1], (13, 13))
 check("pin count matches vcpus", len(plan["vcpupin"]), 14)
+# Invariant: union of all pinned CPUs and emulator CPUs equals the input pool
+pinned_cpus = set(cpu for _, cpu in plan["vcpupin"])
+emulator_cpus = set(range(14, 16))  # "14-15" parsed
+check("16-CPU invariant: all CPUs accounted for",
+      pinned_cpus | emulator_cpus, set(range(16)))
 
 # An odd remainder must drop a thread rather than break SMT pairing, and the
 # CPU it frees goes to the emulator rather than being left idle.
@@ -47,8 +52,17 @@ odd = domain.vcpu_plan(list(range(11)))
 check("odd pool keeps pairs", odd["vcpus"], 8)
 check("odd pool cores", odd["cores"], 4)
 check("odd pool emulator takes every leftover", odd["emulator_cpuset"], "8-10")
+# Invariant: union of all pinned CPUs and emulator CPUs equals the input pool
+pinned_odd = set(cpu for _, cpu in odd["vcpupin"])
+emulator_odd = set(range(8, 11))  # "8-10" parsed
+check("11-CPU invariant: all CPUs accounted for",
+      pinned_odd | emulator_odd, set(range(11)))
 
 check_raises("pool too small", domain.DomainError, lambda: domain.vcpu_plan([0, 1, 2]))
+
+# Non-contiguous pool must raise DomainError to prevent silent CPU loss
+check_raises("non-contiguous pool is refused", domain.DomainError,
+             lambda: domain.vcpu_plan([0, 1, 2, 3, 4, 5, 10, 15]))
 
 if failures:
     print(f"FAIL ({len(failures)})")

@@ -24,12 +24,28 @@ def vcpu_plan(pool: list[int], reserve: int = 2) -> dict:
     jitter. The guest gets whole SMT pairs — an odd remainder drops a thread
     rather than hand Windows a lone sibling, which is the mistake the 14x1
     topology made before 2026-07-17.
+
+    Assumes SMT siblings are adjacent in the sorted pool (e.g., (0,1), (2,3)).
+    The pool must be contiguous after deduplication and sorting. A machine whose
+    SMT pairs are not value-adjacent (e.g., real pairs (0,8),(1,9)) requires a
+    code change here, not a differently-ordered argument.
     """
     if len(pool) < reserve + 2:
         raise DomainError(
             f"need at least {reserve + 2} isolated CPUs, got {len(pool)}"
         )
-    ordered = sorted(pool)
+
+    # Validate contiguity: sorted unique pool must be [min..max] with no gaps.
+    # This prevents emulator_cpuset from silently naming CPUs not in the pool.
+    unique_sorted = sorted(set(pool))
+    expected_range = list(range(unique_sorted[0], unique_sorted[-1] + 1))
+    if unique_sorted != expected_range:
+        gaps = set(expected_range) - set(unique_sorted)
+        raise DomainError(
+            f"pool is not contiguous; missing CPUs: {sorted(gaps)}"
+        )
+
+    ordered = unique_sorted
     guest = ordered[: len(ordered) - reserve]
     if len(guest) % 2:
         guest = guest[:-1]
