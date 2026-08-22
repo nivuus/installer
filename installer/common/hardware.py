@@ -365,6 +365,31 @@ def parse_nvme_controllers(raw: str) -> list[dict]:
     return sorted(out, key=lambda c: c["address"])
 
 
+def _whole_disk_name(name: str) -> str:
+    """Get the whole-disk name from a device name (partition or disk).
+
+    Uses sysfs to detect whether the device is a partition:
+    - If /sys/class/block/<name>/partition exists, extract parent disk name
+    - Otherwise, the name already is the whole disk
+
+    Falls back to returning the name unchanged on any sysfs error.
+    """
+    try:
+        partition_file = f"/sys/class/block/{name}/partition"
+        if os.path.exists(partition_file):
+            # It's a partition; find the parent disk
+            # Resolve the symlink to get the sysfs path, then go up one level
+            sysfs_path = os.path.realpath(f"/sys/class/block/{name}")
+            parent_path = os.path.dirname(sysfs_path)
+            return os.path.basename(parent_path)
+        else:
+            # No partition file; this is already the whole disk
+            return name
+    except OSError:
+        # Fall back to returning the name unchanged on any error
+        return name
+
+
 def _device_to_pci_address(device: str) -> Optional[str]:
     """Resolve a block device name to its PCI address, or None."""
     try:
@@ -421,9 +446,9 @@ def host_root_pci_addresses() -> Optional[set[str]]:
     # Direct block device: try to extract the disk name from the source.
     if src.startswith("/dev/") and not src.startswith("/dev/mapper/"):
         # Handle block devices directly (e.g., /dev/nvme0n1p3, /dev/sda1)
-        # Remove partition numbers to get the disk name
+        # Get the whole disk name (handles both partition and whole-disk names)
         disk = os.path.basename(src)
-        disk = re.sub(r"(?:p)?[0-9]+$", "", disk)
+        disk = _whole_disk_name(disk)
         addr = _device_to_pci_address(disk)
         if addr:
             backing_devices.add(addr)
@@ -446,7 +471,7 @@ def host_root_pci_addresses() -> Optional[set[str]]:
             for slave in os.listdir(dm_path):
                 # Each slave is a symlink to the backing device
                 # E.g., nvme0n1p3, sda1, etc.
-                disk = re.sub(r"(?:p)?[0-9]+$", "", slave)
+                disk = _whole_disk_name(slave)
                 addr = _device_to_pci_address(disk)
                 if addr:
                     backing_devices.add(addr)

@@ -63,6 +63,11 @@ check(
 check("unknown slot yields nothing", hardware.parse_pci_functions(LSPCI, "09:00.0"), [])
 check("empty input yields nothing", hardware.parse_pci_functions("", "01:00.0"), [])
 
+# Test the whole-disk name extractor (sysfs-based, so testable on this host)
+# This verifies F2 fix: partition names resolve correctly, and whole-disk names stay unchanged
+check("partition name resolves to disk", hardware._whole_disk_name("nvme0n1p3"), "nvme0n1")
+check("whole-disk name unchanged", hardware._whole_disk_name("nvme0n1"), "nvme0n1")
+
 ctrls = hardware.parse_nvme_controllers(LSPCI)
 check("two NVMe controllers", len(ctrls), 2)
 check("host controller listed", ctrls[0]["address"], "0000:02:00.0")
