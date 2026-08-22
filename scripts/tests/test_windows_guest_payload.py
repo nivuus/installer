@@ -4,6 +4,7 @@
 Run: python3 scripts/tests/test_windows_guest_payload.py
 """
 import pathlib
+import shutil
 import sys
 import tempfile
 
@@ -20,21 +21,27 @@ def check(label, got, want):
         failures.append(f"{label}: got {got!r}, want {want!r}")
 
 
-def make_tree(root: pathlib.Path, *, with_nvidia=True, with_sudovda=True):
+def make_tree(root: pathlib.Path) -> "payload.PayloadSources":
+    """Build a complete offline payload tree (all REQUIRED_BINARIES present)."""
     (root / "provision").mkdir(parents=True)
     (root / "provision" / "run-all.ps1").write_text("# run-all\n")
     (root / "provision" / "00-bootstrap.ps1").write_text("# bootstrap\n")
+    (root / "provision" / "99-marker.ps1").write_text("# marker\n")
     (root / "probe").mkdir()
     (root / "probe" / "advanced-color.ps1").write_text("# probe\n")
     drivers = root / "drivers"
     (drivers / "nvidia").mkdir(parents=True)
-    (drivers / "sudovda").mkdir(parents=True)
-    if with_nvidia:
-        (drivers / "nvidia" / "580.00-desktop-win11-64bit.exe").write_bytes(b"MZ")
-    if with_sudovda:
-        (drivers / "sudovda" / "SudoVDA.inf").write_text("[Version]\n")
-        (drivers / "sudovda" / "install.bat").write_text("@echo off\n")
-        (drivers / "sudovda" / "sudovda.cer").write_bytes(b"cert")
+    (drivers / "nvidia" / "580.00-desktop-win11-64bit.exe").write_bytes(b"MZ")
+    (drivers / "apollo").mkdir()
+    (drivers / "apollo" / "Apollo-0.4.6.exe").write_bytes(b"MZ")
+    (drivers / "steam").mkdir()
+    (drivers / "steam" / "SteamSetup.exe").write_bytes(b"MZ")
+    (drivers / "virtio" / "netkvm").mkdir(parents=True)
+    (drivers / "virtio" / "netkvm" / "netkvm.inf").write_text("[Version]\n")
+    (drivers / "winfsp").mkdir()
+    (drivers / "winfsp" / "winfsp-2.0.msi").write_bytes(b"MSI")
+    (drivers / "agent").mkdir()
+    (drivers / "agent" / "agent.exe").write_bytes(b"MZ")
     return payload.PayloadSources(provision_dir=root / "provision",
                                   probe_dir=root / "probe",
                                   drivers_dir=drivers)
@@ -54,7 +61,8 @@ with tempfile.TemporaryDirectory() as tmp:
     check("probe is staged", "probe/advanced-color.ps1" in dests, True)
     check("nvidia driver is staged",
           "drivers/nvidia/580.00-desktop-win11-64bit.exe" in dests, True)
-    check("sudovda inf is staged", "drivers/sudovda/SudoVDA.inf" in dests, True)
+    check("apollo installer is staged",
+          "drivers/apollo/Apollo-0.4.6.exe" in dests, True)
     check("no absolute destination",
           any(d.startswith("/") for d in dests), False)
 
@@ -80,72 +88,6 @@ with tempfile.TemporaryDirectory() as tmp:
     except payload.PayloadError:
         pass
 
-with tempfile.TemporaryDirectory() as tmp:
-    root = pathlib.Path(tmp)
-    sources = make_tree(root / "src", with_nvidia=False, with_sudovda=False)
-    missing = payload.missing_binaries(sources.drivers_dir)
-    check("all missing items reported", len(missing), 4)
-    check("nvidia named in the report",
-          any("nvidia" in m.lower() for m in missing), True)
-    check("sudovda named in the report",
-          any("sudovda" in m.lower() for m in missing), True)
-    check("install.bat named in the report",
-          any("install.bat" in m for m in missing), True)
-    check("sudovda.cer named in the report",
-          any("sudovda.cer" in m for m in missing), True)
-
-# Test missing install.bat
-with tempfile.TemporaryDirectory() as tmp:
-    root = pathlib.Path(tmp)
-    src = root / "src"
-    sources = make_tree(src)
-    (sources.drivers_dir / "sudovda" / "install.bat").unlink()
-    missing = payload.missing_binaries(sources.drivers_dir)
-    check("missing install.bat is reported",
-          any("install.bat" in m for m in missing), True)
-
-# Test missing sudovda.cer
-with tempfile.TemporaryDirectory() as tmp:
-    root = pathlib.Path(tmp)
-    src = root / "src"
-    sources = make_tree(src)
-    (sources.drivers_dir / "sudovda" / "sudovda.cer").unlink()
-    missing = payload.missing_binaries(sources.drivers_dir)
-    check("missing sudovda.cer is reported",
-          any("sudovda.cer" in m for m in missing), True)
-    check("missing_binaries does not mention Apollo",
-          any("Apollo" in m for m in missing), False)
-
-# Test stage_payload error includes Apollo guidance for SudoVDA
-with tempfile.TemporaryDirectory() as tmp:
-    root = pathlib.Path(tmp)
-    src = root / "src"
-    sources = make_tree(src)
-    (sources.drivers_dir / "sudovda" / "install.bat").unlink()
-    try:
-        payload.stage_payload(root / "dest", sources, "marker")
-        failures.append("stage_payload: accepted incomplete SudoVDA")
-    except payload.PayloadError as e:
-        if "Apollo" not in str(e):
-            failures.append(f"stage_payload error missing Apollo guidance: {e}")
-
-# Test verify_staged catches missing sudovda files (verify no Apollo guidance)
-with tempfile.TemporaryDirectory() as tmp:
-    root = pathlib.Path(tmp)
-    sources = make_tree(root / "src")
-    dest = root / "staging" / "nivuus"
-    marker = payload.marker_text("Windows 11", "20260822")
-    payload.stage_payload(dest, sources, marker)
-    (dest / "drivers" / "sudovda" / "install.bat").unlink()
-    try:
-        payload.verify_staged(dest)
-        failures.append("verify_staged: accepted payload with missing install.bat")
-    except payload.PayloadError as e:
-        if "install.bat" not in str(e):
-            failures.append(f"verify_staged error didn't mention install.bat: {e}")
-        if "Apollo" in str(e):
-            failures.append(f"verify_staged error mentions Apollo (should not): {e}")
-
 # Test stage_payload rejects dest_root equal to source directory
 with tempfile.TemporaryDirectory() as tmp:
     root = pathlib.Path(tmp)
@@ -170,6 +112,88 @@ with tempfile.TemporaryDirectory() as tmp:
     payload.stage_payload(dest, sources, marker)
     check("stray file removed after restage",
           (dest / "stray.txt").exists(), False)
+
+# --- Sous-projet B : la charge utile déclare ses artefacts en un seul endroit.
+# ⚠️ PROVISION_VERSION n'est PAS touché ici : test_windows_guest_provision.py
+# le recoupe avec la chaîne écrite par 99-marker.ps1, donc les deux doivent
+# bouger ensemble. C'est la tâche 8 qui les bascule en B1.
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    missing = payload.missing_binaries(root)
+    joined = "\n".join(missing)
+    for needle in ["nvidia", "apollo", "steam", "virtio", "winfsp", "agent"]:
+        check(f"empty payload reports {needle} missing", needle in joined, True)
+    # SudoVDA rides inside the Apollo installer; requiring it separately would
+    # install the same IDD twice.
+    check("sudovda is not required separately", "sudovda" in joined.lower(), False)
+
+def _make_complete_payload(root: pathlib.Path) -> None:
+    (root / "nvidia").mkdir(parents=True)
+    (root / "nvidia" / "610.88.exe").write_text("x")
+    (root / "apollo").mkdir()
+    (root / "apollo" / "Apollo-0.4.6.exe").write_text("x")
+    (root / "steam").mkdir()
+    (root / "steam" / "SteamSetup.exe").write_text("x")
+    (root / "virtio" / "netkvm").mkdir(parents=True)
+    (root / "virtio" / "netkvm" / "netkvm.inf").write_text("x")
+    (root / "virtio" / "viofs").mkdir(parents=True)
+    (root / "virtio" / "viofs" / "viofs.inf").write_text("x")
+    (root / "winfsp").mkdir()
+    (root / "winfsp" / "winfsp-2.0.msi").write_text("x")
+    (root / "agent").mkdir()
+    (root / "agent" / "agent.exe").write_text("x")
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    _make_complete_payload(root)
+    check("complete payload reports nothing missing",
+          payload.missing_binaries(root), [])
+
+# viofs is a comfort, not a requirement: the guest streams fine without the
+# /media/data share, so a missing viofs must NOT fail the build.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    _make_complete_payload(root)
+    shutil.rmtree(root / "virtio" / "viofs")
+    check("missing viofs does not fail the build",
+          payload.missing_binaries(root), [])
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    _make_complete_payload(root)
+    shutil.rmtree(root / "virtio" / "netkvm")
+    check("missing netkvm fails the build",
+          any("netkvm" in m for m in payload.missing_binaries(root)), True)
+
+import fetch_payload  # noqa: E402
+plans = fetch_payload.plan_downloads(pathlib.Path("/tmp/x"))
+check("every download has a url and a destination",
+      all(d.url.startswith("https://") and d.dest for d in plans), True)
+check("no download lands outside the drivers dir",
+      all(str(d.dest).startswith("/tmp/x") for d in plans), True)
+names = [d.name for d in plans]
+check("downloads are uniquely named", len(names), len(set(names)))
+
+# The irreplaceable artefact deserves its own message: no machine can rebuild
+# agent.exe once the current VM is wiped.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    src = root / "src"
+    (src / "provision").mkdir(parents=True)
+    (src / "probe").mkdir()
+    drivers = src / "drivers"
+    _make_complete_payload(drivers)
+    shutil.rmtree(drivers / "agent")
+    sources = payload.PayloadSources(
+        provision_dir=src / "provision", probe_dir=src / "probe",
+        drivers_dir=drivers)
+    try:
+        payload.stage_payload(root / "dest", sources, "marker")
+        failures.append("stage_payload: accepted a payload with no agent.exe")
+    except payload.PayloadError as e:
+        if "extracted from the current Windows VM" not in str(e):
+            failures.append(f"stage_payload error missing the agent warning: {e}")
 
 if failures:
     print(f"FAIL ({len(failures)})")
