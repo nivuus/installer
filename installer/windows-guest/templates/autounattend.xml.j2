@@ -55,10 +55,15 @@
             </ModifyPartition>
           </ModifyPartitions>
 {%- else %}
+          <WillWipeDisk>false</WillWipeDisk>
           <!-- Rebuild: reformat the system partition and NOTHING else. The
                games partition keeps Steam, its session and Apollo's pairings.
-               Valid only against a disk this tool partitioned in wipe mode -
-               20-disk.ps1 refuses to continue without D:\state\NIVUUS-DATA.id. -->
+               Safe only when run deliberately against a disk previously formatted
+               by this tool. 20-disk.ps1 post-install detects a wrong target via
+               D:\state\NIVUUS-DATA.id, but cannot prevent the reformat (it runs
+               after Setup's windowsPE pass). The real guard lives in the caller:
+               build.py and acceptance procedure enforce that rebuild only targets
+               a known previously-partitioned disk. -->
           <ModifyPartitions>
             <ModifyPartition wcm:action="add">
               <Order>1</Order><PartitionID>3</PartitionID>

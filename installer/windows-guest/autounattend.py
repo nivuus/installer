@@ -53,10 +53,13 @@ class UnattendParams:
     # extra logons before the automatic logon is turned off again.
     autologon_count: int = 5
     # "wipe" partitions the whole disk; "rebuild" reformats C: and leaves the
-    # games partition alone. See the plan header: rebuild against a disk this
-    # tool did not partition would reformat an arbitrary partition, which is
-    # why 20-disk.ps1 checks D:\state\NIVUUS-DATA.id before anything writes.
+    # games partition alone. Rebuild is safe only when run deliberately against
+    # a disk previously partitioned by this tool. 20-disk.ps1 detects a wrong
+    # target post-install via D:\state\NIVUUS-DATA.id, but cannot prevent the
+    # reformat (runs after Setup's windowsPE pass). Real guard is in build.py.
     disk_mode: str = "wipe"
+    # Size in MB. Validated even in rebuild mode (where template ignores it),
+    # as a typo guard; error message does not distinguish the two modes.
     system_partition_mb: int = DEFAULT_SYSTEM_PARTITION_MB
 
 

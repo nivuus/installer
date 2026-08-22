@@ -125,7 +125,7 @@ amp = ua.render(ua.UnattendParams(**{**GOOD, "admin_password": "a&b<c>"}))
 ET.fromstring(amp)
 check("password is XML-escaped", "a&amp;b&lt;c&gt;" in amp, True)
 
-# --- Sous-projet B : deux partitions, et un mode qui ne détruit pas D:.
+# Sub-project B: two partitions and a mode that preserves D:.
 base = dict(product_key="AAAAA-BBBBB-CCCCC-DDDDD-EEEEE",
             admin_password="s3cret", image_name="Windows 11 IoT Enterprise LTSC")
 
@@ -143,7 +143,8 @@ check("wipe mode installs to partition 3",
 
 rebuild = ua.render(
     ua.UnattendParams(**base, disk_mode="rebuild"))
-check("rebuild never wipes the disk", "WillWipeDisk" in rebuild, False)
+check("rebuild never wipes the disk", "<WillWipeDisk>true</WillWipeDisk>" in rebuild, False)
+check("rebuild explicitly disables disk wipe", "<WillWipeDisk>false</WillWipeDisk>" in rebuild, True)
 check("rebuild creates no partition", "<CreatePartition " in rebuild, False)
 check("rebuild formats exactly one partition", rebuild.count("<ModifyPartition "), 1)
 check("rebuild formats partition 3", "<PartitionID>3</PartitionID>" in rebuild, True)
