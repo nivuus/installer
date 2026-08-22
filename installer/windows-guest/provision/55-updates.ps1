@@ -1,0 +1,32 @@
+<#
+    Stage 55: Windows Update policy.
+
+    LTSC already removed feature updates - that is why it was chosen. What
+    remains is the monthly security rollup, and this guest is reachable from
+    the WAN on the streaming ports: turning security updates off would trade a
+    breakage risk for an intrusion risk, and a reinstall does not undo an
+    intrusion.
+
+    What breaks this configuration is not a security fix but a DRIVER pushed by
+    Windows Update - it would replace the NVIDIA driver the whole HDR chain
+    depends on, or SudoVDA itself. So that, and only that, is blocked.
+#>
+param([Parameter(Mandatory = $true)][string]$PayloadRoot)
+
+$ErrorActionPreference = 'Stop'
+
+$wu = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+New-Item -Path $wu -Force | Out-Null
+Set-ItemProperty -Path $wu -Name 'ExcludeWUDriversInQualityUpdate' -Value 1 -Type DWord
+
+$au = Join-Path $wu 'AU'
+New-Item -Path $au -Force | Out-Null
+# A reboot in the middle of a streaming session is the failure mode this
+# prevents; the host reboots the guest on its own schedule instead.
+Set-ItemProperty -Path $au -Name 'NoAutoRebootWithLoggedOnUsers' -Value 1 -Type DWord
+
+$search = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching'
+New-Item -Path $search -Force | Out-Null
+Set-ItemProperty -Path $search -Name 'SearchOrderConfig' -Value 0 -Type DWord
+
+Write-Host 'security updates on, driver updates excluded, no unattended reboot'
