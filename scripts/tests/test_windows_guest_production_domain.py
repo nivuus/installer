@@ -151,6 +151,15 @@ check("no vBIOS override", root.find("devices/hostdev/rom") is None, True)
 check("no i6300esb watchdog",
       [w.get("model") for w in root.findall("devices/watchdog")], ["itco"])
 
+# domain_in_listing() must correctly parse virsh list --all --name output
+# and reject partial matches (a domain named "Windows-LTSC-test" must not
+# satisfy a query for "Windows").
+LISTING = "Windows\nWindows-LTSC-test\n\n"
+check("existing domain is found", domain.domain_in_listing(LISTING, "Windows"), True)
+check("absent domain is not found", domain.domain_in_listing(LISTING, "Absent"), False)
+check("prefix is not a match", domain.domain_in_listing("Windows-LTSC-test\n", "Windows"), False)
+check("empty listing", domain.domain_in_listing("", "Windows"), False)
+
 # `define` must refuse an existing domain unless explicitly told to replace it:
 # until the cutover, "Windows" is the owner's production VM.
 check_raises(

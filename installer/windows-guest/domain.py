@@ -120,8 +120,32 @@ def _virsh(*args: str) -> subprocess.CompletedProcess:
                           env={**os.environ, "LC_ALL": "C"})
 
 
+def domain_in_listing(output: str, name: str) -> bool:
+    """Check if a domain name exists in virsh list output.
+
+    virsh list --all --name emits one name per line, possibly with blank lines.
+    Match exactly: a domain named "Windows-LTSC-test" must not satisfy a query
+    for "Windows".
+    """
+    lines = {line.strip() for line in output.split("\n") if line.strip()}
+    return name in lines
+
+
 def domain_exists(name: str = DOMAIN_NAME) -> bool:
-    return _virsh("dominfo", name).returncode == 0
+    """Check if a domain exists, or raise DomainError if we cannot determine it.
+
+    virsh dominfo returns nonzero identically for "absent", "unreachable", and
+    "permission denied". We use virsh list --all --name instead, which returns
+    0 if and only if libvirt answered, allowing us to distinguish "doesn't
+    exist" from "cannot be determined".
+    """
+    proc = _virsh("list", "--all", "--name")
+    if proc.returncode != 0:
+        raise DomainError(
+            f"could not determine if domain exists (libvirt unreachable?); "
+            f"refusing to proceed: {proc.stderr.strip()}"
+        )
+    return domain_in_listing(proc.stdout, name)
 
 
 def build_domain_xml() -> str:
@@ -163,11 +187,17 @@ def main() -> int:
             return 0
         guard_replace(exists=domain_exists(), replace=args.replace)
         path = Path("/run") / "nivuus-windows-domain.xml"
+        # Write with mode 0600 to avoid leaving host topology world-readable
         path.write_text(xml_text)
-        proc = _virsh("define", str(path))
-        sys.stdout.write(proc.stdout)
-        sys.stderr.write(proc.stderr)
-        return proc.returncode
+        path.chmod(0o600)
+        try:
+            proc = _virsh("define", str(path))
+            sys.stdout.write(proc.stdout)
+            sys.stderr.write(proc.stderr)
+            return proc.returncode
+        finally:
+            # Clean up the temp file regardless of success or failure
+            path.unlink(missing_ok=True)
     except (DomainError, HardwareError) as exc:
         # Detection and build failures are operator-facing, not bugs: report
         # them plainly. Anything else keeps its traceback.
