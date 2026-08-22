@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the offline payload staged onto the unattend ISO.
+"""Tests for the offline payload staged onto the unattend ISO (payload.py).
 
 Run: python3 scripts/tests/test_windows_guest_payload.py
 """
@@ -182,62 +182,6 @@ with tempfile.TemporaryDirectory() as tmp:
     shutil.rmtree(root / "virtio" / "netkvm")
     check("missing netkvm fails the build",
           any("netkvm" in m for m in payload.missing_binaries(root)), True)
-
-import fetch_payload  # noqa: E402
-plans = fetch_payload.plan_downloads(pathlib.Path("/tmp/x"))
-check("every download has a url and a destination",
-      all(d.url.startswith("https://") and d.dest for d in plans), True)
-check("no download lands outside the drivers dir",
-      all(str(d.dest).startswith("/tmp/x") for d in plans), True)
-names = [d.name for d in plans]
-check("downloads are uniquely named", len(names), len(set(names)))
-
-# fetch() must fail loudly (never silently ship a changed artefact) when a
-# path already recorded in the manifest comes back with a different digest.
-# No network: the "download" is simulated by the file already being present.
-with tempfile.TemporaryDirectory() as tmp:
-    drivers = pathlib.Path(tmp) / "drivers"
-    dest = drivers / "steam" / "SteamSetup.exe"
-    dest.parent.mkdir(parents=True)
-    dest.write_bytes(b"a newer build of the installer")
-    (drivers / fetch_payload.MANIFEST_NAME).write_text(
-        "steam/SteamSetup.exe\tdeadbeef00000000000000000000000000000000000000000000000000\t2026-01-01\n"
-    )
-    item = fetch_payload.Download("steam", "https://example.invalid/x", dest)
-    try:
-        fetch_payload.fetch(item, drivers)
-        failures.append("fetch: accepted a digest mismatch against the manifest")
-    except fetch_payload.FetchError as e:
-        if "changed" not in str(e) or "manifest" not in str(e).lower():
-            failures.append(f"fetch manifest-mismatch error is unclear: {e}")
-
-# fetch() must record a first-seen digest rather than reject it.
-with tempfile.TemporaryDirectory() as tmp:
-    drivers = pathlib.Path(tmp) / "drivers"
-    dest = drivers / "winfsp" / "winfsp-2.0.msi"
-    dest.parent.mkdir(parents=True)
-    dest.write_bytes(b"msi bytes")
-    item = fetch_payload.Download("winfsp", "https://example.invalid/x", dest)
-    fetch_payload.fetch(item, drivers)
-    manifest = fetch_payload.load_manifest(drivers)
-    check("first-seen digest is recorded",
-          "winfsp/winfsp-2.0.msi" in manifest, True)
-
-# extract_virtio's flatten step must refuse to silently overwrite two files
-# that share a basename under different subdirectories. Fake tree, no 7z.
-with tempfile.TemporaryDirectory() as tmp:
-    dest = pathlib.Path(tmp) / "netkvm"
-    nested = dest / "NetKVM"
-    (nested / "w11" / "amd64").mkdir(parents=True)
-    (nested / "w10" / "amd64").mkdir(parents=True)
-    (nested / "w11" / "amd64" / "netkvm.inf").write_text("w11 driver")
-    (nested / "w10" / "amd64" / "netkvm.inf").write_text("w10 driver")
-    try:
-        fetch_payload.flatten_extracted(nested, dest)
-        failures.append("flatten_extracted: silently overwrote colliding basenames")
-    except fetch_payload.FetchError as e:
-        if "collide" not in str(e):
-            failures.append(f"flatten_extracted collision error is unclear: {e}")
 
 # The irreplaceable artefact deserves its own message: no machine can rebuild
 # agent.exe once the current VM is wiped.
