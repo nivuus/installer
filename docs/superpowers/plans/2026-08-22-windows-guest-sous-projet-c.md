@@ -479,11 +479,12 @@ check("first pin", plan["vcpupin"][0], (0, 0))
 check("last pin", plan["vcpupin"][-1], (13, 13))
 check("pin count matches vcpus", len(plan["vcpupin"]), 14)
 
-# An odd remainder must drop a thread rather than break SMT pairing.
+# An odd remainder must drop a thread rather than break SMT pairing, and the
+# CPU it frees goes to the emulator rather than being left idle.
 odd = domain.vcpu_plan(list(range(11)))
 check("odd pool keeps pairs", odd["vcpus"], 8)
 check("odd pool cores", odd["cores"], 4)
-check("odd pool emulator", odd["emulator_cpuset"], "9-10")
+check("odd pool emulator takes every leftover", odd["emulator_cpuset"], "8-10")
 
 check_raises("pool too small", domain.DomainError, lambda: domain.vcpu_plan([0, 1, 2]))
 
@@ -969,6 +970,13 @@ def main() -> int:
     parser.add_argument("--replace", action="store_true",
                         help="redefine the domain even if it already exists")
     args = parser.parse_args()
+
+    # Imported here, not at module scope: the tests put only
+    # installer/windows-guest on sys.path, and a top-level import of
+    # common.hardware would break them.
+    sys.path.insert(0, str(HERE.parent))
+    from common.hardware import HardwareError  # noqa: PLC0415
+
     try:
         xml_text = build_domain_xml()
         if args.action == "xml":
@@ -981,20 +989,19 @@ def main() -> int:
         sys.stdout.write(proc.stdout)
         sys.stderr.write(proc.stderr)
         return proc.returncode
-    except (DomainError, Exception) as exc:  # noqa: BLE001
-        if isinstance(exc, DomainError) or type(exc).__name__ == "HardwareError":
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-        raise
+    except (DomainError, HardwareError) as exc:
+        # Detection and build failures are operator-facing, not bugs: report
+        # them plainly. Anything else keeps its traceback.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-⚠️ Attraper `HardwareError` par son nom évite d'importer `hardware` au niveau
-du module, ce qui casserait les tests qui n'ont que `installer/windows-guest`
-sur le chemin.
+⚠️ **Ne pas élargir ce `except` à `Exception`.** Seules les deux erreurs de
+domaine sont attendues ; tout le reste doit remonter avec sa trace.
 
 - [ ] **Étape 4 : lancer le test pour vérifier qu'il passe**
 
@@ -1027,11 +1034,17 @@ git commit -m "feat(windows-guest): CLI to render and define the production doma
 ### Task 6 : recette d'acceptation S4
 
 **Files:**
+- Create: `installer/windows-guest/winrm_exec.py`
 - Create: `docs/superpowers/plans/recette-s4.md`
 
 **Interfaces:**
 - Consomme : `domain.py` (Tasks 4-5), `testdomain.py` (existant).
-- Produit : une procédure écrite, exécutée à la main.
+- Produit : `winrm_exec.py`, client WinRM en ligne de commande, et une procédure écrite exécutée à la main.
+
+⚠️ **`/usr/local/bin/winrm` ne convient pas** : ce client Go ne parle que
+Basic, alors que l'invité n'active que Negotiate — mesuré le 2026-08-22, il
+renvoie 401. D'où un petit client `pywinrm`/NTLM versionné dans le dépôt, dont
+la recette et le sous-projet B se serviront tous les deux.
 
 C ne vaut que si **l'hibernation S4 fonctionne sous Secure Boot**. La spec de A
 annonçait ce risque levé ; il ne l'est pas — le domaine de test n'avait aucun
@@ -1043,7 +1056,71 @@ Cette recette est **manuelle par nature** : elle exige un invité Windows
 installé, le GPU réel, et une hibernation observée. Aucun test automatisé ne
 peut s'y substituer.
 
-- [ ] **Étape 1 : écrire la recette**
+- [ ] **Étape 1 : écrire le client WinRM**
+
+Créer `installer/windows-guest/winrm_exec.py` :
+
+```python
+#!/usr/bin/env python3
+"""Run one command in the Windows guest over WinRM.
+
+/usr/local/bin/winrm speaks Basic only, which the guest does not enable:
+Enable-PSRemoting offers Negotiate. pywinrm with the ntlm transport negotiates
+correctly (measured 2026-08-22, Basic returned 401).
+
+The password is read from a file, never from argv, so it cannot leak into the
+process table or shell history.
+
+Usage: winrm_exec.py {cmd|ps} <command...>
+Env:   GUEST_IP (default 192.168.3.2), GUEST_USER (default Administrator),
+       GUEST_PASS_FILE (default /root/.config/nivuus/windows-admin.pass)
+"""
+import os
+import sys
+
+import winrm
+
+IP = os.environ.get("GUEST_IP", "192.168.3.2")
+USER = os.environ.get("GUEST_USER", "Administrator")
+PASS_FILE = os.environ.get(
+    "GUEST_PASS_FILE", "/root/.config/nivuus/windows-admin.pass"
+)
+
+
+def main() -> int:
+    if len(sys.argv) < 3 or sys.argv[1] not in ("cmd", "ps"):
+        print(__doc__, file=sys.stderr)
+        return 2
+    with open(PASS_FILE) as fh:
+        password = fh.read().strip()
+    session = winrm.Session(
+        f"http://{IP}:5985/wsman",
+        auth=(USER, password),
+        transport="ntlm",
+        server_cert_validation="ignore",
+    )
+    command = " ".join(sys.argv[2:])
+    result = (session.run_cmd if sys.argv[1] == "cmd" else session.run_ps)(command)
+    out = result.std_out.decode("utf-8", "replace").strip()
+    err = result.std_err.decode("utf-8", "replace").strip()
+    if out:
+        print(out)
+    if err:
+        print("[stderr]", err, file=sys.stderr)
+    return result.status_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+- [ ] **Étape 2 : vérifier qu'il refuse un usage incorrect**
+
+Run: `python3 installer/windows-guest/winrm_exec.py; echo "rc=$?"`
+Expected: la docstring sur stderr, `rc=2`. Aucun accès réseau, aucun mot de
+passe lu.
+
+- [ ] **Étape 3 : écrire la recette**
 
 Créer `docs/superpowers/plans/recette-s4.md` :
 
@@ -1106,13 +1183,16 @@ virsh start Windows-LTSC-test
 ## La mesure
 
 ```bash
+# 0. Le domaine jetable prend un bail DHCP, pas l'adresse epinglee de la production
+export GUEST_IP=$(ip neigh show dev internalBridge | awk '/52:54:00:4c:54:53/ {print $1}' | head -1)
+
 # 1. Activer l'hibernation dans l'invité et poser un témoin de session
-python3 g.py ps "powercfg /hibernate on"
-python3 g.py ps "Set-Content C:\\temoin-s4.txt (Get-Date -Format o)"
-python3 g.py ps "Start-Process notepad"    # une fenêtre ouverte = témoin visible
+python3 installer/windows-guest/winrm_exec.py ps "powercfg /hibernate on"
+python3 installer/windows-guest/winrm_exec.py ps "Set-Content C:\\temoin-s4.txt (Get-Date -Format o)"
+python3 installer/windows-guest/winrm_exec.py ps "Start-Process notepad"    # une fenêtre ouverte = témoin visible
 
 # 2. Hiberner
-python3 g.py cmd "shutdown /h /f"
+python3 installer/windows-guest/winrm_exec.py cmd "shutdown /h /f"
 
 # 3. Constater l'arrêt (l'appel WinRM expire pendant l'endormissement :
 #    son code de retour ne veut rien dire, c'est domstate qui compte)
@@ -1147,6 +1227,7 @@ libvirt refuse alors S4 alors qu'OVMF le gère.
 virsh destroy Windows-LTSC-test
 cd installer/windows-guest && sudo python3 testdomain.py teardown
 # Rendre le GPU à l'hôte
+M="--system --print-reply --dest=org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager"
 dbus-send $M.StartUnit string:"nvidia-persistenced.service" string:"replace"
 nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml
 docker start nivuus-ollama mediamanager-tdarr-1 \
