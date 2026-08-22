@@ -91,6 +91,13 @@ guard = cmds[1].find("u:CommandLine", NS).text
 check("guard writes a loud failure marker",
       "NIVUUS-PAYLOAD-NOT-FOUND" in guard, True)
 
+# Windows 11 24H2 asks for country and keyboard unless International-Core is
+# declared in the oobeSystem pass too; the <OOBE> Hide* options do not cover
+# those pages, and a real install stalled on exactly that.
+oobe = root.findall("u:settings[@pass='oobeSystem']/u:component", NS)
+check("oobeSystem declares International-Core",
+      any(c.get("name") == "Microsoft-Windows-International-Core" for c in oobe),
+      True)
 check("autologon enabled", "<AutoLogon>" in xml_text, True)
 check("autologon count", "<LogonCount>5</LogonCount>" in xml_text, True)
 # The medium is en-US: the built-in account is Administrator. Targeting

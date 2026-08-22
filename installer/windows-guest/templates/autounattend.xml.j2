@@ -76,6 +76,19 @@
     </component>
   </settings>
   <settings pass="oobeSystem">
+    <!-- Windows 11 24H2's OOBE asks for country and keyboard unless this
+         component is present in THIS pass. The <OOBE> Hide* options below do
+         not cover those two pages: without this block the unattended install
+         stalls on "Is this the right country or region?". -->
+    <component name="Microsoft-Windows-International-Core"
+               processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35"
+               language="neutral" versionScope="nonSxS">
+      <InputLocale>{{ user_locale }}</InputLocale>
+      <SystemLocale>{{ user_locale }}</SystemLocale>
+      <UILanguage>{{ setup_language }}</UILanguage>
+      <UILanguageFallback>{{ setup_language }}</UILanguageFallback>
+      <UserLocale>{{ user_locale }}</UserLocale>
+    </component>
     <component name="Microsoft-Windows-Shell-Setup"
                processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35"
                language="neutral" versionScope="nonSxS">

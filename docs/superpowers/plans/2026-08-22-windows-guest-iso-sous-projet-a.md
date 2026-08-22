@@ -2664,6 +2664,34 @@ l'opérateur la découvrir au premier démarrage.
 lui-même** (`mallanic` → `libvirt-qemu`) et ne la rend pas si le démarrage échoue
 en cours de route. Le rétablir fait partie du démontage.
 
+### 5. Le signal de disponibilité a une course — l'arbitrage I1 était FAUX
+
+`00-bootstrap.ps1` appelle `Enable-PSRemoting`, qui **ouvre la règle de pare-feu
+WinRM**, et ne la referme que quelques lignes plus loin via
+`Disable-NetFirewallRule`. Entre les deux, le port 5985 est joignable pendant
+quelques secondes — au tout début du provisionnement, pas à sa fin.
+
+Observé en vrai le 2026-08-22 : le sondage est tombé dans cette fenêtre et a
+annoncé « provisionnement terminé » à 16:05 alors que le transcript de l'invité
+en était à `=== 10-nvidia.ps1 === installing 610.88-desktop-w…`. Les appels WinRM
+suivants expiraient, la règle ayant été refermée entre-temps.
+
+**Conséquence : l'arbitrage rendu sur la trouvaille I1 était erroné.** Il
+concluait que « 5985 joignable » suffisait comme signal et que lire
+`C:\nivuus\state\PROVISION.done` était superflu. C'est faux : le port seul est
+ambigu, il s'ouvre deux fois pour deux raisons opposées. La lecture du marqueur
+n'est pas un confort de diagnostic, c'est **ce qui lève l'ambiguïté**.
+
+Deux correctifs, à faire ensemble :
+
+1. `wait_ready` doit, une fois le port ouvert, **lire le marqueur** et n'accepter
+   que si son `provision_version` correspond à `payload.PROVISION_VERSION`. Le
+   port devient une condition nécessaire, jamais suffisante.
+2. `00-bootstrap.ps1` devrait éviter d'ouvrir le port du tout — configurer le
+   service WinRM sans passer par l'étape pare-feu d'`Enable-PSRemoting`, ou
+   refermer la règle dans la même transaction. Réduire la fenêtre ne suffit pas :
+   tant qu'elle existe, un sondage périodique finira par tomber dedans.
+
 ### Levée des vérifications dues (2026-08-22, après fusion)
 
 Les trois points laissés en suspens ci-dessus ont été traités :
