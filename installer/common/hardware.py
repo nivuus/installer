@@ -11,6 +11,7 @@ Used by both the web portal (to populate the wizard) and the install engine
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -28,6 +29,10 @@ def _run(cmd: list[str], timeout: int = 10) -> str:
         return out.stdout.strip()
     except (subprocess.SubprocessError, OSError):
         return ""
+
+
+class HardwareError(RuntimeError):
+    """Raised when detection cannot answer safely and must not guess."""
 
 
 # --------------------------------------------------------------------------- #
@@ -332,6 +337,113 @@ def _clean_lspci_desc_from_nn(line: str) -> str:
 def pci_slot_functions(slot: str) -> list[dict]:
     """parse_pci_functions applied to this machine."""
     return parse_pci_functions(_run(["lspci", "-nn", "-D"]), slot)
+
+
+def parse_nvme_controllers(raw: str) -> list[dict]:
+    """NVMe controllers (PCI class 0108) from `lspci -nn -D` output.
+
+    lsblk cannot see the passthrough disk: it is bound to vfio-pci and has no
+    block device. PCI class is the only view that shows both.
+    """
+    out = []
+    for line in raw.splitlines():
+        if "[0108]" not in line:
+            continue
+        parts = line.split()
+        if not parts or parts[0].count(":") != 2:
+            continue
+        m = re.search(r"\[([0-9a-fA-F]{4}):([0-9a-fA-F]{4})\]\s*(?:\(rev|$)", line)
+        out.append(
+            {
+                "address": parts[0],
+                "id": f"{m.group(1).lower()}:{m.group(2).lower()}" if m else "",
+                "description": _clean_lspci_desc_from_nn(line),
+            }
+        )
+    return sorted(out, key=lambda c: c["address"])
+
+
+def select_passthrough_nvme(controllers: list[dict],
+                            host_addresses: set[str]) -> dict:
+    """The one NVMe controller that is not backing the host's own root.
+
+    Refuses to guess: the selected disk is wiped by the Windows installer, so
+    an ambiguous answer must be an error, never a best effort.
+    """
+    if not controllers:
+        raise HardwareError("no NVMe controller found (PCI class 0108)")
+    candidates = [c for c in controllers if c["address"] not in host_addresses]
+    if not candidates:
+        raise HardwareError(
+            "every NVMe controller backs the host root; none can be passed "
+            f"through: {[c['address'] for c in controllers]}"
+        )
+    if len(candidates) > 1:
+        raise HardwareError(
+            "cannot decide which NVMe to pass through, several candidates: "
+            f"{[c['address'] for c in candidates]}"
+        )
+    return candidates[0]
+
+
+def host_root_pci_address() -> Optional[str]:
+    """PCI address of the controller behind the host's root filesystem."""
+    src = _run(["findmnt", "-no", "SOURCE", "/"])
+    if not src:
+        return None
+    pk = _run(["lsblk", "-no", "PKNAME", src]).splitlines()
+    disk = pk[0].strip() if pk else ""
+
+    # Handle LVM: if PKNAME is empty, try to find the underlying device via dmsetup.
+    if not disk:
+        # src might be like /dev/mapper/vg--name
+        # Use dmsetup table to find the underlying device (major:minor)
+        base_src = os.path.basename(src)
+        table = _run(["dmsetup", "table", base_src])
+        if table:
+            # dmsetup table output looks like: "0 1951465472 linear 259:3 2048"
+            # Extract major:minor from the third field
+            parts = table.split()
+            if len(parts) >= 4:
+                major_minor = parts[3]  # e.g., "259:3"
+                try:
+                    # Map major:minor to device name via sysfs
+                    link = os.path.realpath(f"/sys/dev/block/{major_minor}")
+                    # link is like .../nvme0n1/nvme0n1p3
+                    # Extract the disk name (nvme0n1 from nvme0n1p3)
+                    tail = os.path.basename(link)
+                    disk = re.sub(r"(?:p)?[0-9]+$", "", tail)  # nvme0n1p3 -> nvme0n1
+                except OSError:
+                    pass
+
+    if not disk:
+        return None
+    try:
+        target = os.path.realpath(f"/sys/block/{disk}/device/device")
+    except OSError:
+        return None
+    tail = os.path.basename(target)
+    return tail if tail.count(":") == 2 else None
+
+
+def resolve_passthrough_nvme(raw: str, host_addresses: set[str]) -> dict:
+    """The passthrough NVMe, decomposed the way a <hostdev> address needs.
+
+    Pure, so it is testable on captured lspci text.
+    """
+    controller = select_passthrough_nvme(parse_nvme_controllers(raw), host_addresses)
+    functions = parse_pci_functions(raw, controller["address"])
+    if not functions:
+        raise HardwareError(f"cannot decompose address {controller['address']}")
+    return functions[0]
+
+
+def passthrough_nvme() -> dict:
+    """The NVMe controller to hand to the Windows guest, on this machine."""
+    host = host_root_pci_address()
+    return resolve_passthrough_nvme(
+        _run(["lspci", "-nn", "-D"]), {host} if host else set()
+    )
 
 
 def _clean_lspci_desc(line: str) -> str:

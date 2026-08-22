@@ -63,6 +63,43 @@ check(
 check("unknown slot yields nothing", hardware.parse_pci_functions(LSPCI, "09:00.0"), [])
 check("empty input yields nothing", hardware.parse_pci_functions("", "01:00.0"), [])
 
+ctrls = hardware.parse_nvme_controllers(LSPCI)
+check("two NVMe controllers", len(ctrls), 2)
+check("host controller listed", ctrls[0]["address"], "0000:02:00.0")
+check("guest controller listed", ctrls[1]["address"], "0000:03:00.0")
+
+picked = hardware.select_passthrough_nvme(ctrls, {"0000:02:00.0"})
+check("picks the controller that is not the host root", picked["address"], "0000:03:00.0")
+check("picked id", picked["id"], "144d:a808")
+
+# Refusing to guess is the whole point: this disk gets wiped.
+check_raises(
+    "ambiguous when no host disk is known",
+    hardware.HardwareError,
+    lambda: hardware.select_passthrough_nvme(ctrls, set()),
+)
+check_raises(
+    "no candidate left",
+    hardware.HardwareError,
+    lambda: hardware.select_passthrough_nvme(
+        ctrls, {"0000:02:00.0", "0000:03:00.0"}
+    ),
+)
+check_raises(
+    "no controller at all",
+    hardware.HardwareError,
+    lambda: hardware.select_passthrough_nvme([], {"0000:02:00.0"}),
+)
+
+# The template consumes nvme.bus / nvme.slot / nvme.function, so the resolved
+# record must be decomposed, not just {address, id}.
+resolved = hardware.resolve_passthrough_nvme(LSPCI, {"0000:02:00.0"})
+check("resolved address", resolved["address"], "0000:03:00.0")
+check("resolved bus", resolved["bus"], "0x03")
+check("resolved slot", resolved["slot"], "0x00")
+check("resolved function", resolved["function"], "0x0")
+check("resolved id", resolved["id"], "144d:a808")
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
