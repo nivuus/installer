@@ -18,6 +18,7 @@ param([Parameter(Mandatory = $true)][string]$PayloadRoot)
 $ErrorActionPreference = 'Stop'
 $TaskName = 'guacamole-agent'
 $AgentDir = 'C:\nivuus\agent'
+$LogFile = 'C:\nivuus\agent.log'
 
 New-Item -ItemType Directory -Force -Path $AgentDir | Out-Null
 Copy-Item -Path (Join-Path $PayloadRoot 'drivers\agent\agent.exe') `
@@ -25,8 +26,28 @@ Copy-Item -Path (Join-Path $PayloadRoot 'drivers\agent\agent.exe') `
 Copy-Item -Path (Join-Path $PayloadRoot 'provision\assets\run-agent.ps1') `
           -Destination (Join-Path $AgentDir 'run-agent.ps1') -Force
 
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-    -Argument '-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File C:\nivuus\agent\run-agent.ps1'
+# Stop a still-running previous instance before touching the task
+# definition. Unregister-ScheduledTask below removes the task object but does
+# not touch an already-running action process, so without this a rebuild
+# while the old agent is alive would end up with two concurrent instances
+# instead of a replacement.
+$existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if ($existing -and $existing.State -eq 'Running') {
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    $stopDeadline = (Get-Date).AddSeconds(15)
+    while ((Get-Date) -lt $stopDeadline) {
+        $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if (-not $existing -or $existing.State -ne 'Running') { break }
+        Start-Sleep -Milliseconds 500
+    }
+}
+# Nothing else legitimately holds this process name during provisioning.
+Get-Process -Name 'agent' -ErrorAction SilentlyContinue |
+    Stop-Process -Force -ErrorAction SilentlyContinue
+
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
+    "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File $(Join-Path $AgentDir 'run-agent.ps1')"
+)
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User 'Administrator'
 $principal = New-ScheduledTaskPrincipal -UserId 'Administrator' `
     -LogonType Interactive -RunLevel Highest
@@ -44,12 +65,26 @@ Write-Host "scheduled task $TaskName registered"
 # the path the next logon will take.
 $sessionFile = 'C:\nivuus\state\agent-session.txt'
 Remove-Item -Path $sessionFile -Force -ErrorAction SilentlyContinue
+$startedAt = Get-Date
 Start-ScheduledTask -TaskName $TaskName
-$deadline = (Get-Date).AddSeconds(60)
+$deadline = $startedAt.AddSeconds(60)
 while (-not (Test-Path $sessionFile) -and (Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 2
 }
 if (-not (Test-Path $sessionFile)) {
-    throw "the agent task never reported a session id; check $AgentDir\..\agent.log"
+    # agent.log is only created inside run-agent.ps1, after the session file,
+    # so pointing at it unconditionally would be misleading in the case where
+    # the task never even ran - mention it only when it actually exists.
+    $logNote = if (Test-Path $LogFile) { "check $LogFile" } else { "$LogFile was never created" }
+    $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not $info -or $info.LastRunTime -lt $startedAt) {
+        throw "scheduled task $TaskName never left the queue; $logNote"
+    }
+    elseif ($info.State -eq 'Running') {
+        throw "scheduled task $TaskName is running but produced no session id after 60s; $logNote"
+    }
+    else {
+        throw "scheduled task $TaskName ran and exited (result $($info.LastTaskResult)) without writing a session id; $logNote"
+    }
 }
 Write-Host "agent reported session $(Get-Content $sessionFile)"
