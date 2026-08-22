@@ -34,6 +34,7 @@ def make_tree(root: pathlib.Path, *, with_nvidia=True, with_sudovda=True):
     if with_sudovda:
         (drivers / "sudovda" / "SudoVDA.inf").write_text("[Version]\n")
         (drivers / "sudovda" / "install.bat").write_text("@echo off\n")
+        (drivers / "sudovda" / "sudovda.cer").write_bytes(b"cert")
     return payload.PayloadSources(provision_dir=root / "provision",
                                   probe_dir=root / "probe",
                                   drivers_dir=drivers)
@@ -83,11 +84,75 @@ with tempfile.TemporaryDirectory() as tmp:
     root = pathlib.Path(tmp)
     sources = make_tree(root / "src", with_nvidia=False, with_sudovda=False)
     missing = payload.missing_binaries(sources.drivers_dir)
-    check("both binaries reported missing", len(missing), 2)
+    check("all missing items reported", len(missing), 4)
     check("nvidia named in the report",
           any("nvidia" in m.lower() for m in missing), True)
     check("sudovda named in the report",
           any("sudovda" in m.lower() for m in missing), True)
+    check("install.bat named in the report",
+          any("install.bat" in m for m in missing), True)
+    check("sudovda.cer named in the report",
+          any("sudovda.cer" in m for m in missing), True)
+
+# Test missing install.bat
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    src = root / "src"
+    sources = make_tree(src)
+    (sources.drivers_dir / "sudovda" / "install.bat").unlink()
+    missing = payload.missing_binaries(sources.drivers_dir)
+    check("missing install.bat is reported",
+          any("install.bat" in m for m in missing), True)
+
+# Test missing sudovda.cer
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    src = root / "src"
+    sources = make_tree(src)
+    (sources.drivers_dir / "sudovda" / "sudovda.cer").unlink()
+    missing = payload.missing_binaries(sources.drivers_dir)
+    check("missing sudovda.cer is reported",
+          any("sudovda.cer" in m for m in missing), True)
+
+# Test verify_staged catches missing sudovda files
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    sources = make_tree(root / "src")
+    dest = root / "staging" / "nivuus"
+    marker = payload.marker_text("Windows 11", "20260822")
+    payload.stage_payload(dest, sources, marker)
+    (dest / "drivers" / "sudovda" / "install.bat").unlink()
+    try:
+        payload.verify_staged(dest)
+        failures.append("verify_staged: accepted payload with missing install.bat")
+    except payload.PayloadError as e:
+        if "install.bat" not in str(e):
+            failures.append(f"verify_staged error didn't mention install.bat: {e}")
+
+# Test stage_payload rejects dest_root equal to source directory
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    sources = make_tree(root / "src")
+    try:
+        payload.stage_payload(sources.provision_dir, sources, "marker")
+        failures.append("stage_payload: accepted dest_root == source dir")
+    except payload.PayloadError:
+        pass
+    check("source dir still exists after rejected stage",
+          sources.provision_dir.exists(), True)
+
+# Test staging twice removes stray file
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    sources = make_tree(root / "src")
+    dest = root / "staging" / "nivuus"
+    marker = payload.marker_text("Windows 11", "20260822")
+    payload.stage_payload(dest, sources, marker)
+    (dest / "stray.txt").write_text("stray")
+    check("stray file exists", (dest / "stray.txt").exists(), True)
+    payload.stage_payload(dest, sources, marker)
+    check("stray file removed after restage",
+          (dest / "stray.txt").exists(), False)
 
 if failures:
     print(f"FAIL ({len(failures)})")

@@ -32,12 +32,14 @@ def missing_binaries(drivers_dir: Path) -> list[str]:
         missing.append(
             f"NVIDIA driver installer (*.exe) in {drivers_dir / 'nvidia'}"
         )
-    if not (drivers_dir / "sudovda" / "SudoVDA.inf").exists():
-        missing.append(
-            "SudoVDA driver package (SudoVDA.inf, install.bat, sudovda.cer) in "
-            f"{drivers_dir / 'sudovda'} - copy it from a machine's "
-            r"C:\Program Files\Apollo\drivers\sudovda"
-        )
+    sudovda_dir = drivers_dir / "sudovda"
+    sudovda_files = ["SudoVDA.inf", "install.bat", "sudovda.cer"]
+    for fname in sudovda_files:
+        if not (sudovda_dir / fname).exists():
+            missing.append(
+                f"SudoVDA driver file {fname} in {sudovda_dir} - "
+                "copy from a machine's C:\\Program Files\\Apollo\\drivers\\sudovda"
+            )
     return missing
 
 
@@ -77,6 +79,13 @@ def parse_marker(text: str) -> dict:
 
 def stage_payload(dest_root: Path, sources: PayloadSources, marker: str) -> None:
     """Copy the payload under dest_root (the future /nivuus of the ISO)."""
+    dest_resolved = dest_root.resolve()
+    src_paths = {sources.provision_dir.resolve(), sources.probe_dir.resolve(),
+                 sources.drivers_dir.resolve()}
+    if dest_resolved in src_paths:
+        raise PayloadError(f"dest_root cannot be a source directory: {dest_root}")
+    if dest_resolved.parent == dest_resolved or not dest_resolved.name:
+        raise PayloadError(f"dest_root cannot be filesystem root: {dest_root}")
     missing = missing_binaries(sources.drivers_dir)
     if missing:
         raise PayloadError(
@@ -104,5 +113,9 @@ def verify_staged(dest_root: Path) -> None:
         path = dest_root / rel
         if not path.is_file() or path.stat().st_size == 0:
             raise PayloadError(f"staged payload is missing or empty: {rel}")
-    if not list((dest_root / "drivers" / "nvidia").glob("*.exe")):
-        raise PayloadError("staged payload has no NVIDIA driver installer")
+    missing = missing_binaries(dest_root / "drivers")
+    if missing:
+        raise PayloadError(
+            "staged payload is incomplete:\n  - "
+            + "\n  - ".join(missing)
+        )
