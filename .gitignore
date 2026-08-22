@@ -43,3 +43,6 @@ snapshot.json
 *.nmconnection
 ha.conf
 .claude/settings.local.json
+
+# Superpowers SDD scratch (ledgers, briefs, review packages)
+.superpowers/
