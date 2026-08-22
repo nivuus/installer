@@ -95,9 +95,43 @@ try:
 except media.MediaError:
     pass
 
-# A file that is not a WIM must fail on its magic, not on a stack trace.
+# Synthetic WIM: valid magic, proper header, embedded UTF-16LE XML with BOM.
 import tempfile  # noqa: E402
 
+xml_str = f'﻿<WIM>{image(1, "Windows 11 IoT Enterprise LTSC 2024", "IoTEnterpriseS")}</WIM>'
+xml_bytes = xml_str.encode("utf-16-le")
+xml_offset = 96
+
+with tempfile.NamedTemporaryFile(suffix=".wim") as fh:
+    header = bytearray(96)
+    header[0:8] = media.WIM_MAGIC
+    size_bytes = len(xml_bytes).to_bytes(7, "little")
+    offset_bytes = xml_offset.to_bytes(8, "little")
+    header[media.XML_RESHDR_OFFSET:media.XML_RESHDR_OFFSET + 7] = size_bytes
+    header[media.XML_RESHDR_OFFSET + 8:media.XML_RESHDR_OFFSET + 16] = offset_bytes
+    header[media.XML_RESHDR_OFFSET + 16:media.XML_RESHDR_OFFSET + 24] = \
+        len(xml_bytes).to_bytes(8, "little")
+    fh.write(header)
+    fh.write(xml_bytes)
+    fh.flush()
+    result_xml = media.read_wim_xml(fh.name)
+    parsed = media.parse_wim_xml(result_xml)
+    check("synthetic WIM parsed", len(parsed), 1)
+    check("synthetic WIM edition", parsed[0]["edition_id"], "IoTEnterpriseS")
+
+# Truncated header: valid magic but file cut before offset 0x60.
+with tempfile.NamedTemporaryFile(suffix=".wim") as fh:
+    header = bytearray(64)
+    header[0:8] = media.WIM_MAGIC
+    fh.write(header)
+    fh.flush()
+    try:
+        media.read_wim_xml(fh.name)
+        failures.append("read_wim_xml: accepted truncated header")
+    except media.MediaError:
+        pass
+
+# A file that is not a WIM must fail on its magic, not on a stack trace.
 with tempfile.NamedTemporaryFile(suffix=".wim") as fh:
     fh.write(b"not a wim at all" * 16)
     fh.flush()

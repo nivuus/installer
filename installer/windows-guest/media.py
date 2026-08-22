@@ -35,6 +35,8 @@ def read_wim_xml(wim_path: str) -> str:
         header = fh.read(0x60)
         if header[:8] != WIM_MAGIC:
             raise MediaError(f"{wim_path} is not a WIM archive")
+        if len(header) < XML_RESHDR_OFFSET + 24:
+            raise MediaError(f"{wim_path} is truncated: header unreadable")
         reshdr = header[XML_RESHDR_OFFSET:XML_RESHDR_OFFSET + 24]
         size = int.from_bytes(reshdr[0:7], "little")
         offset = struct.unpack_from("<Q", reshdr, 8)[0]
