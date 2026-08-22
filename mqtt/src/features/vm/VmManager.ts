@@ -2,7 +2,8 @@
 
 import { BaseFeature } from '../../core/BaseFeature';
 import { MqttClient, FeatureConfig } from '../../core/types';
-import { execute_command } from '../../utils/exec'; // Using the mock exec for now
+import { execute_argv } from '../../utils/exec';
+import { Validators, rejectInvalid } from '../../utils/validators';
 import logger from '../../utils/logger';
 
 interface VmManagerFeatureConfig extends FeatureConfig {
@@ -53,7 +54,7 @@ export class VmManager extends BaseFeature {
     let vmsToMonitor: VmInfo[] = [];
     try {
       logger.debug(`[${this.featureName}] Discovering VMs with 'virsh list --all'`);
-      const virshListOutput = await execute_command('virsh -c qemu:///system list --all', false);
+      const virshListOutput = await execute_argv('virsh', ['-c', 'qemu:///system', 'list', '--all']);
       logger.debug(`[${this.featureName}] 'virsh list --all' raw output:`, virshListOutput.stdout);
       if (virshListOutput.stderr) {
         logger.warn(`[${this.featureName}] 'virsh list --all' stderr during discovery:`, virshListOutput.stderr);
@@ -134,34 +135,46 @@ export class VmManager extends BaseFeature {
 
     logger.info(`Received command '${action}' for VM '${vmName}'.`);
 
-    let virshCommand = '';
+    // vmName comes from the MQTT topic — validate strictly before it reaches virsh.
+    if (!Validators.isVmName(vmName)) {
+      rejectInvalid('vm_name', vmName, this.featureName);
+      return;
+    }
+
+    // NOTE: "--mode acpi" is mandatory for stop/restart. On libvirt 11.x the
+    // default shutdown/reboot mode does NOT deliver the ACPI power-button event
+    // to a Windows guest without a qemu-guest-agent (it reports "in progress"
+    // then nothing happens). "--mode acpi" maps to QMP system_powerdown, which
+    // the guest honours (verified 2026-07-17). Guests with qemu-ga could also use
+    // "--mode agent"; this VM has no agent channel, so ACPI is the reliable path.
+    let virshArgs: string[] = [];
     switch (action) {
       case 'start':
-        virshCommand = `virsh -c qemu:///system start ${vmName}`;
+        virshArgs = ['start', vmName];
         break;
-      case 'stop': // virsh shutdown is graceful, virsh destroy is forceful
-        virshCommand = `virsh -c qemu:///system shutdown ${vmName}`; 
+      case 'stop': // graceful ACPI power-off (virsh destroy would be forceful)
+        virshArgs = ['shutdown', '--mode', 'acpi', vmName];
         break;
-      case 'restart': // virsh reboot
-        virshCommand = `virsh -c qemu:///system reboot ${vmName}`;
+      case 'restart':
+        virshArgs = ['reboot', '--mode', 'acpi', vmName];
         break;
       default:
         logger.warn(`Unknown action '${action}' for VM '${vmName}'.`);
         return;
     }
 
+    const virshCommand = `virsh -c qemu:///system ${virshArgs.join(' ')}`;
     try {
       logger.info(`Executing: ${virshCommand}`);
-      // These commands likely require specific permissions or sudo, depending on libvirt setup.
-      // Setting requiresApproval to true for safety.
-      const cmdResult = await execute_command(virshCommand, true); 
+      // Passed as argv (no shell) so the VM name cannot inject a command.
+      const cmdResult = await execute_argv('virsh', ['-c', 'qemu:///system', ...virshArgs]);
       if (cmdResult.stderr) {
         logger.warn(`[${this.featureName}] Stderr from '${virshCommand}': ${cmdResult.stderr}`);
         // Potentially publish an error attribute or event
       }
       logger.info(`Command '${virshCommand}' executed for VM '${vmName}'. Triggering update. Output: ${cmdResult.stdout}`);
       // Trigger an immediate update to reflect new state
-      await this.updateVmState(vmName); 
+      await this.updateVmState(vmName);
     } catch (error: any) {
       const errorMessage = error.message || 'Unknown error';
       const errorDetails = error.stderr || '';
@@ -182,7 +195,7 @@ export class VmManager extends BaseFeature {
         // If no specific VMs are configured, discover all and update them
         try {
             logger.debug(`[${this.featureName}] Updating all VMs: fetching list with 'virsh list --all'`);
-            const virshListOutput = await execute_command('virsh -c qemu:///system list --all', false);
+            const virshListOutput = await execute_argv('virsh', ['-c', 'qemu:///system', 'list', '--all']);
              if (virshListOutput.stderr) {
                 logger.warn(`[${this.featureName}] 'virsh list --all' stderr during update:`, virshListOutput.stderr);
             }
@@ -213,7 +226,7 @@ export class VmManager extends BaseFeature {
             // Using 'virsh dominfo' might be more reliable for a single VM's state
             // However, 'virsh list --all' is also fine if we parse it correctly.
             // For simplicity, let's stick to 'virsh list --all' and parse.
-            const virshListOutput = await execute_command('virsh -c qemu:///system list --all', false);
+            const virshListOutput = await execute_argv('virsh', ['-c', 'qemu:///system', 'list', '--all']);
             if (virshListOutput.stderr && !virshListOutput.stderr.includes("Domain not found")) { // Ignore "Domain not found" if VM was deleted
                 logger.warn(`[${this.featureName}] 'virsh list --all' stderr while fetching state for ${vmName}:`, virshListOutput.stderr);
             }
@@ -236,7 +249,7 @@ export class VmManager extends BaseFeature {
     } else {
         // If state is provided (e.g., from initial discovery), try to get ID
         try {
-            const virshListOutput = await execute_command('virsh -c qemu:///system list --all', false);
+            const virshListOutput = await execute_argv('virsh', ['-c', 'qemu:///system', 'list', '--all']);
             const vms = this.parseVirshList(virshListOutput.stdout);
             const vmInfo = vms.find(v => v.name === vmName);
             if (vmInfo) attributes.id = vmInfo.id;

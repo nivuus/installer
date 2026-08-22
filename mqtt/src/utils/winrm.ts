@@ -76,7 +76,8 @@ export class WinRMClient {
   async isProcessRunning(processName: string): Promise<boolean> {
     try {
       const output = await this.getTasklist(processName);
-      return output.includes(processName);
+      // WinRM peut résoudre avec autre chose qu'une string (VM injoignable, réponse vide)
+      return typeof output === 'string' && output.includes(processName);
     } catch (error) {
       logger.error(`[WinRM] Error checking process ${processName}:`, error);
       return false;

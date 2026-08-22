@@ -20,6 +20,18 @@ const DEFAULT_SYSLOG = '/var/log/syslog'; // Common, but /var/log/messages on ot
 const DEFAULT_CLAMAV_LOG = '/var/log/clamav/clamonacc.log';
 const DEFAULT_SYSLOG_LEVELS: ('error' | 'critical' | 'alert' | 'emergency')[] = ['error', 'critical'];
 
+// The agent's own stdout ends up in journald/syslog. Any line it emits must be ignored
+// by the syslog watchers, otherwise publishing an error event that mentions "Error:"
+// re-triggers the watcher and creates an infinite self-feeding loop (2026-07-17:
+// ~190k state updates in a few hours, message doubling in size at every iteration).
+const SELF_LOG_TAG = 'mqtt-system-agent';
+// Cap event fields so a single pathological log line cannot flood MQTT/HA subscribers.
+const MAX_EVENT_FIELD_LENGTH = 500;
+
+function truncateField(value: string): string {
+  return value.length > MAX_EVENT_FIELD_LENGTH ? value.slice(0, MAX_EVENT_FIELD_LENGTH) + '…' : value;
+}
+
 // Store last seen lines/timestamps to avoid re-processing. Simplistic for mock.
 // This might not be needed if we process streams directly.
 // const lastProcessed: { [logPath: string]: string } = {}; 
@@ -43,7 +55,16 @@ export class EventMonitor extends BaseFeature {
     this.featureConfig.update_interval_seconds = this.featureConfig.update_interval_seconds || 3600; // Default to 1hr if not set
   }
 
-  private async publishEvent(eventType: string, payload: object): Promise<void> {
+  private sanitizeEventPayload(payload: object): object {
+    const clean: Record<string, any> = {};
+    for (const [key, value] of Object.entries(payload)) {
+      clean[key] = typeof value === 'string' ? truncateField(value) : value;
+    }
+    return clean;
+  }
+
+  private async publishEvent(eventType: string, rawPayload: object): Promise<void> {
+    const payload = this.sanitizeEventPayload(rawPayload);
     const topic = this.prefixTopic(`events/${eventType}`);
     // For HA, events are typically fired via MQTT event topic or specific event components.
     // Here, we'll publish to a general topic and HA can use an MQTT trigger.
@@ -61,7 +82,9 @@ export class EventMonitor extends BaseFeature {
     await this.publishState(this.prefixTopic(`${this.featureName}/${objectId}/state`), new Date().toISOString(), true);
     await this.publishAttributes(this.prefixTopic(`${this.featureName}/${objectId}/attributes`), payload, true);
 
-    logger.info(`Published event: ${eventType}`, payload);
+    // Never dump the payload here: this log line goes to journald/syslog and would be
+    // picked up again by the syslog watcher (see SELF_LOG_TAG note above).
+    logger.info(`Published event: ${eventType}`);
   }
 
   protected async publishDiscovery(): Promise<void> {
@@ -119,7 +142,7 @@ export class EventMonitor extends BaseFeature {
       const lastSyslogError = await this.getLastLogMatch(
         DEFAULT_SYSLOG,
         /(error|critical)/i,
-        (match, line) => ({ subType: 'error', level: match[1].toLowerCase(), message: line.substring(line.indexOf(match[1])) })
+        (match, line) => ({ subType: 'error', level: match[1].toLowerCase(), message: truncateField(line.substring(line.indexOf(match[1]))) })
       );
       if (lastSyslogError) {
         await this.publishState(this.prefixTopic(`${this.featureName}/last_syslog_error_event/state`), lastSyslogError.timestamp, true);
@@ -164,13 +187,14 @@ export class EventMonitor extends BaseFeature {
     dataExtractor: (match: RegExpMatchArray, line: string) => any
   ): Promise<{ timestamp: string; data: any } | null> {
     try {
-      const { execute_command } = await import('../../utils/exec');
-      // Use tail to get last 100 lines and grep to find matches
-      // Use sudo for log files that require root access
-      const result = await execute_command(`sudo tail -n 100 ${logPath} | tac`, false);
-      const lines = result.stdout.split('\n');
+      const { execute_argv } = await import('../../utils/exec');
+      // Use tail to get last 100 lines; reverse in JS (replaces the shell `| tac`)
+      // so the most recent line is processed first. Use sudo for root-only logs.
+      const result = await execute_argv('sudo', ['tail', '-n', '100', logPath]);
+      const lines = result.stdout.split('\n').reverse();
 
       for (const line of lines) {
+        if (line.includes(SELF_LOG_TAG)) continue; // Anti-feedback: skip our own log lines
         const match = line.match(pattern);
         if (match) {
           // Extract timestamp from syslog format (e.g., "Nov  8 15:30:45")
@@ -179,7 +203,7 @@ export class EventMonitor extends BaseFeature {
 
           return {
             timestamp: new Date().toISOString(), // Use current time as we don't have full date in syslog
-            data: { ...dataExtractor(match, line), original_log_line: line }
+            data: { ...dataExtractor(match, line), original_log_line: truncateField(line) }
           };
         }
       }
@@ -195,9 +219,9 @@ export class EventMonitor extends BaseFeature {
     dataExtractor: (match: RegExpMatchArray, line: string) => any
   ): Promise<{ timestamp: string; data: any } | null> {
     try {
-      const { execute_command } = await import('../../utils/exec');
+      const { execute_argv } = await import('../../utils/exec');
       // Use journalctl to get last 100 entries for the specified unit
-      const result = await execute_command(`sudo journalctl -t ${unit} -n 100 --no-pager --output=short-iso`, false);
+      const result = await execute_argv('sudo', ['journalctl', '-t', unit, '-n', '100', '--no-pager', '--output=short-iso']);
       const lines = result.stdout.split('\n').reverse(); // Reverse to get most recent first
 
       for (const line of lines) {
@@ -326,9 +350,10 @@ export class EventMonitor extends BaseFeature {
     if (syslogPath && levelsToWatch.length > 0) {
       const regex = new RegExp(`(${levelsToWatch.join('|')}):`, 'i');
       this.startLogWatcher(syslogPath, 'syslog', (line) => {
+        if (line.includes(SELF_LOG_TAG)) return null; // Anti-feedback: skip our own log lines
         const match = line.match(regex);
         if (match && match[1]) {
-          return { subType: 'error', level: match[1].toLowerCase(), message: line.substring(line.indexOf(match[0])) };
+          return { subType: 'error', level: match[1].toLowerCase(), message: truncateField(line.substring(line.indexOf(match[0]))) };
         }
         return null;
       });

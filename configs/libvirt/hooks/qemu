@@ -1,0 +1,54 @@
+#!/bin/bash
+# Author: SharkWipf
+# ... (autres commentaires initiaux) ...
+echo "running vm with hooks : $1; $2; $3; $4"
+GUEST_NAME="$1"
+HOOK_NAME="$2"
+STATE_NAME="$3"
+MISC="${@:4}"
+
+BASEDIR="$(dirname $0)"
+HOOKPATH="$BASEDIR/qemu.d/$GUEST_NAME/$HOOK_NAME/$STATE_NAME"
+echo "Calculated HOOKPATH: $HOOKPATH"
+
+# check if it's a non-empty executable file
+FAILED=0
+
+if [ -f "$HOOKPATH" ] && [ -s "$HOOKPATH" ] && [ -x "$HOOKPATH" ]; then
+    logger -t libvirt-hook-qemu "Attempting to execute file: $HOOKPATH with args: $@"
+    "$HOOKPATH" "$@"
+    EXEC_EXIT_CODE=$?
+    logger -t libvirt-hook-qemu "Execution finished for $HOOKPATH with code $EXEC_EXIT_CODE."
+    [ "$EXEC_EXIT_CODE" -ne 0 ] && FAILED="$EXEC_EXIT_CODE"
+
+elif [ -d "$HOOKPATH" ]; then
+    FILES=$(find -L "$HOOKPATH" -maxdepth 1 -type f -executable -print;)
+    logger -t libvirt-hook-qemu "Directory hook path: $HOOKPATH. Files found: $FILES"
+    for file in $FILES; do
+        if [ -n "$file" ]; then
+            logger -t libvirt-hook-qemu "Attempting to execute file in dir: $file with args: $@"
+            "$file" "$@"
+            EXEC_EXIT_CODE=$?
+            echo "run $file"
+            logger -t libvirt-hook-qemu "Execution finished for $file with code $EXEC_EXIT_CODE."
+            [ "$EXEC_EXIT_CODE" -ne 0 ] && FAILED="$EXEC_EXIT_CODE"
+        fi
+    done
+fi
+
+# Propagate failures, but only for `prepare` (added 2026-07-22).
+#
+# This script used to `exit 0` unconditionally, so libvirt never saw a hook
+# fail. That is why bind-vfio-gpu.sh could not refuse a start it knew was
+# doomed — e.g. when a process still holds /dev/nvidia* and the card cannot be
+# handed to vfio, which would boot the gaming VM without its GPU.
+#
+# `prepare` is the only phase where refusing is both meaningful and safe:
+# nothing has been torn down yet and libvirt aborts the start cleanly. On
+# `release`/`stopped`, a non-zero code would only obstruct cleanup, so those
+# keep the old always-0 behaviour.
+if [ "$HOOK_NAME" = "prepare" ] && [ "$FAILED" -ne 0 ]; then
+    logger -t libvirt-hook-qemu "prepare hook failed with code $FAILED - refusing the start"
+    exit "$FAILED"
+fi
+exit 0

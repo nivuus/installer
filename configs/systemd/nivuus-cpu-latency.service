@@ -1,0 +1,15 @@
+[Unit]
+Description=Nivuus CPU PM QoS latency constraint (gaming-mode C-state ceiling)
+Documentation=file:///opt/nivuus/docs/superpowers/specs/2026-07-22-vm-aware-cpu-power-mode-design.md
+# Started/stopped by optimize-cpu-thermal.sh per mode — no [Install], never enabled.
+
+[Service]
+Type=exec
+# 250 us keeps C6 (220 us exit latency) usable and hides anything deeper,
+# reproducing today's proven-good VFIO latency environment. Provisional: the
+# exact threshold must be re-read from cpuidle/state*/latency once
+# intel_idle.max_cstate=3 is off the cmdline (deeper-state latencies are hidden
+# until then).
+ExecStart=/usr/local/bin/nivuus-cpu-latency 250
+Restart=on-failure
+RestartSec=2

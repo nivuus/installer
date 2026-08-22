@@ -2,7 +2,7 @@
 
 import { BaseFeature } from '../../core/BaseFeature';
 import { MqttClient, FeatureConfig } from '../../core/types';
-import { execute_command } from '../../utils/exec';
+import { execute_argv } from '../../utils/exec';
 import logger from '../../utils/logger';
 import { spawn, ChildProcess } from 'child_process';
 
@@ -199,8 +199,8 @@ export class KvmSplitLockMonitor extends BaseFeature {
 
       // Check current split lock detection setting
       try {
-        const result = await execute_command('cat /sys/module/kernel/parameters/split_lock_detect || echo "not_available"', false);
-        const setting = result.stdout.trim();
+        const result = await execute_argv('cat', ['/sys/module/kernel/parameters/split_lock_detect']);
+        const setting = result.exitCode === 0 ? result.stdout.trim() : 'not_available';
 
         logger.debug(`[${this.featureName}] Current split_lock_detect setting: ${setting}`);
 

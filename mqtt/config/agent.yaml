@@ -119,6 +119,13 @@ features:
   motherboard_temperature:
     enabled: true
     update_interval_seconds: 30 # Motherboard sensors every 30 seconds
+  hardware_health:
+    enabled: true
+    # Power rails + CPU/memory/disk error counters. Added 2026-08-16 after four
+    # instant platform halts left no trace at all. Rails and CPU counters are
+    # cheap sysfs reads; the disk counters fork smartctl and refresh internally
+    # every 10 min regardless of this interval.
+    update_interval_seconds: 30
   systemd_services:
     enabled: true
     update_interval_seconds: 60 # Check services every minute

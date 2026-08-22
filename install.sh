@@ -77,7 +77,7 @@ chmod +x "$INSTALL_DIR/optimize-cpu-thermal.sh"
 # Create systemd service
 cat > "$SYSTEMD_DIR/cpu-thermal-optimization.service" <<EOF
 [Unit]
-Description=CPU Thermal Optimization (P-cores 3600MHz + E-cores 2000MHz powersave)
+Description=CPU Thermal Optimization (RAPL 50W/58W + full turbo P-cores, E-cores 2000MHz powersave)
 After=multi-user.target
 
 [Service]
@@ -92,6 +92,42 @@ EOF
 systemctl daemon-reload
 systemctl enable cpu-thermal-optimization.service
 echo "✅ CPU thermal optimization service installed"
+
+# Setup dynamic host/VM CPU partitioning
+echo ""
+echo "Installing dynamic CPU partitioning..."
+NIVUUS_VM_NAME="${NIVUUS_VM_NAME:-Windows}"
+
+# The script MUST live under /etc/libvirt/hooks/: the AppArmor profile for libvirtd
+# grants "/etc/libvirt/hooks/** rmix", so hooks run *inheriting* that profile, which
+# allows executing /bin, /sbin, /usr/bin and /usr/sbin - but NOT /usr/local/sbin.
+# Installing it there instead fails at VM start with the misleading
+# "/bin/bash: bad interpreter: Permission denied".
+cp "$NIVUUS_DIR/scripts/vm-cpu-partition.sh" /etc/libvirt/hooks/vm-cpu-partition.sh
+chmod +x /etc/libvirt/hooks/vm-cpu-partition.sh
+
+# libvirt hooks: squeeze the host onto the CPUs the VM does not pin while it runs,
+# give the whole machine back as soon as it stops. Thin wrappers so the logic stays
+# in the repo. The dispatcher passes the domain name as $1.
+HOOK_BASE="/etc/libvirt/hooks/qemu.d/$NIVUUS_VM_NAME"
+mkdir -p "$HOOK_BASE/prepare/begin" "$HOOK_BASE/release/end"
+
+cat > "$HOOK_BASE/prepare/begin/10-cpu-confine.sh" <<'EOF'
+#!/bin/bash
+# Confine the host cgroups to the CPUs the VM does not pin, for as long as it runs.
+/etc/libvirt/hooks/vm-cpu-partition.sh confine "$1" >> /var/log/libvirt-cpu-hook.log 2>&1
+exit 0
+EOF
+
+cat > "$HOOK_BASE/release/end/10-cpu-release.sh" <<'EOF'
+#!/bin/bash
+# Hand every CPU back to the host once the VM is gone (shutdown or hibernation).
+/etc/libvirt/hooks/vm-cpu-partition.sh release "$1" >> /var/log/libvirt-cpu-hook.log 2>&1
+exit 0
+EOF
+
+chmod +x "$HOOK_BASE/prepare/begin/10-cpu-confine.sh" "$HOOK_BASE/release/end/10-cpu-release.sh"
+echo "✅ Dynamic CPU partitioning installed (hooks for domain $NIVUUS_VM_NAME)"
 
 # Configure hugepages
 echo ""
@@ -111,20 +147,29 @@ echo ""
 echo "Updating GRUB configuration..."
 GRUB_FILE="/etc/default/grub"
 
-# CPU isolation range and IOMMU type are parameterisable so the generic Nivuus
-# installer can pass values computed from the actual hardware (see install-engine
-# hardware detection). Defaults match the original i9-12900K configuration.
+# CPU range reserved for the VM and IOMMU type are parameterisable so the generic
+# Nivuus installer can pass values computed from the actual hardware (see
+# install-engine hardware detection). Defaults match the original i9-12900K.
+#
+# NOTE: this range is deliberately NOT passed as isolcpus. isolcpus is a boot-time
+# parameter, so it would keep those CPUs out of the scheduler for the whole uptime
+# and leave the host on the remaining cores even while the VM is shut off. The
+# host/VM split is done dynamically instead, by vm-cpu-partition.sh driven from the
+# libvirt hooks. Only nohz_full is kept: it removes the timer tick from those CPUs
+# while the VM owns them, and costs nothing when the host schedules there.
 NIVUUS_ISOLCPUS="${NIVUUS_ISOLCPUS:-0-15}"
 NIVUUS_IOMMU="${NIVUUS_IOMMU:-intel_iommu=on iommu=pt}"
 # vfio-pci.ids=<vendor:device,...> for GPU passthrough (optional, auto-detected).
 NIVUUS_VFIO_IDS="${NIVUUS_VFIO_IDS:-}"
 
-NIVUUS_GRUB_PARAMS="isolcpus=${NIVUUS_ISOLCPUS} ${NIVUUS_IOMMU}"
+NIVUUS_GRUB_PARAMS="nohz_full=${NIVUUS_ISOLCPUS} ${NIVUUS_IOMMU}"
 if [ -n "$NIVUUS_VFIO_IDS" ]; then
     NIVUUS_GRUB_PARAMS="$NIVUUS_GRUB_PARAMS vfio-pci.ids=${NIVUUS_VFIO_IDS}"
 fi
 
-if ! grep -q "isolcpus=" "$GRUB_FILE"; then
+# Match either marker: hosts installed before the dynamic-partitioning change
+# carry isolcpus= and must not get the parameters appended a second time.
+if ! grep -qE "nohz_full=|isolcpus=" "$GRUB_FILE"; then
     # Backup GRUB config
     cp "$GRUB_FILE" "${GRUB_FILE}.nivuus-backup"
 

@@ -1,0 +1,24 @@
+[Unit]
+Description=Nivuus hardware black box (durable per-second recorder of the PSU rails)
+Documentation=file:/opt/nivuus/scripts/hw-blackbox.py
+# No ordering against multi-user.target on purpose: combining that with a
+# Before= on a service wanted by it once deleted docker.service's start job
+# (2026-07-16). The recorder resolves its hwmon chip by name at runtime.
+After=sysinit.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/nivuus-hw-blackbox.py run
+Restart=always
+RestartSec=5
+# Drift alerts go to stderr so journald records them at error priority.
+StandardError=journal
+# The whole point is to still be writing while the box is saturated, so keep it
+# ahead of the transcoding load and out of reach of the OOM killer.
+Nice=-5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=0
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=multi-user.target

@@ -2,8 +2,10 @@
 
 import { BaseFeature } from '../../core/BaseFeature';
 import { MqttClient, FeatureConfig } from '../../core/types';
-import { execute_command } from '../../utils/exec';
+import { execute_command, execute_argv } from '../../utils/exec';
+import { Validators, rejectInvalid } from '../../utils/validators';
 import logger from '../../utils/logger';
+import * as fs from 'fs';
 
 interface PppoeCredentialsFeatureConfig extends FeatureConfig {
   chap_secrets_path?: string;
@@ -36,7 +38,7 @@ export class PppoeCredentials extends BaseFeature {
       const nmPath = this.featureConfig.nmconnection_path || DEFAULT_NMCONNECTION_PATH;
 
       // Read file with sudo (nmconnection files are restricted to root)
-      const result = await execute_command(`sudo cat "${nmPath}"`, false);
+      const result = await execute_argv('sudo', ['cat', nmPath]);
 
       if (result.exitCode !== 0) {
         logger.warn(`Failed to read NetworkManager connection file: ${nmPath}`);
@@ -218,14 +220,15 @@ export class PppoeCredentials extends BaseFeature {
 
   private async checkFileExists(filePath: string): Promise<boolean> {
     try {
-      const result = await execute_command(`test -f "${filePath}"`, false);
-      return result.exitCode === 0;
+      return fs.existsSync(filePath);
     } catch {
       return false;
     }
   }
 
   private async countCredentials(filePath: string): Promise<number> {
+    // filePath is a fixed config path (never MQTT-controlled); a shell is used
+    // here only for the `grep | echo` fallback. No external value is interpolated.
     try {
       const result = await execute_command(`grep -c "^[^#]" "${filePath}" 2>/dev/null || echo "0"`, false);
       return parseInt(result.stdout.trim()) || 0;
@@ -311,9 +314,19 @@ export class PppoeCredentials extends BaseFeature {
     try {
       await this.publishState(`${this.featureName}/last_action/state`, 'Saving credentials...', true);
 
-      // Read current input values from MQTT states
-      const usernameResult = await execute_command(`mosquitto_sub -h 192.168.0.1 -u mqtt -P CHANGE_ME_MQTT_PASSWORD -t "${this.prefixTopic(`${this.featureName}/username_input/state`)}" -C 1 -W 1`, false);
-      const passwordResult = await execute_command(`mosquitto_sub -h 192.168.0.1 -u mqtt -P CHANGE_ME_MQTT_PASSWORD -t "${this.prefixTopic(`${this.featureName}/password_input/state`)}" -C 1 -W 1`, false);
+      // Read current input values from MQTT states (topics derived from config,
+      // not from any external value). Broker credentials come from the agent
+      // config (env-overridable via MQTT_PASSWORD) — never hard-coded.
+      const mqtt = this.agentConfig.mqtt;
+      const mqttArgs = (topic: string) => {
+        const args = ['-h', mqtt.host, '-p', String(mqtt.port)];
+        if (mqtt.username) args.push('-u', mqtt.username);
+        if (mqtt.password) args.push('-P', mqtt.password);
+        args.push('-t', topic, '-C', '1', '-W', '1');
+        return args;
+      };
+      const usernameResult = await execute_argv('mosquitto_sub', mqttArgs(this.prefixTopic(`${this.featureName}/username_input/state`)));
+      const passwordResult = await execute_argv('mosquitto_sub', mqttArgs(this.prefixTopic(`${this.featureName}/password_input/state`)));
 
       const newUsername = usernameResult.stdout.trim();
       const newPassword = passwordResult.stdout.trim();
@@ -323,10 +336,18 @@ export class PppoeCredentials extends BaseFeature {
         return;
       }
 
+      // Credentials are written verbatim into an INI file line — reject values
+      // containing control characters (newlines, etc.) that would corrupt it.
+      if (!Validators.isConfigSafeLine(newUsername) || !Validators.isConfigSafeLine(newPassword)) {
+        rejectInvalid('pppoe_credentials', newUsername, this.featureName);
+        await this.publishState(`${this.featureName}/last_action/state`, 'Error: Invalid characters in credentials', true);
+        return;
+      }
+
       const nmPath = this.featureConfig.nmconnection_path || DEFAULT_NMCONNECTION_PATH;
 
       // Read current config
-      const readResult = await execute_command(`sudo cat "${nmPath}"`, false);
+      const readResult = await execute_argv('sudo', ['cat', nmPath]);
       if (readResult.exitCode !== 0) {
         throw new Error(`Failed to read NetworkManager config: ${nmPath}`);
       }
@@ -364,21 +385,19 @@ export class PppoeCredentials extends BaseFeature {
       }
 
       // Create backup
-      await execute_command(`sudo cp "${nmPath}" "${nmPath}.backup"`, false);
+      await execute_argv('sudo', ['cp', nmPath, `${nmPath}.backup`]);
 
-      // Write to temp file and move
+      // Write to temp file via fs (no shell → no injection), then move into place
       const tempFile = `/tmp/pppoe_nm_${Date.now()}.nmconnection`;
       const content = updatedLines.join('\n');
-
-      // Escape single quotes for shell
-      const escapedContent = content.replace(/'/g, "'\\''");
-      await execute_command(`echo '${escapedContent}' > ${tempFile}`, false);
-      await execute_command(`sudo mv ${tempFile} "${nmPath}"`, false);
-      await execute_command(`sudo chmod 600 "${nmPath}"`, false);
+      fs.writeFileSync(tempFile, content, { mode: 0o600 });
+      await execute_argv('sudo', ['mv', tempFile, nmPath]);
+      await execute_argv('sudo', ['chmod', '600', nmPath]);
 
       // Reload NetworkManager connection to apply changes
-      await execute_command('sudo nmcli connection reload', false);
-      await execute_command('sudo nmcli connection down pppoe-enp6s0.835 && sudo nmcli connection up pppoe-enp6s0.835', false);
+      await execute_argv('sudo', ['nmcli', 'connection', 'reload']);
+      await execute_argv('sudo', ['nmcli', 'connection', 'down', 'pppoe-enp6s0.835']);
+      await execute_argv('sudo', ['nmcli', 'connection', 'up', 'pppoe-enp6s0.835']);
 
       await this.publishState(`${this.featureName}/last_action/state`, 'Credentials saved and connection restarted', true);
       logger.info(`PPPoE credentials updated in ${nmPath}`);
@@ -395,7 +414,7 @@ export class PppoeCredentials extends BaseFeature {
       await this.publishState(`${this.featureName}/last_action/state`, 'Testing connection...', true);
       
       // Test PPPoE connection
-      const result = await execute_command('sudo pppd call provider', false);
+      const result = await execute_argv('sudo', ['pppd', 'call', 'provider']);
       
       if (result.exitCode === 0) {
         await this.publishState(`${this.featureName}/last_action/state`, 'Connection test successful', true);

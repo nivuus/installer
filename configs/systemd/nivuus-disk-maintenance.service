@@ -1,0 +1,12 @@
+[Unit]
+Description=Nivuus disk maintenance (bounds unbounded caches)
+Documentation=file:/opt/nivuus/scripts/disk-maintenance.sh
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nivuus-disk-maintenance.sh
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=1800

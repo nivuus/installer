@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import logging
+from functools import partial
 from pathlib import Path
 from typing import Any
+
+import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -12,6 +15,9 @@ from homeassistant.helpers import config_validation as cv
 
 from .catalog import Catalog
 from .const import (
+    ATTR_APP_ID,
+    ATTR_CONFIG,
+    ATTR_REMOVE_DATA,
     CONF_CATALOG_PATH,
     CONF_DOCKER_HOST,
     CONF_STACKS_PATH,
@@ -20,6 +26,12 @@ from .const import (
     DEFAULT_STACKS_PATH,
     DOMAIN,
     PLATFORMS,
+    SERVICE_INSTALL_APP,
+    SERVICE_REMOVE_APP,
+    SERVICE_RESTART_APP,
+    SERVICE_START_APP,
+    SERVICE_STOP_APP,
+    SERVICE_UPDATE_APP,
 )
 from .coordinator import DockerMarketplaceCoordinator
 from .docker_client import DockerClient
@@ -102,6 +114,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Close Docker client
         data["docker_client"].close()
 
+        # Services are domain-wide: only drop them once the last entry is gone
+        if not hass.config_entries.async_loaded_entries(DOMAIN):
+            _async_unregister_services(hass)
+            hass.data[DOMAIN].pop("coordinator", None)
+            hass.data[DOMAIN].pop("catalog", None)
+
     return unload_ok
 
 
@@ -143,6 +161,28 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
         _LOGGER.warning("Frontend files not found at %s", frontend_path)
 
 
+APP_ID_SCHEMA = vol.Schema({vol.Required(ATTR_APP_ID): cv.string})
+
+SERVICE_SCHEMAS: dict[str, vol.Schema] = {
+    SERVICE_INSTALL_APP: vol.Schema(
+        {
+            vol.Required(ATTR_APP_ID): cv.string,
+            vol.Optional(ATTR_CONFIG, default=dict): dict,
+        }
+    ),
+    SERVICE_REMOVE_APP: vol.Schema(
+        {
+            vol.Required(ATTR_APP_ID): cv.string,
+            vol.Optional(ATTR_REMOVE_DATA, default=False): cv.boolean,
+        }
+    ),
+    SERVICE_UPDATE_APP: APP_ID_SCHEMA,
+    SERVICE_START_APP: APP_ID_SCHEMA,
+    SERVICE_STOP_APP: APP_ID_SCHEMA,
+    SERVICE_RESTART_APP: APP_ID_SCHEMA,
+}
+
+
 async def _async_register_services(
     hass: HomeAssistant, coordinator: DockerMarketplaceCoordinator
 ) -> None:
@@ -156,49 +196,33 @@ async def _async_register_services(
         async_restart_app,
     )
 
-    # Install app service
-    hass.services.async_register(
-        DOMAIN,
-        "install_app",
-        lambda call: async_install_app(hass, coordinator, call),
-    )
+    handlers = {
+        SERVICE_INSTALL_APP: async_install_app,
+        SERVICE_REMOVE_APP: async_remove_app,
+        SERVICE_UPDATE_APP: async_update_app,
+        SERVICE_START_APP: async_start_app,
+        SERVICE_STOP_APP: async_stop_app,
+        SERVICE_RESTART_APP: async_restart_app,
+    }
 
-    # Remove app service
-    hass.services.async_register(
-        DOMAIN,
-        "remove_app",
-        lambda call: async_remove_app(hass, coordinator, call),
-    )
-
-    # Update app service
-    hass.services.async_register(
-        DOMAIN,
-        "update_app",
-        lambda call: async_update_app(hass, coordinator, call),
-    )
-
-    # Start app service
-    hass.services.async_register(
-        DOMAIN,
-        "start_app",
-        lambda call: async_start_app(hass, coordinator, call),
-    )
-
-    # Stop app service
-    hass.services.async_register(
-        DOMAIN,
-        "stop_app",
-        lambda call: async_stop_app(hass, coordinator, call),
-    )
-
-    # Restart app service
-    hass.services.async_register(
-        DOMAIN,
-        "restart_app",
-        lambda call: async_restart_app(hass, coordinator, call),
-    )
+    # Bind hass/coordinator with partial: HassJob unwraps functools.partial to
+    # detect the coroutine function. A lambda would be classified as a sync
+    # handler, run in the executor, and its coroutine silently never awaited.
+    for service, handler in handlers.items():
+        hass.services.async_register(
+            DOMAIN,
+            service,
+            partial(handler, hass, coordinator),
+            schema=SERVICE_SCHEMAS[service],
+        )
 
     _LOGGER.info("Registered Docker Marketplace services")
+
+
+def _async_unregister_services(hass: HomeAssistant) -> None:
+    """Remove integration services."""
+    for service in SERVICE_SCHEMAS:
+        hass.services.async_remove(DOMAIN, service)
 
 
 async def _async_register_websocket_api(

@@ -2,7 +2,8 @@
 
 import { BaseFeature } from '../../core/BaseFeature';
 import { MqttClient, FeatureConfig } from '../../core/types';
-import { execute_command } from '../../utils/exec'; // Using the mock exec for now
+import { execute_argv } from '../../utils/exec';
+import { Validators, rejectInvalid } from '../../utils/validators';
 import logger from '../../utils/logger';
 
 interface FirewallManagerFeatureConfig extends FeatureConfig {
@@ -39,7 +40,7 @@ export class FirewallManager extends BaseFeature {
   // Helper: Get port forwards for a specific zone
   private async getZonePortForwards(zone: string): Promise<Array<{port: string, proto: string, toport: string, toaddr: string}>> {
     try {
-      const result = await execute_command(`firewall-cmd --zone=${zone} --list-forward-ports`, false);
+      const result = await execute_argv('firewall-cmd', [`--zone=${zone}`, '--list-forward-ports']);
       if (result.exitCode !== 0) return [];
 
       const forwards: Array<{port: string, proto: string, toport: string, toaddr: string}> = [];
@@ -68,7 +69,7 @@ export class FirewallManager extends BaseFeature {
   // Helper: Get services in a zone
   private async getZoneServices(zone: string): Promise<string[]> {
     try {
-      const result = await execute_command(`firewall-cmd --zone=${zone} --list-services`, false);
+      const result = await execute_argv('firewall-cmd', [`--zone=${zone}`, '--list-services']);
       if (result.exitCode !== 0) return [];
       return result.stdout.trim().split(/\s+/).filter(s => s.length > 0);
     } catch (error) {
@@ -80,7 +81,7 @@ export class FirewallManager extends BaseFeature {
   // Helper: Get ports in a zone
   private async getZonePorts(zone: string): Promise<string[]> {
     try {
-      const result = await execute_command(`firewall-cmd --zone=${zone} --list-ports`, false);
+      const result = await execute_argv('firewall-cmd', [`--zone=${zone}`, '--list-ports']);
       if (result.exitCode !== 0) return [];
       return result.stdout.trim().split(/\s+/).filter(p => p.length > 0);
     } catch (error) {
@@ -92,7 +93,7 @@ export class FirewallManager extends BaseFeature {
   // Helper: Check if masquerading is enabled in a zone
   private async getZoneMasquerade(zone: string): Promise<boolean> {
     try {
-      const result = await execute_command(`firewall-cmd --zone=${zone} --query-masquerade`, false);
+      const result = await execute_argv('firewall-cmd', [`--zone=${zone}`, '--query-masquerade']);
       return result.exitCode === 0; // Exit code 0 means yes, 1 means no
     } catch (error) {
       logger.error(`Error querying masquerade for zone ${zone}:`, error);
@@ -178,6 +179,29 @@ export class FirewallManager extends BaseFeature {
     }
   }
 
+  // Strict validation of MQTT-controlled inputs before any firewall mutation.
+  private validatePortInputs(zone: string, port: string, protocol: string): boolean {
+    if (!Validators.isZone(zone)) return rejectInvalid('zone', zone, this.featureName);
+    if (!Validators.isPort(port)) return rejectInvalid('port', port, this.featureName);
+    if (!Validators.isProtocol(protocol)) return rejectInvalid('protocol', protocol, this.featureName);
+    return true;
+  }
+
+  private validateServiceInputs(zone: string, service: string): boolean {
+    if (!Validators.isZone(zone)) return rejectInvalid('zone', zone, this.featureName);
+    if (!Validators.isFirewallService(service)) return rejectInvalid('service', service, this.featureName);
+    return true;
+  }
+
+  private validateForwardInputs(): boolean {
+    if (!Validators.isZone(this.currentForwardZone)) return rejectInvalid('zone', this.currentForwardZone, this.featureName);
+    if (!Validators.isPort(this.currentForwardPort)) return rejectInvalid('forward_port', this.currentForwardPort, this.featureName);
+    if (!Validators.isProtocol(this.currentForwardProtocol)) return rejectInvalid('forward_protocol', this.currentForwardProtocol, this.featureName);
+    if (!Validators.isPort(this.currentForwardToPort)) return rejectInvalid('forward_toport', this.currentForwardToPort, this.featureName);
+    if (!Validators.isIPv4(this.currentForwardToAddr)) return rejectInvalid('forward_toaddr', this.currentForwardToAddr, this.featureName);
+    return true;
+  }
+
   private async getCurrentInputs(): Promise<{port: string, protocol: string, zone: string, service: string}> {
     return {
       port: this.currentPort,
@@ -194,10 +218,14 @@ export class FirewallManager extends BaseFeature {
         await this.publishState(`${this.featureName}/last_action/state`, 'Error: Missing port, protocol or zone', false);
         return;
       }
-      
+      if (!this.validatePortInputs(inputs.zone, inputs.port, inputs.protocol)) {
+        await this.publishState(`${this.featureName}/last_action/state`, 'Error: Invalid port, protocol or zone', false);
+        return;
+      }
+
       logger.info(`Adding port ${inputs.port}/${inputs.protocol} to zone ${inputs.zone}`);
-      await execute_command(`firewall-cmd --zone=${inputs.zone} --add-port=${inputs.port}/${inputs.protocol} --permanent`, false);
-      await execute_command(`firewall-cmd --reload`, false);
+      await execute_argv('firewall-cmd', [`--zone=${inputs.zone}`, `--add-port=${inputs.port}/${inputs.protocol}`, '--permanent']);
+      await execute_argv('firewall-cmd', ['--reload']);
       await this.publishState(`${this.featureName}/last_action/state`, `Added port ${inputs.port}/${inputs.protocol} to ${inputs.zone}`, false);
     } catch (error: any) {
       logger.error(`Error adding port:`, error);
@@ -212,10 +240,14 @@ export class FirewallManager extends BaseFeature {
         await this.publishState(`${this.featureName}/last_action/state`, 'Error: Missing port, protocol or zone', false);
         return;
       }
-      
+      if (!this.validatePortInputs(inputs.zone, inputs.port, inputs.protocol)) {
+        await this.publishState(`${this.featureName}/last_action/state`, 'Error: Invalid port, protocol or zone', false);
+        return;
+      }
+
       logger.info(`Removing port ${inputs.port}/${inputs.protocol} from zone ${inputs.zone}`);
-      await execute_command(`firewall-cmd --zone=${inputs.zone} --remove-port=${inputs.port}/${inputs.protocol} --permanent`, false);
-      await execute_command(`firewall-cmd --reload`, false);
+      await execute_argv('firewall-cmd', [`--zone=${inputs.zone}`, `--remove-port=${inputs.port}/${inputs.protocol}`, '--permanent']);
+      await execute_argv('firewall-cmd', ['--reload']);
       await this.publishState(`${this.featureName}/last_action/state`, `Removed port ${inputs.port}/${inputs.protocol} from ${inputs.zone}`, false);
     } catch (error: any) {
       logger.error(`Error removing port:`, error);
@@ -230,10 +262,14 @@ export class FirewallManager extends BaseFeature {
         await this.publishState(`${this.featureName}/last_action/state`, 'Error: Missing service or zone', false);
         return;
       }
-      
+      if (!this.validateServiceInputs(inputs.zone, inputs.service)) {
+        await this.publishState(`${this.featureName}/last_action/state`, 'Error: Invalid service or zone', false);
+        return;
+      }
+
       logger.info(`Adding service ${inputs.service} to zone ${inputs.zone}`);
-      await execute_command(`firewall-cmd --zone=${inputs.zone} --add-service=${inputs.service} --permanent`, false);
-      await execute_command(`firewall-cmd --reload`, false);
+      await execute_argv('firewall-cmd', [`--zone=${inputs.zone}`, `--add-service=${inputs.service}`, '--permanent']);
+      await execute_argv('firewall-cmd', ['--reload']);
       await this.publishState(`${this.featureName}/last_action/state`, `Added service ${inputs.service} to ${inputs.zone}`, false);
     } catch (error: any) {
       logger.error(`Error adding service:`, error);
@@ -248,10 +284,14 @@ export class FirewallManager extends BaseFeature {
         await this.publishState(`${this.featureName}/last_action/state`, 'Error: Missing service or zone', false);
         return;
       }
+      if (!this.validateServiceInputs(inputs.zone, inputs.service)) {
+        await this.publishState(`${this.featureName}/last_action/state`, 'Error: Invalid service or zone', false);
+        return;
+      }
 
       logger.info(`Removing service ${inputs.service} from zone ${inputs.zone}`);
-      await execute_command(`firewall-cmd --zone=${inputs.zone} --remove-service=${inputs.service} --permanent`, false);
-      await execute_command(`firewall-cmd --reload`, false);
+      await execute_argv('firewall-cmd', [`--zone=${inputs.zone}`, `--remove-service=${inputs.service}`, '--permanent']);
+      await execute_argv('firewall-cmd', ['--reload']);
       await this.publishState(`${this.featureName}/last_action/state`, `Removed service ${inputs.service} from ${inputs.zone}`, false);
     } catch (error: any) {
       logger.error(`Error removing service:`, error);
@@ -271,14 +311,20 @@ export class FirewallManager extends BaseFeature {
         return; // No change
       }
 
+      if (!Validators.isInterface(interfaceName) || !Validators.isZone(oldZone) || !Validators.isZone(newZone)) {
+        rejectInvalid('interface/zone', `${interfaceName} ${oldZone}->${newZone}`, this.featureName);
+        await this.publishState(`${this.featureName}/last_action/state`, 'Error: Invalid interface or zone', false);
+        return;
+      }
+
       logger.info(`Moving interface ${interfaceName} from ${oldZone} to ${newZone}`);
 
       // Remove from old zone
-      await execute_command(`firewall-cmd --zone=${oldZone} --remove-interface=${interfaceName} --permanent`, false);
+      await execute_argv('firewall-cmd', [`--zone=${oldZone}`, `--remove-interface=${interfaceName}`, '--permanent']);
       // Add to new zone
-      await execute_command(`firewall-cmd --zone=${newZone} --add-interface=${interfaceName} --permanent`, false);
+      await execute_argv('firewall-cmd', [`--zone=${newZone}`, `--add-interface=${interfaceName}`, '--permanent']);
       // Reload firewall
-      await execute_command(`firewall-cmd --reload`, false);
+      await execute_argv('firewall-cmd', ['--reload']);
 
       // Update internal mapping
       this.interfaceZoneMap.set(interfaceName, newZone);
@@ -299,11 +345,18 @@ export class FirewallManager extends BaseFeature {
         return;
       }
 
+      if (!this.validateForwardInputs()) {
+        await this.publishState(`${this.featureName}/last_action/state`, 'Error: Invalid forward port, protocol, address or zone', false);
+        return;
+      }
+
+      // Note: the shell literal used single quotes around the rule; with argv the
+      // value is passed verbatim as one argument, so NO surrounding quotes.
       const forwardRule = `port=${this.currentForwardPort}:proto=${this.currentForwardProtocol}:toport=${this.currentForwardToPort}:toaddr=${this.currentForwardToAddr}`;
 
       logger.info(`Adding port forward to zone ${this.currentForwardZone}: ${forwardRule}`);
-      await execute_command(`firewall-cmd --zone=${this.currentForwardZone} --add-forward-port='${forwardRule}' --permanent`, false);
-      await execute_command(`firewall-cmd --reload`, false);
+      await execute_argv('firewall-cmd', [`--zone=${this.currentForwardZone}`, `--add-forward-port=${forwardRule}`, '--permanent']);
+      await execute_argv('firewall-cmd', ['--reload']);
 
       await this.publishState(`${this.featureName}/last_action/state`, `Added forward ${this.currentForwardPort} → ${this.currentForwardToAddr}:${this.currentForwardToPort}`, false);
 
@@ -327,11 +380,16 @@ export class FirewallManager extends BaseFeature {
         return;
       }
 
+      if (!this.validateForwardInputs()) {
+        await this.publishState(`${this.featureName}/last_action/state`, 'Error: Invalid forward port, protocol, address or zone', false);
+        return;
+      }
+
       const forwardRule = `port=${this.currentForwardPort}:proto=${this.currentForwardProtocol}:toport=${this.currentForwardToPort}:toaddr=${this.currentForwardToAddr}`;
 
       logger.info(`Removing port forward from zone ${this.currentForwardZone}: ${forwardRule}`);
-      await execute_command(`firewall-cmd --zone=${this.currentForwardZone} --remove-forward-port='${forwardRule}' --permanent`, false);
-      await execute_command(`firewall-cmd --reload`, false);
+      await execute_argv('firewall-cmd', [`--zone=${this.currentForwardZone}`, `--remove-forward-port=${forwardRule}`, '--permanent']);
+      await execute_argv('firewall-cmd', ['--reload']);
 
       await this.publishState(`${this.featureName}/last_action/state`, `Removed forward ${this.currentForwardPort} → ${this.currentForwardToAddr}:${this.currentForwardToPort}`, false);
 
@@ -363,7 +421,10 @@ export class FirewallManager extends BaseFeature {
       if (line.match(/^\S/) && !trimmedLine.startsWith('interfaces:') && !trimmedLine.startsWith('sources:')) {
         // It's a zone name. It might or might not have interfaces on the same line.
         const parts = trimmedLine.split(':');
-        currentZone = parts[0].trim();
+        // firewalld >= 2.x (Debian Trixie) appends " (default)" to the default
+        // zone in `--get-active-zones`; strip it or every firewall-cmd call for
+        // that zone fails with INVALID_ZONE (the internal zone went unmonitored).
+        currentZone = parts[0].trim().replace(/\s*\(default\)\s*$/, '');
         if (parts.length > 1 && parts[1].trim()) {
           // Interfaces are on the same line as the zone
           const interfaces = parts[1].trim().split(/\s+/).filter(iface => iface.length > 0);
@@ -407,11 +468,11 @@ export class FirewallManager extends BaseFeature {
     // Or, features can dynamically create entities if BaseFeature supports it.
     // For simplicity, we'll try to get initial data here.
     try {
-      const activeZonesOutput = await execute_command('firewall-cmd --get-active-zones', false);
+      const activeZonesOutput = await execute_argv('firewall-cmd', ['--get-active-zones']);
       const zoneInterfaceMap = this.parseActiveZones(activeZonesOutput.stdout);
 
       // Get all available zones for management
-      const zonesOutput = await execute_command('firewall-cmd --get-zones', false);
+      const zonesOutput = await execute_argv('firewall-cmd', ['--get-zones']);
       this.availableZones = zonesOutput.stdout.trim().split(/\s+/).filter(zone => zone.length > 0);
 
       const allInterfaces = new Set<string>();
@@ -668,9 +729,9 @@ export class FirewallManager extends BaseFeature {
 
   protected async update(): Promise<void> {
     try {
-      const activeZonesOutput = await execute_command('firewall-cmd --get-active-zones', false);
+      const activeZonesOutput = await execute_argv('firewall-cmd', ['--get-active-zones']);
       const zoneInterfaceMap = this.parseActiveZones(activeZonesOutput.stdout);
-      
+
       const interfaceToZone: { [iface: string]: string } = {};
       const activeZoneDetails: { [zone: string]: string[] } = {};
 
