@@ -15,37 +15,73 @@ $MinDataGiB = 100
 $DataMarker = 'D:\state\NIVUUS-DATA.id'
 
 # The answer file assigns D: on a fresh install. On a rebuild the letter can
-# drift. Repair it by label first (which persists across rebuilds), or by
-# size as a fallback.
-if (-not (Test-Path 'D:\')) {
-    # Try to find an unlettered partition whose associated volume has label "Data".
-    # Labels persist across rebuilds, making them the most reliable discriminator.
-    # Use -eq for exact match (not -match regex) to avoid false positives like "Database".
-    $part = Get-Partition | Where-Object {
-        -not $_.DriveLetter
-    } | ForEach-Object {
+# drift, or - since both provisioning ISOs stay attached throughout, and one
+# of the optical drives can grab D: on first boot of the new C: - be occupied
+# outright by something that is not our data partition. Repair
+# unconditionally rather than only when D:\ is free: search for the correct
+# partition by label first (persists across rebuilds), or by size as a
+# fallback, and if D: is occupied by something else, move that occupant out
+# of the way instead of aborting.
+$currentD = Get-Volume -DriveLetter D -ErrorAction SilentlyContinue
+$dIsOurData = $currentD -and $currentD.FileSystem -eq 'NTFS' -and $currentD.FileSystemLabel -eq 'Data'
+
+if (-not $dIsOurData) {
+    # Search every partition that is not currently D: (lettered or not) for
+    # one whose volume carries our label. Use -eq for exact match (not
+    # -match regex) to avoid false positives like "Database".
+    $part = Get-Partition | Where-Object { $_.DriveLetter -ne 'D' } | ForEach-Object {
         $vol = Get-Volume -Partition $_ -ErrorAction SilentlyContinue
-        if ($vol -and $vol.FileSystemLabel -eq 'Data') { $_ }
+        if ($vol -and $vol.FileSystem -eq 'NTFS' -and $vol.FileSystemLabel -eq 'Data') { $_ }
     } | Select-Object -First 1
 
-    if (-not $part) {
-        # Fallback: select the largest unlettered partition if it meets size.
-        # Use -ge to match the validation below, so a 100 GiB partition is accepted.
+    if ($part) {
+        Write-Host "D: assignment: using label-based detection (label='Data'), partition $($part.PartitionNumber) on disk $($part.DiskNumber)"
+    }
+    else {
+        # Fallback: the largest unlettered partition that meets size, in case
+        # the label was somehow lost. Use -ge to match the validation below,
+        # so a 100 GiB partition is accepted.
         $part = Get-Partition | Where-Object {
             -not $_.DriveLetter -and $_.Size -ge ($MinDataGiB * 1GB)
         } | Sort-Object -Property Size -Descending | Select-Object -First 1
-        if (-not $part) { throw 'no unlettered volume large enough to be D:' }
-        Write-Host "D: assignment: using size heuristic (label not found)"
+        # No suitable partition at all: nothing to repair onto, refuse.
+        if (-not $part) { throw 'no unlettered volume large enough to be D: (and no volume labelled Data found either)' }
+        Write-Host "D: assignment: using size heuristic (label not found), partition $($part.PartitionNumber) on disk $($part.DiskNumber)"
     }
-    else {
-        Write-Host "D: assignment: using label-based detection (label='Data')"
+
+    if ($currentD) {
+        # D: is occupied by something that is not our data volume - in
+        # practice an optical drive, since both ISOs stay attached for this
+        # stage to read its own payload from. Move the occupant aside rather
+        # than aborting: pick a free letter high in the alphabet so it can
+        # never collide with a fixed volume.
+        $used = @((Get-Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveLetter }).DriveLetter)
+        $freeLetter = $null
+        foreach ($code in 90..69) {
+            # 90='Z' downto 69='E': never hands out A-D.
+            $candidate = [char]$code
+            if ($candidate -notin $used) { $freeLetter = $candidate; break }
+        }
+        if (-not $freeLetter) { throw 'no free drive letter available to relocate the D: occupant' }
+
+        $occupantLabel = if ($currentD.FileSystemLabel) { $currentD.FileSystemLabel } else { '(no label)' }
+        Write-Host "D: is occupied by '$occupantLabel' [$($currentD.FileSystem)] - moving it to ${freeLetter}: to free D: for the data partition"
+        # Partitions on optical drives are not exposed by Get-Partition/
+        # Set-Partition, so relocate through the volume itself via CIM -
+        # this works uniformly whether the occupant is optical or a stray
+        # fixed volume.
+        $occupant = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter='D:'"
+        if (-not $occupant) { throw 'could not resolve the D: occupant via CIM to relocate it' }
+        Set-CimInstance -InputObject $occupant -Property @{ DriveLetter = "${freeLetter}:" } | Out-Null
     }
-    Write-Host "assigning D: to partition $($part.PartitionNumber)"
+
+    Write-Host "assigning D: to partition $($part.PartitionNumber) on disk $($part.DiskNumber)"
     Set-Partition -InputObject $part -NewDriveLetter D
 }
 
-# Poll for the volume to appear after assignment, with a 10-second timeout.
-# Set-Partition is generally synchronous, but enumeration is not guaranteed.
+# Poll for the volume to appear/settle after (re)assignment, with a
+# 10-second timeout. Set-Partition is generally synchronous, but enumeration
+# is not guaranteed. Also re-reads $vol below when D: was already correct.
 $deadline = (Get-Date).AddSeconds(10)
 $vol = $null
 while ((Get-Date) -lt $deadline) {
