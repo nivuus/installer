@@ -11,6 +11,7 @@ import tempfile
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "installer" / "windows-guest"))
 
+import build  # noqa: E402
 import payload  # noqa: E402
 
 failures = []
@@ -42,9 +43,14 @@ def make_tree(root: pathlib.Path) -> "payload.PayloadSources":
     (drivers / "winfsp" / "winfsp-2.0.msi").write_bytes(b"MSI")
     (drivers / "agent").mkdir()
     (drivers / "agent" / "agent.exe").write_bytes(b"MZ")
+    config = root / "config"
+    config.mkdir()
+    for name in ["sunshine.conf", "apps.json", "secrets.psd1"]:
+        (config / name).write_text(f"# {name}\n")
     return payload.PayloadSources(provision_dir=root / "provision",
                                   probe_dir=root / "probe",
-                                  drivers_dir=drivers)
+                                  drivers_dir=drivers,
+                                  config_dir=config)
 
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -202,6 +208,76 @@ with tempfile.TemporaryDirectory() as tmp:
     except payload.PayloadError as e:
         if "extracted from the current Windows VM" not in str(e):
             failures.append(f"stage_payload error missing the agent warning: {e}")
+
+# The rendered configuration must ride in the payload, or 25-apollo has
+# nothing to copy and 50-power has no password to set autologon with.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    src = root / "src"
+    (src / "provision").mkdir(parents=True)
+    (src / "provision" / "run-all.ps1").write_text("x")
+    (src / "provision" / "00-bootstrap.ps1").write_text("x")
+    (src / "provision" / "99-marker.ps1").write_text("x")
+    (src / "probe").mkdir()
+    (src / "probe" / "advanced-color.ps1").write_text("x")
+    drivers = src / "drivers"
+    _make_complete_payload(drivers)
+    cfg = src / "config"
+    cfg.mkdir()
+    for name in ["sunshine.conf", "apps.json", "secrets.psd1"]:
+        (cfg / name).write_text("x")
+    sources = payload.PayloadSources(
+        provision_dir=src / "provision", probe_dir=src / "probe",
+        drivers_dir=drivers, config_dir=cfg)
+    dest = root / "nivuus"
+    payload.stage_payload(dest, sources, payload.marker_text("img", "b1"))
+    payload.verify_staged(dest)
+    check("the staged payload carries the rendered config",
+          (dest / "config" / "sunshine.conf").is_file(), True)
+    check("the staged payload carries the secrets",
+          (dest / "config" / "secrets.psd1").is_file(), True)
+
+# --- Sous-projet B, tâche 9 : le mode "rebuild" sans confirmation opérateur
+# doit être refusé. C'est le seul garde-fou réel (Setup repartitionne avant
+# qu'un script invité ne tourne) - un refus sans test est un refus qu'un
+# futur remaniement supprime sans que rien ne s'en aperçoive.
+args = build.parse_args([
+    "--windows-iso", "/nonexistent.iso",
+    "--drivers-dir", "/nonexistent-drivers",
+    "--disk-mode", "rebuild",
+])
+check("rebuild defaults to unverified", args.target_disk_verified, False)
+try:
+    build.enforce_disk_mode_guard(args.disk_mode, args.target_disk_verified)
+    failures.append("enforce_disk_mode_guard: accepted rebuild with no "
+                     "--target-disk-verified")
+except SystemExit as e:
+    if "partition 4" not in str(e):
+        failures.append(f"disk-mode guard message doesn't name partition 4: {e}")
+
+# The same rebuild request, once the operator passes --target-disk-verified,
+# must NOT be refused.
+args = build.parse_args([
+    "--windows-iso", "/nonexistent.iso",
+    "--drivers-dir", "/nonexistent-drivers",
+    "--disk-mode", "rebuild",
+    "--target-disk-verified",
+])
+try:
+    build.enforce_disk_mode_guard(args.disk_mode, args.target_disk_verified)
+except SystemExit as e:
+    failures.append(f"disk-mode guard refused a verified rebuild: {e}")
+
+# wipe (the default) never needs --target-disk-verified.
+args = build.parse_args([
+    "--windows-iso", "/nonexistent.iso",
+    "--drivers-dir", "/nonexistent-drivers",
+])
+check("default disk mode is wipe", args.disk_mode, "wipe")
+try:
+    build.enforce_disk_mode_guard(args.disk_mode, args.target_disk_verified)
+except SystemExit as e:
+    failures.append(f"disk-mode guard refused the default wipe mode: {e}")
 
 if failures:
     print(f"FAIL ({len(failures)})")

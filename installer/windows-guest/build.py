@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import apollo  # noqa: E402
 import autounattend  # noqa: E402
 import media  # noqa: E402
 import payload  # noqa: E402
@@ -30,6 +31,7 @@ import unattend_iso  # noqa: E402
 HERE = Path(__file__).resolve().parent
 DEFAULT_KEY_FILE = "/root/.config/nivuus/windows-ltsc.key"
 DEFAULT_PASSWORD_FILE = "/root/.config/nivuus/windows-admin.pass"
+DEFAULT_APOLLO_PASSWORD_FILE = "/root/.config/nivuus/apollo-ui.pass"
 
 
 def read_secret(path: str, what: str) -> str:
@@ -58,20 +60,54 @@ def parse_args(argv=None):
     ap.add_argument("--windows-iso", required=True,
                     help="official Windows 11 IoT Enterprise LTSC 2024 medium")
     ap.add_argument("--drivers-dir", required=True,
-                    help="directory holding nvidia/ and sudovda/ payload binaries")
+                    help="directory holding nvidia/, apollo/ and the other "
+                         "offline payload binaries (SudoVDA rides inside the "
+                         "Apollo installer, no separate directory needed)")
     ap.add_argument("--output", default="/media/data/iso/nivuus-unattend.iso")
     ap.add_argument("--key-file", default=DEFAULT_KEY_FILE)
     ap.add_argument("--password-file", default=DEFAULT_PASSWORD_FILE)
+    ap.add_argument("--apollo-password-file", default=DEFAULT_APOLLO_PASSWORD_FILE)
+    ap.add_argument("--apollo-user", default="nivuus")
+    ap.add_argument("--disk-mode", default="wipe",
+                    choices=list(autounattend.DISK_MODES),
+                    help="wipe partitions the whole disk; rebuild reformats C: "
+                         "and leaves the games partition alone")
+    ap.add_argument("--target-disk-verified", action="store_true",
+                    help="required with --disk-mode rebuild: confirms the "
+                         "target disk was partitioned by this tooling")
+    ap.add_argument("--system-partition-gb", type=int, default=200,
+                    help="size of C: in GiB; the rest of the disk becomes D:")
     ap.add_argument("--hostname", default="NIVUUS-WIN")
     ap.add_argument("--image-name", default=None,
                     help="pick an image explicitly when the medium has several")
     return ap.parse_args(argv)
 
 
+def enforce_disk_mode_guard(disk_mode: str, target_disk_verified: bool) -> None:
+    """Refuse a rebuild the operator has not explicitly signed off on.
+
+    Nothing downstream can prevent a rebuild from reformatting the wrong
+    partition: Windows Setup repartitions in the windowsPE pass, long before
+    any guest-side script runs (see the "Real guard is in build.py." comment
+    on UnattendParams.disk_mode). The only real gate is the operator saying,
+    on this command line, that they checked. Refuse rather than assume.
+    """
+    if disk_mode == "rebuild" and not target_disk_verified:
+        raise SystemExit(
+            "--disk-mode rebuild reformats partition 3 of disk 0 in place and "
+            "trusts that partition 4 holds your games. Nothing verifies that "
+            "for you. Re-run with --target-disk-verified once you have "
+            "confirmed the target disk was partitioned by this tooling."
+        )
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
+    enforce_disk_mode_guard(args.disk_mode, args.target_disk_verified)
     key = read_secret(args.key_file, "product key file")
     password = read_secret(args.password_file, "administrator password file")
+    apollo_password = read_secret(args.apollo_password_file,
+                                  "Apollo web UI password file")
 
     try:
         print(f"inspecting {args.windows_iso}")
@@ -82,17 +118,28 @@ def main(argv=None) -> int:
         params = autounattend.UnattendParams(
             product_key=key, admin_password=password,
             image_name=image["name"], hostname=args.hostname,
+            disk_mode=args.disk_mode,
+            system_partition_mb=args.system_partition_gb * 1024,
         )
         answer_file = autounattend.render(params)
 
-        sources = payload.PayloadSources(
-            provision_dir=HERE / "provision",
-            probe_dir=HERE / "probe",
-            drivers_dir=Path(args.drivers_dir),
-        )
         build_id = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
         with tempfile.TemporaryDirectory(prefix="nivuus-unattend-") as tmp:
+            # Rendered into the same temporary tree as the answer file: the
+            # secrets file must never exist on disk outside this build.
+            config = Path(tmp) / "config"
+            config.mkdir()
+            ap_params = apollo.ApolloParams(ui_username=args.apollo_user,
+                                            ui_password=apollo_password)
+            (config / "sunshine.conf").write_text(apollo.render_conf(ap_params))
+            (config / "apps.json").write_text(apollo.render_apps(ap_params))
+            (config / "secrets.psd1").write_text(
+                apollo.render_secrets(password, args.apollo_user, apollo_password))
+            sources = payload.PayloadSources(
+                provision_dir=HERE / "provision", probe_dir=HERE / "probe",
+                drivers_dir=Path(args.drivers_dir), config_dir=config)
+
             stage = Path(tmp) / "stage"
             stage.mkdir()
             (stage / "autounattend.xml").write_text(answer_file)
@@ -110,11 +157,13 @@ def main(argv=None) -> int:
         print(f"  sha256 windows  : {sha256(Path(args.windows_iso))}")
         print("\nAttach BOTH ISOs to the guest: the LTSC medium boots, this one is "
               "only read.")
-        print(f"  {out} contains the product key and the administrator password "
-              "in cleartext (both are needed for an unattended install) - it is "
-              "mode 0600, keep it that way.")
+        print(f"  {out} contains the product key, the administrator password "
+              "and the Apollo web password in cleartext (all three are needed "
+              "for an unattended offline install) - it is mode 0600, keep it "
+              "that way.")
     except (media.MediaError, autounattend.UnattendError,
-            payload.PayloadError, unattend_iso.IsoError) as exc:
+            payload.PayloadError, unattend_iso.IsoError,
+            apollo.ApolloError) as exc:
         raise SystemExit(str(exc))
     return 0
 

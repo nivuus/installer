@@ -130,6 +130,9 @@ def verify_staged(dest_root: Path) -> None:
         "provision/00-bootstrap.ps1",
         "provision/99-marker.ps1",
         "probe/advanced-color.ps1",
+        "config/sunshine.conf",
+        "config/apps.json",
+        "config/secrets.psd1",
     ]
     for rel in required:
         path = dest_root / rel
