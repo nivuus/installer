@@ -427,6 +427,24 @@ The bookworm→trixie dist-upgrade broke several things; all fixed, documented h
 
   Cosmetic trap: the registry `ProductName` reads `Windows 10 IoT Enterprise LTSC 2024` on this build. The HAL and `ver` both say `10.0.26100`, i.e. Windows 11 24H2 — do not read the product string as evidence of the wrong OS.
 
+- **HDR CONFIRMED END-TO-END ON THE SudoVDA VIRTUAL DISPLAY (2026-08-22, second throwaway guest).** The A verdict left one link unmeasured — the virtual display only exists while Apollo streams, so it could not be probed then. It has now been measured, on the real passthrough GPU, with Apollo 0.4.6 installed and a Moonlight client driving a live stream:
+
+  ```
+  [avant] target=256 rc=0 supported=1 enabled=0 bpc=8  name=nivuus-probe
+  set     target=256 rc=0
+  [apres] target=256 rc=0 supported=1 enabled=1 bpc=10 name=nivuus-probe
+  ```
+
+  **`enabled=1` and `bpc=10`** — real 10-bit HDR, against the `enabled=0 bpc=8` ceiling the HDMI dummy plug can never pass. `paths=1`: with `dd_configuration_option = ensure_only_display` the virtual display was the *only* active one, both the dummy plug and the emulated VGA deactivated. Apollo's own log agrees (`Display is HDR: true`). Identity is nailed down, not deduced: `DISPLAY\SMKD1CE\…UID256_0`, manufacturer `SMK` = SudoMaker, `UID256` = the probed `target=256`.
+
+  **The dummy plug is therefore obsolete for HDR and can be unplugged.** Its EDID is a bare 128-byte block; SudoVDA's, extracted straight from `SudoVDA.dll` at offset `0xd090`, carries a full CTA-861 extension: HDR Static Metadata block with `ET=0x0f` (gamma SDR + gamma HDR + **PQ/ST 2084** + **HLG**), SMD type 1, max luminance ~3800 cd/m², plus a Colorimetry block advertising **BT.2020** RGB/YCC/cYCC. That EDID can be read offline from the driver file — no VM needed to re-check it.
+
+  ⚠️ **Two things the measurement does NOT settle.** (1) The probe *forced* the state with `DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE` (type 10) rather than waiting on the client, deliberately: the host-side Moonlight decodes in software and its `dynamicRange` flickered 0/1, which would have produced a false negative indistinguishable from a real one. What is proven is that **Windows 26100 can light HDR on this display**; that the TV's request drives it end-to-end is a separate, smaller question. (2) **Cold boot with zero displays is still untested** — the throwaway domain carries an emulated QEMU VGA that the production domain lacks, so "no dummy plug, no stream running" never occurred. Cheap mitigation for the new domain: **keep an emulated video device**. The two coexist fine and Apollo deactivates the VGA during streams, as `paths=1` shows.
+
+  Two side findings from the same run. **Apollo 0.4.6 dropped HTTP Basic on `/api/*`**: `GET /api/config` and `POST /api/pin` both return 401 with Basic, and authentication now goes through `POST /api/login` → `Set-Cookie: auth=…`. The Pomerium route for `game.allanic.me` injects `Authorization: Basic …` (`/opt/nivuus/Pomerium/config.yaml`), so **that route breaks the day Apollo is upgraded** — plan a cookie/session path or keep the pinned version. And the SudoVDA driver is the **`Virtual Display Driver (HDR)`** build (its PDB path says so), declares `UmdfExtensions = IddCx0102`, and reads a `hdrBits` registry knob — the low IddCx revision did *not* prevent HDR, so do not treat it as a blocker.
+
+  ⚠️ **The 24H2 OOBE fix is still UNVERIFIED.** `Microsoft-Windows-International-Core` was added to the `oobeSystem` pass at 16:01, but `/media/data/iso/nivuus-unattend.iso` was built at 15:01 and does not carry it: this run stopped again on country/keyboard and was pushed through with three `virsh send-key KEY_ENTER`. **Rebuild the ISO before trusting that fix.**
+
 - **`winvm` quoting is solved: use `powershell -EncodedCommand <base64 UTF-16LE>`.** `winvm` joins `$*` into a single cmd string, so nested quotes/`$` in PowerShell one-liners get mangled (`$l=Get-Content` arrives as `=Get-Content`; a `|`-separated `-Pattern` splits into separate commands). Encode instead: `B=$(iconv -f UTF-8 -t UTF-16LE s.ps1 | base64 -w0); winvm "powershell -NoProfile -EncodedCommand $B"`. Budget **~3 min** for anything using `Add-Type` (C# compile over WinRM) — a 2 min timeout kills it mid-compile. Caveat: WinRM runs in **session 0**, where `QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS)` returns **0 paths even mid-stream**, so display-topology probing must run in the interactive session (scheduled task with `/IT`), never over WinRM.
 
 ### Ollama dockerisé + API universelle sécurisée (2026-07-17)
