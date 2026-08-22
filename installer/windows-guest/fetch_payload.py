@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import subprocess
 import sys
@@ -38,6 +39,12 @@ STEAM_URL = "https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe"
 WINFSP_URL = ("https://github.com/winfsp/winfsp/releases/download/"
               "v2.0/winfsp-2.0.23075.msi")
 
+# Steam and the virtio-win ISO are deliberately unpinned moving pointers -
+# pinning their sha256 would break the build on every upstream refresh. What
+# is tracked instead is CHANGE, not a fixed value: the first digest seen for
+# a path is recorded here, and any later mismatch fails loudly.
+MANIFEST_NAME = "payload-manifest.txt"
+
 
 def plan_downloads(drivers_dir: Path) -> list[Download]:
     """Pure: what would be fetched, and where each file would land."""
@@ -50,30 +57,107 @@ def plan_downloads(drivers_dir: Path) -> list[Download]:
     ]
 
 
-def fetch(item: Download) -> str:
-    """Download one item unless it is already there. Returns its sha256."""
+def load_manifest(drivers_dir: Path) -> dict[str, tuple[str, str]]:
+    """Parse the trust-on-first-use manifest: relative path -> (sha256, date)."""
+    path = drivers_dir / MANIFEST_NAME
+    entries: dict[str, tuple[str, str]] = {}
+    if not path.exists():
+        return entries
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) == 3:
+            rel, digest, date = parts
+            entries[rel] = (digest, date)
+    return entries
+
+
+def _check_manifest(drivers_dir: Path, item: Download, digest: str) -> None:
+    """Record a first-seen digest, or fail loudly if it changed since."""
+    manifest_path = drivers_dir / MANIFEST_NAME
+    rel = item.dest.relative_to(drivers_dir).as_posix()
+    recorded = load_manifest(drivers_dir).get(rel)
+    if recorded is None:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        date = datetime.date.today().isoformat()
+        with open(manifest_path, "a") as fh:
+            fh.write(f"{rel}\t{digest}\t{date}\n")
+        return
+    recorded_digest, recorded_date = recorded
+    if recorded_digest != digest:
+        raise FetchError(
+            f"{item.name} ({rel}) changed since it was first recorded on "
+            f"{recorded_date}: manifest has {recorded_digest}, got {digest}. "
+            "Confirm the change is expected, then delete its entry from "
+            f"{manifest_path} and re-run to accept the new digest."
+        )
+
+
+def fetch(item: Download, drivers_dir: Path) -> str:
+    """Download one item unless it is already there. Returns its sha256.
+
+    dest.exists() must mean "complete": the stream lands in a sibling
+    `.part` file first and is only moved onto dest once fully written, so a
+    Ctrl-C (or any interruption) mid-download can never leave a truncated
+    file at dest for a later run to mistake for "already fetched".
+    """
     item.dest.parent.mkdir(parents=True, exist_ok=True)
     if not item.dest.exists():
         print(f"fetching {item.name} <- {item.url}")
+        part = item.dest.with_name(item.dest.name + ".part")
+        completed = False
         try:
             with urllib.request.urlopen(item.url, timeout=120) as resp, \
-                 open(item.dest, "wb") as out:
+                 open(part, "wb") as out:
                 while chunk := resp.read(1 << 20):
                     out.write(chunk)
+            completed = True
         except OSError as exc:
-            item.dest.unlink(missing_ok=True)
             raise FetchError(f"cannot fetch {item.name}: {exc}") from exc
+        finally:
+            if not completed:
+                part.unlink(missing_ok=True)
+        part.replace(item.dest)
     else:
         print(f"keeping existing {item.dest}")
     digest = hashlib.sha256()
     with open(item.dest, "rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
-    return digest.hexdigest()
+    hexdigest = digest.hexdigest()
+    _check_manifest(drivers_dir, item, hexdigest)
+    return hexdigest
 
 
 # w11/amd64 is the 24H2 driver set; the guest is build 26100.
 VIRTIO_MEMBERS = {"netkvm": "NetKVM/w11/amd64", "viofs": "viofs/w11/amd64"}
+
+
+def flatten_extracted(nested_root: Path, dest: Path) -> None:
+    """Flatten a just-extracted tree from nested_root into dest.
+
+    Refuses (raises FetchError) rather than silently overwrite when two
+    files share a basename, and refuses any file that resolves outside dest
+    - a defensive check against a malicious archive using a symlink to
+    escape the destination during extraction.
+    """
+    dest_resolved = dest.resolve()
+    seen: dict[str, Path] = {}
+    for path in sorted(nested_root.rglob("*")):
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        if resolved != dest_resolved and dest_resolved not in resolved.parents:
+            raise FetchError(f"extracted path escapes {dest}: {path} -> {resolved}")
+        if path.name in seen:
+            raise FetchError(
+                f"extracted files collide on the name {path.name!r}: "
+                f"{seen[path.name]} and {path}"
+            )
+        seen[path.name] = path
+        path.replace(dest / path.name)
 
 
 def extract_virtio(iso: Path, drivers_dir: Path) -> None:
@@ -87,11 +171,11 @@ def extract_virtio(iso: Path, drivers_dir: Path) -> None:
         if proc.returncode != 0:
             raise FetchError(f"cannot extract {member} from {iso}: "
                              f"{proc.stderr.strip()}")
-        # 7z recreates the archive tree; flatten it so the guest step can point
-        # at one directory instead of guessing the vendor's layout.
-        for path in (dest / member.split("/")[0]).rglob("*"):
-            if path.is_file():
-                path.replace(dest / path.name)
+        # 7z recreates the archive tree; flatten it so the guest step can
+        # point at one directory instead of guessing the vendor's layout.
+        nested_root = dest / member.split("/")[0]
+        if nested_root.is_dir():
+            flatten_extracted(nested_root, dest)
     print(f"extracted {', '.join(VIRTIO_MEMBERS)} from {iso.name}")
 
 
@@ -102,7 +186,7 @@ def main(argv=None) -> int:
     drivers = Path(args.drivers_dir)
     try:
         for item in plan_downloads(drivers):
-            print(f"  {item.name} sha256 {fetch(item)}")
+            print(f"  {item.name} sha256 {fetch(item, drivers)}")
         extract_virtio(drivers / "virtio" / "virtio-win.iso", drivers)
     except FetchError as exc:
         raise SystemExit(str(exc))

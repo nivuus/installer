@@ -113,6 +113,23 @@ with tempfile.TemporaryDirectory() as tmp:
     check("stray file removed after restage",
           (dest / "stray.txt").exists(), False)
 
+# verify_staged must catch a required binary removed AFTER staging, not just
+# a source tree missing one - this is the tamper-detection path, and the
+# only test exercising it was removed for the SudoVDA rewrite (fix round 1).
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    sources = make_tree(root / "src")
+    dest = root / "staging" / "nivuus"
+    marker = payload.marker_text("Windows 11", "20260822")
+    payload.stage_payload(dest, sources, marker)
+    (dest / "drivers" / "agent" / "agent.exe").unlink()
+    try:
+        payload.verify_staged(dest)
+        failures.append("verify_staged: accepted a staged tree missing agent.exe")
+    except payload.PayloadError as e:
+        if "agent.exe" not in str(e):
+            failures.append(f"verify_staged error doesn't name agent.exe: {e}")
+
 # --- Sous-projet B : la charge utile déclare ses artefacts en un seul endroit.
 # ⚠️ PROVISION_VERSION n'est PAS touché ici : test_windows_guest_provision.py
 # le recoupe avec la chaîne écrite par 99-marker.ps1, donc les deux doivent
@@ -174,6 +191,53 @@ check("no download lands outside the drivers dir",
       all(str(d.dest).startswith("/tmp/x") for d in plans), True)
 names = [d.name for d in plans]
 check("downloads are uniquely named", len(names), len(set(names)))
+
+# fetch() must fail loudly (never silently ship a changed artefact) when a
+# path already recorded in the manifest comes back with a different digest.
+# No network: the "download" is simulated by the file already being present.
+with tempfile.TemporaryDirectory() as tmp:
+    drivers = pathlib.Path(tmp) / "drivers"
+    dest = drivers / "steam" / "SteamSetup.exe"
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"a newer build of the installer")
+    (drivers / fetch_payload.MANIFEST_NAME).write_text(
+        "steam/SteamSetup.exe\tdeadbeef00000000000000000000000000000000000000000000000000\t2026-01-01\n"
+    )
+    item = fetch_payload.Download("steam", "https://example.invalid/x", dest)
+    try:
+        fetch_payload.fetch(item, drivers)
+        failures.append("fetch: accepted a digest mismatch against the manifest")
+    except fetch_payload.FetchError as e:
+        if "changed" not in str(e) or "manifest" not in str(e).lower():
+            failures.append(f"fetch manifest-mismatch error is unclear: {e}")
+
+# fetch() must record a first-seen digest rather than reject it.
+with tempfile.TemporaryDirectory() as tmp:
+    drivers = pathlib.Path(tmp) / "drivers"
+    dest = drivers / "winfsp" / "winfsp-2.0.msi"
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"msi bytes")
+    item = fetch_payload.Download("winfsp", "https://example.invalid/x", dest)
+    fetch_payload.fetch(item, drivers)
+    manifest = fetch_payload.load_manifest(drivers)
+    check("first-seen digest is recorded",
+          "winfsp/winfsp-2.0.msi" in manifest, True)
+
+# extract_virtio's flatten step must refuse to silently overwrite two files
+# that share a basename under different subdirectories. Fake tree, no 7z.
+with tempfile.TemporaryDirectory() as tmp:
+    dest = pathlib.Path(tmp) / "netkvm"
+    nested = dest / "NetKVM"
+    (nested / "w11" / "amd64").mkdir(parents=True)
+    (nested / "w10" / "amd64").mkdir(parents=True)
+    (nested / "w11" / "amd64" / "netkvm.inf").write_text("w11 driver")
+    (nested / "w10" / "amd64" / "netkvm.inf").write_text("w10 driver")
+    try:
+        fetch_payload.flatten_extracted(nested, dest)
+        failures.append("flatten_extracted: silently overwrote colliding basenames")
+    except fetch_payload.FetchError as e:
+        if "collide" not in str(e):
+            failures.append(f"flatten_extracted collision error is unclear: {e}")
 
 # The irreplaceable artefact deserves its own message: no machine can rebuild
 # agent.exe once the current VM is wiped.
