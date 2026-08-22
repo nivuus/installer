@@ -114,6 +114,10 @@ check("probe output matches the reference format",
 # concurrent displays (emulated VGA, GPU dummy plug, SudoVDA) can be told apart.
 check("probe queries the target device name (self-identification)",
       "INFO_TYPE_TARGET_DEVICE_NAME" in cs, True)
+# Pin the value, not just the symbol's presence: a wrong info type still
+# compiles and still returns rc=0, but silently names the wrong display.
+check("target device name info type is 2 (GET_TARGET_NAME)",
+      "INFO_TYPE_TARGET_DEVICE_NAME = 2;" in cs, True)
 
 if failures:
     print(f"FAIL ({len(failures)})")

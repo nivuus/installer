@@ -139,24 +139,58 @@ try:
             failures.append(f"guard: error message missing holder PID: {e}")
     testdomain.gpu_holders = lambda: []
 
-    # Case 6: the holder scan itself errors - fail closed, never treat a
-    # broken scan as "no holders".
-    def _broken_find(*a, **kw):
-        return MockProc(2, "", "find: /proc: some races")
-    original_run = testdomain.subprocess.run
-    testdomain.subprocess.run = _broken_find
-    try:
-        try:
-            # The real function, not the case-5 stub still installed above.
-            original_gpu_holders()
-            failures.append("gpu_holders: broken scan did not raise")
-        except testdomain.DomainError:
-            pass
-    finally:
-        testdomain.subprocess.run = original_run
 finally:
     testdomain._virsh = original_virsh
     testdomain.gpu_holders = original_gpu_holders
+
+# gpu_holders() itself: real implementation, glob/os.listdir/os.readlink
+# monkeypatched so no real /proc scan runs. subprocess.run is untouched -
+# gpu_holders() no longer shells out to find(1) at all.
+original_listdir = testdomain.os.listdir
+original_readlink = testdomain.os.readlink
+original_glob = testdomain.glob.glob
+try:
+    # Case 6: no holders - returns cleanly, does not raise.
+    testdomain.os.listdir = lambda p: []
+    testdomain.glob.glob = lambda pat: []
+    check("gpu_holders: no holders returns empty", testdomain.gpu_holders(), [])
+
+    # Case 7: two fds on one PID, one fd on another - distinct, sorted PIDs.
+    fds = {
+        "/proc/200/fd/5": "/dev/nvidia0",
+        "/proc/200/fd/6": "/dev/nvidiactl",
+        "/proc/100/fd/3": "/dev/null",
+        "/proc/300/fd/1": "/dev/nvidia-uvm",
+    }
+    testdomain.glob.glob = lambda pat: list(fds)
+    testdomain.os.readlink = lambda p: fds[p]
+    check("gpu_holders: holders found, deduped and sorted",
+          testdomain.gpu_holders(), ["200", "300"])
+
+    # Case 8: a per-entry OSError (process/fd vanished mid-scan) is normal
+    # and must be swallowed, not raised - the other entries still count.
+    def _flaky_readlink(p):
+        if p == "/proc/400/fd/1":
+            raise OSError("ENOENT: vanished mid-scan")
+        return fds.get(p, "/dev/nvidia0")
+    testdomain.glob.glob = lambda pat: ["/proc/400/fd/1", "/proc/500/fd/2"]
+    testdomain.os.readlink = _flaky_readlink
+    check("gpu_holders: per-entry OSError swallowed, scan still completes",
+          testdomain.gpu_holders(), ["500"])
+
+    # Case 9: /proc itself unreadable - a genuine scan failure, must raise.
+    def _broken_listdir(p):
+        raise OSError("EACCES: /proc unreadable")
+    testdomain.os.listdir = _broken_listdir
+    try:
+        testdomain.gpu_holders()
+        failures.append("gpu_holders: /proc unreadable did not raise")
+    except testdomain.DomainError:
+        pass
+finally:
+    testdomain.os.listdir = original_listdir
+    testdomain.os.readlink = original_readlink
+    testdomain.glob.glob = original_glob
 
 if failures:
     print(f"FAIL ({len(failures)})")

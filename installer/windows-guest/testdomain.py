@@ -8,10 +8,10 @@ OPERATIONAL TRAPS:
 - assert_gpu_free() guards the `define` action only, not manual `virsh start`;
   protection at start time relies on libvirt/vfio refusing a second GPU attach.
 - Domain name is Windows-LTSC-test, so none of
-  /etc/libvirt/hooks/qemu.d/Windows-LTSC-test/** runs: unlike the production
-  VM, nothing here stops nvidia-persistenced/ollama/Tdarr for you.
-  assert_gpu_free() refuses the define instead when gpu_holders() finds one;
-  a manual `virsh start` is not covered by that guard.
+  /etc/libvirt/hooks/qemu.d/Windows-LTSC-test/** runs: unlike production,
+  nothing here stops nvidia-persistenced/ollama/Tdarr for you. assert_gpu_free()
+  refuses the define instead when gpu_holders() finds one; a manual
+  `virsh start` is not covered by that guard.
 - Only domain_xml(), assert_gpu_free() and gpu_holders() are tested.
 
 Usage:
@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 import socket
 import subprocess
@@ -70,20 +71,23 @@ def domain_xml(*, disk_path: str = DISK_PATH, windows_iso: str,
 
 
 def gpu_holders() -> list[str]:
-    """PIDs with an open fd on /dev/nvidia* (a pure-bash scan took 40s here;
-    this find(1) invocation takes ~200ms - see CLAUDE.md)."""
-    proc = subprocess.run(
-        ["find", "/proc", "-maxdepth", "3", "-path", "/proc/[0-9]*/fd/*",
-         "-lname", "/dev/nvidia*"],
-        text=True, capture_output=True,
-    )
-    if proc.returncode != 0:
-        raise DomainError(f"GPU holder scan failed: {proc.stderr.strip()}")
+    """PIDs with an open fd on /dev/nvidia*, enumerated in pure Python: a
+    find(1) subprocess has no reliable exit-code signal on this host (it was
+    measured exiting 1 on every run regardless of any real failure - see
+    CLAUDE.md). A per-entry race/permission error is normal, swallowed, never
+    raised; only /proc itself being unlistable is a genuine scan failure."""
+    try:
+        os.listdir("/proc")
+    except OSError as exc:
+        raise DomainError(f"GPU holder scan failed: /proc unreadable: {exc}")
     pids = set()
-    for line in proc.stdout.splitlines():
-        parts = line.split("/")
-        if len(parts) > 2 and parts[2].isdigit():
-            pids.add(parts[2])
+    for fd_path in glob.glob("/proc/[0-9]*/fd/*"):
+        try:
+            target = os.readlink(fd_path)
+        except OSError:
+            continue
+        if target.startswith("/dev/nvidia"):
+            pids.add(fd_path.split("/")[2])
     return sorted(pids, key=int)
 
 
@@ -91,24 +95,18 @@ def assert_gpu_free() -> None:
     """The production VM owns the GPU while it runs; refuse rather than fight."""
     proc = _virsh("domstate", "Windows")
     if proc.returncode != 0:
-        raise DomainError(f"could not determine Windows domain state: "
-                          f"{proc.stderr.strip()}")
+        raise DomainError(f"could not determine Windows domain state: {proc.stderr.strip()}")
     state = proc.stdout.strip()
     if not state:
-        raise DomainError("could not determine Windows domain state: "
-                          "domstate returned empty")
+        raise DomainError("could not determine Windows domain state: domstate returned empty")
     if state != "shut off":
-        raise DomainError(
-            f"the Windows domain is {state!r}: shut it down first, the GPU "
-            "cannot be assigned to two domains"
-        )
+        raise DomainError(f"the Windows domain is {state!r}: shut it down first, "
+                          "the GPU cannot be assigned to two domains")
     holders = gpu_holders()
     if holders:
-        raise DomainError(
-            "process(es) still hold /dev/nvidia*: PID " + ", ".join(holders) +
-            " - no libvirt hooks stop them for you here (nvidia-persistenced, "
-            "nivuus-ollama, Tdarr are the usual suspects); stop them by hand"
-        )
+        raise DomainError("process(es) still hold /dev/nvidia*: PID " + ", ".join(holders) +
+                          " - no libvirt hooks stop them for you here (nvidia-persistenced, "
+                          "nivuus-ollama, Tdarr are the usual suspects); stop them by hand")
 
 
 def create_disk(path: str = DISK_PATH, size_gib: int = 120) -> None:

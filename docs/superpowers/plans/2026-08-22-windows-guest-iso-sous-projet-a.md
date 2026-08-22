@@ -2562,8 +2562,9 @@ Les six doivent afficher `OK - ...`. Les tâches 1 à 5 et 7 sont vérifiables
 
 ## Amendements pendant l'exécution (2026-08-22)
 
-Le plan a été exécuté tâche par tâche, chaque tâche relue par un agent indépendant.
-**Sept écarts au code dicté ci-dessus ont été décidés en cours de route** ; le code
+Le plan a été exécuté tâche par tâche, chaque tâche relue par un agent indépendant,
+puis suivi d'une revue finale de branche entière et d'une vague de correctifs.
+**Douze écarts au code dicté ci-dessus ont été décidés en cours de route** ; le code
 fusionné les porte, ce texte non. Un exécutant qui rejouerait ce plan à la lettre
 reproduirait les défauts qu'ils corrigent — lire `git log` comme référence.
 
@@ -2576,6 +2577,11 @@ reproduirait les défauts qu'ils corrigent — lire `git log` comme référence.
 | 5 | `payload.py` | `shutil.rmtree(dest_root)` sans garde | **refus avant suppression** si `dest_root` résout vers un répertoire source ou une racine |
 | 6 | `unattend_iso.py` | `list_iso` faisait `line.strip("'")` | **`shlex.split`.** `xorriso` échappe une apostrophe à la mode POSIX ; un `Bob's driver.exe` dans la charge utile produisait un chemin corrompu |
 | 7 | `provision/` | l'étape NVIDIA « redémarre et le provisionnement reprend » | **le redémarrage n'existait nulle part** : `-noreboot` était passé et rien ne redémarrait, donc toute la machinerie de reprise était du code mort. L'étape 10 pose un jeton `reboot.requested`, `run-all.ps1` écrit le `.done` **puis** consomme le jeton et redémarre (cet ordre évite une boucle infinie), et la vérification NVIDIA différée remonte dans `99-marker.ps1` |
+| 8 | `probe/AdvancedColor.cs` (`:1677`) et son test (`:1375`) | chaque ligne de sonde tenait en cinq champs (`target rc supported enabled bpc`) | **auto-identification de l'écran mesuré** : LUID d'adaptateur, technologie de sortie, nom convivial du moniteur ajoutés via `DISPLAYCONFIG_TARGET_DEVICE_NAME`. Avec jusqu'à trois écrans actifs à la fois (VGA émulé, dongle HDMI du GPU, SudoVDA), un `target=<id>` nu ne dit pas lequel a été mesuré — et c'est cette sonde qui porte tout le verdict du sous-projet |
+| 9 | `media.py` | `subprocess.run(["mount", ...], check=True)` | **contrôle explicite du code de retour**, levant `MediaError` (jamais `CalledProcessError`, que `build.py` ne rattrape pas) avec le stderr du montage, plus un refus d'empiler un second montage si `mount_dir` est déjà monté |
+| 10 | `build.py` | `out.parent.mkdir(parents=True, exist_ok=True)` sans mode, ISO écrite avec les permissions par défaut | **parent créé en `0700`, ISO chmod `0600`** après fabrication. L'ISO embarque la clé produit et le mot de passe Administrateur en clair ; sa destination par défaut vit sous `/media/data`, exporté en SMB avec le port WAN ouvert |
+| 11 | `provision/99-marker.ps1` | `Copy-Item -Destination 'C:\nivuus\probe'` | **`-Destination 'C:\nivuus'`** : le chemin `\probe` imbriquait en `...\probe\probe` quand la destination existait déjà (ce qui est le cas courant, `C:\nivuus` étant créé par `00-bootstrap.ps1`) |
+| 12 | `testdomain.py` | `assert_gpu_free()` ne vérifiait que l'état du domaine `Windows`, aucun contrôle des détenteurs de `/dev/nvidia*` | **`gpu_holders()` ajoutée**, refusant le `define` si un processus tient encore `/dev/nvidia*` — ce domaine jetable n'a aucun hook libvirt pour les arrêter, contrairement à la VM de production. Mesuré en conditions réelles sur cet hôte : `find /proc -lname '/dev/nvidia*'` (les deux formes, y compris celle documentée dans `CLAUDE.md`) **sort en erreur systématiquement pour des raisons sans rapport avec un vrai détenteur** ; un `returncode != 0` interprété comme un échec de scan aurait donc refusé tout `define`, même GPU libre. L'énumération est en Python pur (`os.listdir`/`glob.glob`/`os.readlink`), sans code de retour à mésinterpréter, et n'échoue que si `/proc` lui-même est illisible |
 
 Deux vérifications restent dues et ne pouvaient pas être faites : la charge utile
 hors-ligne n'existe pas encore (ni pilote NVIDIA ni SudoVDA rassemblés), donc
