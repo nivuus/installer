@@ -1147,7 +1147,7 @@ allumée en permanence et tout le travail d'économie d'énergie tombe.
 ## Préparation
 
 ```bash
-# 0. Arrêter le domaine de production (le temps de la recette, la VM gaming est hors ligne)
+# 0. Arrêter le domaine de production (le temps de la recette, la VM gaming est hors ligne — roughly ninety minutes)
 virsh shutdown --mode acpi Windows
 for i in $(seq 1 60); do
   [ "$(LC_ALL=C virsh domstate Windows)" = "shut off" ] && break
@@ -1188,8 +1188,8 @@ avant que le provisionnement soit vraiment fini. Comme mesure conservatrice,
 confirmer que `PROVISION.done` existe une fois `wait-ready` revient :
 
 ```bash
-GUEST_IP=$(cd installer/windows-guest && python3 testdomain.py wait-ready)
-GUEST_IP=$GUEST_IP python3 installer/windows-guest/winrm_exec.py cmd 'type C:\nivuus\state\PROVISION.done'
+export GUEST_IP=$(cd installer/windows-guest && python3 testdomain.py wait-ready)
+python3 installer/windows-guest/winrm_exec.py cmd 'type C:\nivuus\state\PROVISION.done'
 ```
 
 (Note : la course elle-même est un défaut du script de bootstrap du sous-projet A,
@@ -1213,6 +1213,13 @@ virsh start Windows-LTSC-test
 ## La mesure
 
 ```bash
+# Refusal guard: prevent targeting the production VM by mistake
+: "${GUEST_IP:?GUEST_IP n'est pas défini — relancer l'étape wait-ready}"
+if [ "$GUEST_IP" = "192.168.3.2" ]; then
+    echo "REFUS : GUEST_IP pointe la VM de production, pas le domaine jetable" >&2
+    exit 1
+fi
+
 # 1. Activer l'hibernation dans l'invité et poser un témoin de session
 python3 installer/windows-guest/winrm_exec.py ps "powercfg /hibernate on"
 python3 installer/windows-guest/winrm_exec.py ps "Set-Content C:\\temoin-s4.txt (Get-Date -Format o)"

@@ -185,7 +185,9 @@ def main(argv=None) -> int:
         print(f"defined {DOMAIN_NAME}; start it with: virsh start {DOMAIN_NAME}")
         return 0
     if args.action == "wait-ready":
-        print(f"guest ready at {wait_ready()}")
+        ip = wait_ready()
+        print(f"guest ready at {ip}", file=sys.stderr)
+        print(ip)
         return 0
     teardown()
     print(f"{DOMAIN_NAME} removed")

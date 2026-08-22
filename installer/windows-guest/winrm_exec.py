@@ -34,18 +34,18 @@ def main() -> int:
     except FileNotFoundError:
         print(f"error: password file not found: {PASS_FILE}", file=sys.stderr)
         return 1
+    session = winrm.Session(
+        f"http://{IP}:5985/wsman",
+        auth=(USER, password),
+        transport="ntlm",
+        server_cert_validation="ignore",
+    )
+    command = " ".join(sys.argv[2:])
     try:
-        session = winrm.Session(
-            f"http://{IP}:5985/wsman",
-            auth=(USER, password),
-            transport="ntlm",
-            server_cert_validation="ignore",
-        )
+        result = (session.run_cmd if sys.argv[1] == "cmd" else session.run_ps)(command)
     except Exception as e:
         print(f"error: cannot reach guest at {IP}:5985: {e}", file=sys.stderr)
         return 1
-    command = " ".join(sys.argv[2:])
-    result = (session.run_cmd if sys.argv[1] == "cmd" else session.run_ps)(command)
     out = result.std_out.decode("utf-8", "replace").strip()
     err = result.std_err.decode("utf-8", "replace").strip()
     if out:
