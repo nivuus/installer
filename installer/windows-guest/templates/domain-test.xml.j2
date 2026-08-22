@@ -1,0 +1,78 @@
+<domain type='kvm'>
+  <name>{{ name }}</name>
+  <memory unit='GiB'>{{ memory_gib }}</memory>
+  <vcpu placement='static'>{{ vcpus }}</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc-q35-9.2'>hvm</type>
+    <loader readonly='yes' secure='yes' type='pflash'>/usr/share/OVMF/OVMF_CODE_4M.secboot.fd</loader>
+    <nvram template='/usr/share/OVMF/OVMF_VARS_4M.ms.fd'>{{ nvram_path }}</nvram>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+    <smm state='on'/>
+    <hyperv mode='custom'>
+      <relaxed state='on'/>
+      <vapic state='on'/>
+      <spinlocks state='on' retries='8191'/>
+    </hyperv>
+  </features>
+  <cpu mode='host-passthrough' check='none' migratable='off'>
+    <topology sockets='1' dies='1' cores='{{ vcpus // 2 }}' threads='2'/>
+  </cpu>
+  <clock offset='localtime'>
+    <timer name='rtc' tickpolicy='catchup'/>
+    <timer name='pit' tickpolicy='delay'/>
+    <timer name='hpet' present='no'/>
+    <timer name='hypervclock' present='yes'/>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' cache='none' discard='unmap'/>
+      <source file='{{ disk_path }}'/>
+      <target dev='sda' bus='sata'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='{{ windows_iso }}'/>
+      <target dev='sdb' bus='sata'/>
+      <readonly/>
+      <boot order='1'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='{{ unattend_iso }}'/>
+      <target dev='sdc' bus='sata'/>
+      <readonly/>
+    </disk>
+    <interface type='bridge'>
+      <source bridge='{{ bridge }}'/>
+      <mac address='{{ mac }}'/>
+      <model type='e1000e'/>
+    </interface>
+    <tpm model='tpm-crb'>
+      <backend type='emulator' version='2.0'/>
+    </tpm>
+    <hostdev mode='subsystem' type='pci' managed='yes'>
+      <source>
+        <address domain='0x0000' bus='0x01' slot='0x00' function='0x0'/>
+      </source>
+    </hostdev>
+    <hostdev mode='subsystem' type='pci' managed='yes'>
+      <source>
+        <address domain='0x0000' bus='0x01' slot='0x00' function='0x1'/>
+      </source>
+    </hostdev>
+    <graphics type='vnc' port='-1' listen='127.0.0.1'/>
+    <video>
+      <model type='vga' vram='16384' heads='1'/>
+    </video>
+    <input type='tablet' bus='usb'/>
+    <console type='pty'/>
+    <memballoon model='none'/>
+  </devices>
+</domain>
