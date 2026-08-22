@@ -69,6 +69,28 @@ with tempfile.TemporaryDirectory() as tmp:
     except ui.IsoError:
         pass
 
+    # Test that list_iso correctly handles paths with embedded single quotes.
+    quote_stage = root / "quote_stage"
+    (quote_stage / "nivuus" / "provision").mkdir(parents=True)
+    (quote_stage / "autounattend.xml").write_text("<unattend/>\n")
+    (quote_stage / "nivuus" / "PAYLOAD.id").write_text("nivuus_payload=1\n")
+    (quote_stage / "nivuus" / "provision" / "run-all.ps1").write_text("# run-all\n")
+    (quote_stage / "nivuus" / "provision" / "o'brien.txt").write_text("driver\n")
+    quote_iso = root / "quote.iso"
+    ui.build_iso(quote_stage, quote_iso)
+    quote_listing = ui.list_iso(quote_iso)
+    check("path with quote parsed correctly",
+          "/nivuus/provision/o'brien.txt" in quote_listing, True)
+    check("no escape garbage in listing",
+          any("'\"'" in p for p in quote_listing), False)
+
+    # Test that build_iso fails when staging directory doesn't exist.
+    try:
+        ui.build_iso(root / "nonexistent", root / "fail.iso")
+        failures.append("build_iso: accepted nonexistent staging directory")
+    except ui.IsoError:
+        pass
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

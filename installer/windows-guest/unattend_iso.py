@@ -12,6 +12,7 @@ files. Rebuilding the medium would produce an install.wim Setup cannot read.
 """
 from __future__ import annotations
 
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -49,9 +50,8 @@ def list_iso(iso_path) -> list[str]:
     )
     if proc.returncode != 0:
         raise IsoError(f"cannot read {iso_path}: {proc.stderr.strip()}")
-    # xorriso quotes every path it prints: 'path'
-    return [line.strip().strip("'") for line in proc.stdout.splitlines()
-            if line.strip().startswith("'")]
+    # xorriso quotes paths with POSIX shell escaping for embedded quotes.
+    return shlex.split(proc.stdout)
 
 
 def verify_iso(iso_path) -> None:
