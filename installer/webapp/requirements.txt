@@ -1,6 +1,6 @@
-# Nivuus installer portal — runtime dependencies.
-# On the live ISO these come from Debian packages (python3-fastapi, etc.);
-# this file documents versions for standalone/dev runs (pip install -r).
+# Nivuus installer Python runtime dependencies — the single manifest for all installer
+# consumers: web portal, install engine, and windows-guest (via import autounattend).
+# On the live ISO these come from Debian packages; this file documents versions for dev.
 fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.5
