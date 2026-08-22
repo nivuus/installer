@@ -42,6 +42,18 @@ rejects("hostname with space", hostname="NIVUUS WIN")
 rejects("empty image name", image_name="   ")
 rejects("autologon count too low", autologon_count=1)
 
+# Verify that malformed key errors do not leak the key value
+try:
+    bad_key = "NOTA-VALID-KEY"
+    params = ua.UnattendParams(**{**GOOD, "product_key": bad_key})
+    ua.validate(params)
+except ua.UnattendError as exc:
+    error_str = str(exc)
+    if any(c in error_str for c in bad_key.split("-")):
+        failures.append(f"malformed key error contains key characters: {error_str}")
+else:
+    failures.append("malformed key: accepted what it must reject")
+
 xml_text = ua.render(ua.UnattendParams(**GOOD))
 root = ET.fromstring(xml_text)
 

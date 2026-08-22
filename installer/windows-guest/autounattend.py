@@ -50,8 +50,8 @@ class UnattendParams:
 def validate(params: UnattendParams) -> None:
     if not KEY_RE.match(params.product_key):
         raise UnattendError(
-            "product key must look like XXXXX-XXXXX-XXXXX-XXXXX-XXXXX, "
-            f"got {params.product_key!r}"
+            "product key must be XXXXX-XXXXX-XXXXX-XXXXX-XXXXX format (5 groups of 5 "
+            "uppercase alphanumeric characters separated by dashes)"
         )
     if not params.admin_password:
         raise UnattendError("administrator password must not be empty")

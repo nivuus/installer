@@ -57,8 +57,8 @@ windows-unattend:
 	@test -n "$(WINDOWS_ISO)" || { echo "Set WINDOWS_ISO=/path/to/ltsc.iso"; exit 1; }
 	@test -n "$(DRIVERS_DIR)" || { echo "Set DRIVERS_DIR=/path/to/payload"; exit 1; }
 	python3 $(INSTALLER_DIR)/windows-guest/build.py \
-	  --windows-iso $(WINDOWS_ISO) --drivers-dir $(DRIVERS_DIR) \
-	  $(if $(OUTPUT),--output $(OUTPUT),)
+	  --windows-iso "$(WINDOWS_ISO)" --drivers-dir "$(DRIVERS_DIR)" \
+	  $(if $(OUTPUT),--output "$(OUTPUT)",)
 
 clean:
 	-cd $(ISO_DIR) && sudo lb clean --purge

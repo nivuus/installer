@@ -73,41 +73,45 @@ def main(argv=None) -> int:
     key = read_secret(args.key_file, "product key file")
     password = read_secret(args.password_file, "administrator password file")
 
-    print(f"inspecting {args.windows_iso}")
-    image = media.inspect_iso(args.windows_iso, image_name=args.image_name)
-    print(f"  image #{image['index']}: {image['name']} "
-          f"(edition {image.get('edition_id')}, build {image['build']})")
+    try:
+        print(f"inspecting {args.windows_iso}")
+        image = media.inspect_iso(args.windows_iso, image_name=args.image_name)
+        print(f"  image #{image['index']}: {image['name']} "
+              f"(edition {image.get('edition_id')}, build {image['build']})")
 
-    params = autounattend.UnattendParams(
-        product_key=key, admin_password=password,
-        image_name=image["name"], hostname=args.hostname,
-    )
-    answer_file = autounattend.render(params)
+        params = autounattend.UnattendParams(
+            product_key=key, admin_password=password,
+            image_name=image["name"], hostname=args.hostname,
+        )
+        answer_file = autounattend.render(params)
 
-    sources = payload.PayloadSources(
-        provision_dir=HERE / "provision",
-        probe_dir=HERE / "probe",
-        drivers_dir=Path(args.drivers_dir),
-    )
-    build_id = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        sources = payload.PayloadSources(
+            provision_dir=HERE / "provision",
+            probe_dir=HERE / "probe",
+            drivers_dir=Path(args.drivers_dir),
+        )
+        build_id = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
-    with tempfile.TemporaryDirectory(prefix="nivuus-unattend-") as tmp:
-        stage = Path(tmp) / "stage"
-        stage.mkdir()
-        (stage / "autounattend.xml").write_text(answer_file)
-        payload.stage_payload(stage / "nivuus", sources,
-                              payload.marker_text(image["name"], build_id))
-        payload.verify_staged(stage / "nivuus")
-        out = Path(args.output)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        unattend_iso.build_iso(stage, out)
+        with tempfile.TemporaryDirectory(prefix="nivuus-unattend-") as tmp:
+            stage = Path(tmp) / "stage"
+            stage.mkdir()
+            (stage / "autounattend.xml").write_text(answer_file)
+            payload.stage_payload(stage / "nivuus", sources,
+                                  payload.marker_text(image["name"], build_id))
+            payload.verify_staged(stage / "nivuus")
+            out = Path(args.output)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            unattend_iso.build_iso(stage, out)
 
-    unattend_iso.verify_iso(out)
-    print(f"\nwrote {out} ({out.stat().st_size // 1024} KiB)")
-    print(f"  sha256 unattend : {sha256(out)}")
-    print(f"  sha256 windows  : {sha256(Path(args.windows_iso))}")
-    print("\nAttach BOTH ISOs to the guest: the LTSC medium boots, this one is "
-          "only read.")
+        unattend_iso.verify_iso(out)
+        print(f"\nwrote {out} ({out.stat().st_size // 1024} KiB)")
+        print(f"  sha256 unattend : {sha256(out)}")
+        print(f"  sha256 windows  : {sha256(Path(args.windows_iso))}")
+        print("\nAttach BOTH ISOs to the guest: the LTSC medium boots, this one is "
+              "only read.")
+    except (media.MediaError, autounattend.UnattendError,
+            payload.PayloadError, unattend_iso.IsoError) as exc:
+        raise SystemExit(str(exc))
     return 0
 
 
