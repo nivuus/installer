@@ -59,6 +59,9 @@ check("credentials are not in sunshine.conf",
       any("p4ssw0rd" in v for v in conf_map.values()), False)
 
 apps = json.loads(apollo.render_apps(params))
+# version: 2 ensures Apollo does not migrate from v1 to v2, guaranteeing
+# virtual-display is honored (critical for the HDR chain).
+check("apps.json declares version 2", apps.get("version"), 2)
 names = [a["name"] for a in apps["apps"]]
 check("both production apps are declared", sorted(names),
       ["Desktop", "Steam Big Picture"])
@@ -80,6 +83,10 @@ check_raises("a quote in a secret is refused", apollo.ApolloError,
              lambda: apollo.render_secrets("ad'min", "nivuus", "p4ssw0rd"))
 check_raises("an empty UI password is refused", apollo.ApolloError,
              lambda: apollo.render_secrets("adminpass", "nivuus", ""))
+# Non-ASCII in a secret would be misdecoded by Windows PowerShell 5.1's ANSI
+# codepage, silently corrupting the password.
+check_raises("non-ASCII in a secret is refused", apollo.ApolloError,
+             lambda: apollo.render_secrets("adminpäss", "nivuus", "p4ssw0rd"))
 
 if failures:
     print(f"FAIL ({len(failures)})")

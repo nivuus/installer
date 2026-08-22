@@ -7,6 +7,13 @@ this module was read out of the Apollo 0.4.6 binary on 2026-08-22.
 The Web-manager credentials are NOT rendered into sunshine.conf: Apollo hashes
 them itself through `sunshine.exe --creds`, which is why this module ships them
 separately in a PowerShell data file the guest steps read.
+
+ENCODING CONTRACT: render_secrets() produces a UTF-8 string intended for a
+PowerShell data file (.psd1). On Windows PowerShell 5.1 (the target guest OS),
+Import-PowerShellDataFile reads a file without a UTF-8 BOM as ANSI (system
+codepage). To preserve secret values correctly, the caller MUST write the result
+as UTF-8 with a BOM (utf-8-sig). This module defensively restricts all secret
+values to ASCII to eliminate encoding dependencies regardless of writer behavior.
 """
 from __future__ import annotations
 
@@ -66,6 +73,14 @@ def render_secrets(admin_password: str, ui_username: str,
         if "'" in value or "\n" in value or "\r" in value:
             raise ApolloError(
                 f"{name} must not contain a quote or a newline"
+            )
+        # Restrict to ASCII: the .psd1 is read by Windows PowerShell 5.1, which
+        # uses the system codepage (not UTF-8) for BOM-less files. Non-ASCII
+        # UTF-8 bytes would be misdecoded, silently corrupting the secret.
+        if not value.isascii():
+            raise ApolloError(
+                f"{name} must contain only ASCII characters (Windows PowerShell "
+                f"5.1 reads the .psd1 with the system codepage, not UTF-8)"
             )
     body = "\n".join(f"    {k} = '{v}'" for k, v in values.items())
     return "@{\n" + body + "\n}\n"
