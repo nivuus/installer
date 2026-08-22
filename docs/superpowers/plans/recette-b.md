@@ -439,12 +439,41 @@ recréé à la même taille peut très bien en avoir une. **Le seul filet est la
 comparaison de valeurs enregistrées avant/après**, ci-dessous : ne pas la
 sauter.
 
-**Avant de toucher à quoi que ce soit**, enregistrer l'état actuel :
+🔴 **Second piège, plus insidieux : ce test peut passer au vert sans avoir
+rien prouvé si personne ne s'est connecté à Steam.**
+`D:\Steam\config\loginusers.vdf` — le jeton de session, la pièce maîtresse de
+tout l'argument « C: jetable / D: persistant » de cette branche — n'existe
+qu'après une connexion Steam réussie. `Get-Item` sur un chemin absent échoue
+de façon déterministe, mais `winrm_exec.py` imprime sa sortie standard (vide)
+et envoie l'erreur sur **stderr** ; un `tee` ou une substitution de processus
+`<(...)` sans `2>&1` ne capture ni l'un ni l'autre. Si le fichier n'existe ni
+avant ni après, les deux côtés du `diff` valent la chaîne vide et **le
+critère « diff vide » est satisfait sans avoir rien mesuré**. Les commandes
+ci-dessous capturent donc systématiquement stderr, et une étape explicite,
+avant toute autre chose, garantit qu'il y a bien quelque chose à comparer.
+
+**Avant de toucher à quoi que ce soit : se connecter à Steam et installer un
+petit jeu.** Depuis la TV (streaming Apollo, comme au test 1), ouvrir Steam
+(client normal ou Big Picture), se connecter avec un compte réel, et
+installer un jeu de petite taille — l'objectif est d'exercer une écriture
+réelle sur `D:\Steam`, pas la taille du téléchargement. Puis vérifier que la
+connexion a bien laissé une trace **avant** de continuer :
 
 ```bash
-python3 winrm_exec.py cmd 'type D:\state\NIVUUS-DATA.id' | tee /tmp/nivuus-data-before.txt
-python3 winrm_exec.py ps 'Get-Item D:\Steam\config\loginusers.vdf | Select LastWriteTime,Length' | tee /tmp/loginusers-before.txt
-python3 winrm_exec.py ps 'Get-Item D:\state\apollo\sunshine_state.json | Select LastWriteTime,Length' | tee /tmp/sunshine-state-before.txt
+python3 winrm_exec.py ps \
+  '(Get-Item D:\Steam\config\loginusers.vdf -ErrorAction Stop).Length' 2>&1 | tee /tmp/loginusers-length.txt
+if ! grep -qE '^[1-9][0-9]*$' /tmp/loginusers-length.txt; then
+  echo "ABORT: loginusers.vdf est absent ou vide - se connecter à Steam avant de continuer, sinon tout ce test ne prouve rien" >&2
+  exit 1
+fi
+```
+
+Enregistrer ensuite l'état actuel (stderr capturé, pour la même raison) :
+
+```bash
+python3 winrm_exec.py cmd 'type D:\state\NIVUUS-DATA.id' 2>&1 | tee /tmp/nivuus-data-before.txt
+python3 winrm_exec.py ps 'Get-Item D:\Steam\config\loginusers.vdf | Select LastWriteTime,Length' 2>&1 | tee /tmp/loginusers-before.txt
+python3 winrm_exec.py ps 'Get-Item D:\state\apollo\sunshine_state.json | Select LastWriteTime,Length' 2>&1 | tee /tmp/sunshine-state-before.txt
 ```
 
 Construire un **second** ISO, sans toucher au premier :
@@ -492,20 +521,30 @@ export GUEST_IP=$(python3 testdomain.py wait-ready)
 Puis, **sans aucun geste manuel côté invité** :
 
 ```bash
-python3 winrm_exec.py cmd 'type D:\state\NIVUUS-DATA.id'
-diff /tmp/nivuus-data-before.txt <(python3 winrm_exec.py cmd 'type D:\state\NIVUUS-DATA.id')
+python3 winrm_exec.py cmd 'type D:\state\NIVUUS-DATA.id' 2>&1 | tee /tmp/nivuus-data-after.txt
+diff /tmp/nivuus-data-before.txt /tmp/nivuus-data-after.txt
 
-python3 winrm_exec.py ps 'Get-Item D:\Steam\config\loginusers.vdf | Select LastWriteTime,Length'
-diff /tmp/loginusers-before.txt <(python3 winrm_exec.py ps 'Get-Item D:\Steam\config\loginusers.vdf | Select LastWriteTime,Length')
+python3 winrm_exec.py ps 'Get-Item D:\Steam\config\loginusers.vdf | Select LastWriteTime,Length' 2>&1 | tee /tmp/loginusers-after.txt
+diff /tmp/loginusers-before.txt /tmp/loginusers-after.txt
 
-python3 winrm_exec.py ps 'Get-Item D:\state\apollo\sunshine_state.json | Select LastWriteTime,Length'
-diff /tmp/sunshine-state-before.txt <(python3 winrm_exec.py ps 'Get-Item D:\state\apollo\sunshine_state.json | Select LastWriteTime,Length')
+python3 winrm_exec.py ps 'Get-Item D:\state\apollo\sunshine_state.json | Select LastWriteTime,Length' 2>&1 | tee /tmp/sunshine-state-after.txt
+diff /tmp/sunshine-state-before.txt /tmp/sunshine-state-after.txt
+
+# The "before" side is not trusted blind either - it was asserted non-empty
+# above, right after logging into Steam. Re-assert the "after" side the same
+# way: a diff of two empty captures would still be vacuously empty.
+for f in /tmp/loginusers-after.txt /tmp/sunshine-state-after.txt; do
+  grep -q '.' "$f" || { echo "ABORT: $f is empty - the file is missing after rebuild, not merely unchanged" >&2; exit 1; }
+done
 ```
 
-Critère : les trois `diff` sont **vides** — le marqueur porte sa date de
-création d'origine (`created=` inchangé), `loginusers.vdf` et
-`sunshine_state.json` ont exactement les mêmes horodatage et taille qu'avant
-la reconstruction. Refaire ensuite le test 1 (sans repasser par l'IHM
+Critère : les trois `diff` sont **vides**, ET les fichiers `*-after.txt` ne
+sont pas vides — le marqueur porte sa date de création d'origine (`created=`
+inchangé), `loginusers.vdf` et `sunshine_state.json` ont exactement les mêmes
+horodatage et taille qu'avant la reconstruction. **Sans l'étape de connexion
+Steam en tout début de section, ce critère est vide de sens** : un `diff`
+vide entre deux absences se lit comme un succès sans jamais avoir mesuré
+quoi que ce soit. Refaire ensuite le test 1 (sans repasser par l'IHM
 d'appairage) : si la TV se reconnecte et diffuse sans redemander de PIN,
 l'appairage a survécu à la reconstruction de C:.
 
