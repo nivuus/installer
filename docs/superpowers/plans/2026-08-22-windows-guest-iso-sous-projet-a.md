@@ -92,8 +92,14 @@ fin écrit par le dernier script. Les deux sont conservés sans se contredire :
 `00-bootstrap.ps1` **configure** WinRM (indispensable pour déboguer un
 provisionnement qui échoue en cours de route) mais **laisse sa règle de pare-feu
 désactivée** ; `99-marker.ps1` **ouvre** le port 5985 en tout dernier geste.
-« 5985 joignable » signifie donc bien « provisionnement terminé », et l'hôte
-confirme en lisant le marqueur de version.
+« 5985 joignable » signifie donc bien « provisionnement terminé ». **Correction
+(revue finale, 2026-08-22)** : l'hôte ne lit PAS le marqueur pour confirmer -
+`wait_ready()` (tâche 7) retourne sur un simple connect TCP réussi sur 5985 et
+ne parle jamais WinRM. `C:\nivuus\state\PROVISION.done` reste écrit et reste
+utile, mais **uniquement en lecture manuelle** (runbook de la tâche 8) : lire
+le marqueur et comparer son `provision_version` demande `pywinrm` et le mot de
+passe Administrateur de l'invité, qui n'existe pas encore et revient au
+propriétaire de choisir - ce n'est donc pas automatisé par ce sous-projet.
 
 ---
 
@@ -1944,7 +1950,9 @@ pour la VM de production) et **aucun `hostdev` vers le NVMe Samsung**
 - Test: `scripts/tests/test_windows_guest_domain.py`
 
 **Interfaces:**
-- Consomme : `nivuus-unattend.iso` (tâche 6), `C:\nivuus\state\PROVISION.done` (tâche 5).
+- Consomme : `nivuus-unattend.iso` (tâche 6). **Ne consomme PAS**
+  `C:\nivuus\state\PROVISION.done` (tâche 5, corrigé revue finale 2026-08-22) :
+  `wait_ready()` ne lit que le port 5985, jamais le marqueur - voir sa docstring.
 - Produit : `domain_xml(**kwargs) -> str`, `create_disk(path, size_gib)`, `define(xml)`, `wait_ready(domain, timeout_s)`, `teardown(domain)`, `DOMAIN_NAME = "Windows-LTSC-test"`.
 
 - [ ] **Step 1: Écrire le test qui échoue**
@@ -2353,14 +2361,27 @@ planifie ; elle ne s'improvise pas au milieu d'une session de jeu.
 - **pourquoi `FirstLogonCommands` et jamais `SetupComplete.cmd`** ;
 - le runbook d'acceptation ci-dessous.
 
-- [ ] **Step 2: Libérer le GPU**
+- [ ] **Step 2: Pré-vol — désarmer le réveil de la VM de production (ajouté revue finale, 2026-08-22, I4)**
+
+Sur cet hôte, `vm-trigger-47989.socket` démarre `Windows` (production) sur tout
+`GET /serverinfo` Moonlight, et `vm-idle-shutdown.timer` **réarme les deux
+sockets de réveil toutes les 10 min tant que la VM est éteinte** — les arrêter
+à la main ne tient donc pas. Un réveil pendant le test se dispute le GPU que le
+domaine de test possède. `systemctl` est inutilisable depuis une session Claude
+sur cet hôte : ce qui suit est pour un humain sur un vrai shell.
+
+```bash
+sudo systemctl mask --now vm-trigger-47984.socket vm-trigger-47989.socket vm-idle-shutdown.timer
+```
+
+- [ ] **Step 3: Libérer le GPU**
 
 ```bash
 virsh shutdown --mode acpi Windows    # plain `virsh shutdown` silently no-ops
 virsh domstate Windows                # wait for "shut off"
 ```
 
-- [ ] **Step 3: Créer et démarrer le domaine de test**
+- [ ] **Step 4: Créer et démarrer le domaine de test**
 
 ```bash
 sudo python3 installer/windows-guest/testdomain.py define \
@@ -2375,7 +2396,7 @@ programme d'installation pose la moindre question, le fichier de réponses n'a
 pas été trouvé ou a été refusé — vérifier `X:\Windows\Panther\setuperr.log`
 depuis un shell WinPE (Maj+F10).
 
-- [ ] **Step 4: Attendre la fin du provisionnement**
+- [ ] **Step 5: Attendre la fin du provisionnement**
 
 ```bash
 python3 installer/windows-guest/testdomain.py wait-ready
@@ -2385,7 +2406,25 @@ Expected : `guest ready at 192.168.3.x` en moins de 90 min. En cas d'échec,
 la console VNC et `C:\nivuus\provision.log` disent où l'on s'est arrêté ; les
 fichiers `C:\nivuus\state\*.done` disent quelles étapes ont déjà réussi.
 
-- [ ] **Step 5: Lancer la sonde en session 1**
+`wait_ready()` ne confirme QUE le port 5985 ouvert (voir sa docstring, corrigé
+revue finale 2026-08-22) : il ne lit jamais le marqueur. C'est l'objet du pas
+suivant.
+
+- [ ] **Step 6: Lire le marqueur de version à la main (ajouté revue finale, 2026-08-22, I1)**
+
+```bash
+IP=192.168.3.x
+W="/usr/local/bin/winrm -hostname $IP -username Administrator -password <pass>"
+$W 'type C:\nivuus\state\PROVISION.done'
+```
+
+Expected : une ligne `provision_version=A1` (ou la valeur courante de
+`payload.PROVISION_VERSION` dans `installer/windows-guest/payload.py`). Un
+marqueur absent ou portant une version différente signifie que 5985 s'est
+ouvert sans que la charge utile attendue ait tourné jusqu'au bout — ne pas
+lancer la sonde avant d'avoir compris pourquoi.
+
+- [ ] **Step 7: Lancer la sonde en session 1**
 
 **La sonde ne vaut rien en session 0.** Deux voies, dans cet ordre de préférence :
 
@@ -2409,17 +2448,37 @@ sleep 180   # Add-Type compiles C# on the fly
 $W 'type C:\nivuus\state\advanced-color.txt'
 ```
 
-- [ ] **Step 6: Lire le verdict**
+- [ ] **Step 8: Lire le verdict**
 
-Critère d'acceptation, tel que fixé par la spec :
+**Le critère d'acceptation de la spec (`supported=1 et bpc>=10`) est insuffisant
+et a été corrigé** (revue finale, 2026-08-22) : lire `supported=` seul confond
+deux situations opposées. La sonde peut désormais mesurer jusqu'à trois écrans
+à la fois (VGA émulé, sortie HDMI du GPU passé, SudoVDA une fois créé), chaque
+ligne s'auto-identifiant (LUID d'adaptateur, technologie de sortie, nom convivial
+du moniteur) — voir Task 8 côté sonde. Quatre issues, distinguées par `rc`, pas
+par `supported` :
 
-```
-supported=1   et   bpc>=10
-```
+| Ligne observée | Signification | Verdict |
+| --- | --- | --- |
+| `rc=31` (ERROR_GEN_FAILURE) sur **tous** les écrans | l'OS/pilote ne sait pas faire d'Advanced Color, point. C'est la référence actuelle sur Server 2022. | **LTSC ne règle pas le problème.** |
+| `rc=0 supported=0` sur un écran sans métadonnées HDR (le dongle HDMI factice) | l'API fonctionne ; cet écran précis n'est simplement pas HDR-capable. | **PASS pour la question OS** (ne pas lire comme un échec). |
+| `rc=0 supported=1 bpc>=10` sur un écran HDR-capable | succès complet. | **PASS.** |
+| `query rc=122` (ERROR_INSUFFICIENT_BUFFER, course connue, non ré-essayée) et aucune ligne `target=` | la sonde a échoué à interroger, pas mesuré quoi que ce soit. | **Pas un verdict : relancer la sonde.** |
 
-Référence actuelle sur Server 2022 : `target=24832 rc=31 supported=0 enabled=0 bpc=0`.
+La ligne de référence `target=24832 rc=31 supported=0 enabled=0 bpc=0` diffère
+d'une ligne saine `rc=0 supported=0` **par le seul champ `rc`** ; ne lire que
+`supported=` confond les deux — c'est exactement l'erreur que corrige ce tableau.
 
-- [ ] **Step 7: Vérifier l'activation dans le même passage**
+**Question ouverte, non résolue ici** : SudoVDA ne crée un moniteur qu'à la
+demande d'Apollo (sous-projet B) ; tant que rien ne le sollicite, la sonde ne
+mesure que le VGA émulé et le dongle HDMI. Deux options, à trancher au moment de
+l'exécution de cette tâche, pas avant : (a) un appel client minimal vers SudoVDA
+qui force la création d'un moniteur, ou (b) avancer juste assez d'Apollo (B) pour
+qu'il crée l'écran virtuel avant que la sonde tourne. Sans l'un des deux, la sonde
+ne peut mesurer que le VGA émulé et le dongle HDMI factice — jamais l'écran
+virtuel, qui est pourtant celui qui compte pour le streaming.
+
+- [ ] **Step 9: Vérifier l'activation dans le même passage**
 
 C'est le geste qui coûte une minute ici et une migration entière si on l'oublie.
 
@@ -2431,7 +2490,7 @@ Expected : `Licence status: Licensed`. Une clé IoT LTSC revendue au détail pas
 par le canal volume et n'active pas toujours — un échec ici bloque tout le
 projet et doit être connu **maintenant**, pas en fin de migration.
 
-- [ ] **Step 8: Consigner le résultat**
+- [ ] **Step 10: Consigner le résultat**
 
 Ajouter à `CLAUDE.md`, dans la section « Cloud-gaming host = Apollo + SudoVDA »,
 la mesure obtenue (les deux lignes de la sonde, l'état d'activation, la date) et
@@ -2442,7 +2501,7 @@ et doit être daté comme tel, pas supprimé.
 Ce même test valide au passage **Secure Boot + vTPM + passthrough ensemble**,
 la combinaison la plus risquée du projet — le noter explicitement.
 
-- [ ] **Step 9: Rendre le GPU à la production**
+- [ ] **Step 11: Rendre le GPU à la production**
 
 ```bash
 sudo python3 installer/windows-guest/testdomain.py teardown
@@ -2452,7 +2511,15 @@ virsh start Windows        # or leave it to the wake-on-demand sockets
 `teardown` détruit le domaine, son NVRAM et son qcow2. Le NVMe et Server 2022
 n'ont jamais été touchés.
 
-- [ ] **Step 10: Commit**
+**Démasquer le réveil (I4, symétrique du Step 2)** — encore un geste pour un
+humain sur un vrai shell, pas depuis une session Claude :
+
+```bash
+sudo systemctl unmask vm-trigger-47984.socket vm-trigger-47989.socket vm-idle-shutdown.timer
+sudo systemctl start vm-trigger-47984.socket vm-trigger-47989.socket vm-idle-shutdown.timer
+```
+
+- [ ] **Step 12: Commit**
 
 ```bash
 git add installer/windows-guest/README.md CLAUDE.md

@@ -42,15 +42,18 @@ rejects("hostname with space", hostname="NIVUUS WIN")
 rejects("empty image name", image_name="   ")
 rejects("autologon count too low", autologon_count=1)
 
-# Verify that malformed key errors do not leak the key value
+# Verify that malformed key errors do not leak the key value. Shaped like a
+# real key (five groups of five) so it fails only on case, not on structure -
+# a structurally-wrong fixture like "NOTA-VALID-KEY" would pass this check
+# for the wrong reason (its groups just never appear in the generic message).
 try:
-    bad_key = "NOTA-VALID-KEY"
+    bad_key = "zzzzz-yyyyy-xxxxx-wwwww-vvvvv"
     params = ua.UnattendParams(**{**GOOD, "product_key": bad_key})
     ua.validate(params)
 except ua.UnattendError as exc:
     error_str = str(exc)
-    if any(c in error_str for c in bad_key.split("-")):
-        failures.append(f"malformed key error contains key characters: {error_str}")
+    if bad_key in error_str:
+        failures.append(f"malformed key error contains the key: {error_str}")
 else:
     failures.append("malformed key: accepted what it must reject")
 

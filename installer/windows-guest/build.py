@@ -100,15 +100,19 @@ def main(argv=None) -> int:
                                   payload.marker_text(image["name"], build_id))
             payload.verify_staged(stage / "nivuus")
             out = Path(args.output)
-            out.parent.mkdir(parents=True, exist_ok=True)
+            out.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             unattend_iso.build_iso(stage, out)
 
+        os.chmod(out, 0o600)
         unattend_iso.verify_iso(out)
         print(f"\nwrote {out} ({out.stat().st_size // 1024} KiB)")
         print(f"  sha256 unattend : {sha256(out)}")
         print(f"  sha256 windows  : {sha256(Path(args.windows_iso))}")
         print("\nAttach BOTH ISOs to the guest: the LTSC medium boots, this one is "
               "only read.")
+        print(f"  {out} contains the product key and the administrator password "
+              "in cleartext (both are needed for an unattended install) - it is "
+              "mode 0600, keep it that way.")
     except (media.MediaError, autounattend.UnattendError,
             payload.PayloadError, unattend_iso.IsoError) as exc:
         raise SystemExit(str(exc))

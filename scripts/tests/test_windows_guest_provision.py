@@ -108,7 +108,12 @@ for symbol in ("GetDisplayConfigBufferSizes", "QueryDisplayConfig",
     check(f"probe uses {symbol}", symbol in cs, True)
 check("probe reports bits per colour", "bitsPerColorChannel" in cs, True)
 check("probe output matches the reference format",
-      "target={0} rc={1} supported={2} enabled={3} bpc={4}" in cs, True)
+      "target={0} rc={1} supported={2} enabled={3} bpc={4} adapterLuid={5}:{6} "
+      "outputTechnology={7} namerc={8} name={9}" in cs, True)
+# Every line must self-identify the display it measured, so three possibly
+# concurrent displays (emulated VGA, GPU dummy plug, SudoVDA) can be told apart.
+check("probe queries the target device name (self-identification)",
+      "INFO_TYPE_TARGET_DEVICE_NAME" in cs, True)
 
 if failures:
     print(f"FAIL ({len(failures)})")

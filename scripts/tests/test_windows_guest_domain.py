@@ -92,8 +92,12 @@ class MockProc:
         self.stderr = stderr
 
 original_virsh = testdomain._virsh
+original_gpu_holders = testdomain.gpu_holders
+# Every case below is about the domstate guard, not the holder scan: keep the
+# holder scan a no-op unless a case says otherwise, so no real `find` runs.
+testdomain.gpu_holders = lambda: []
 try:
-    # Case 1: VM shut off, safe to proceed.
+    # Case 1: VM shut off, no holders, safe to proceed.
     testdomain._virsh = lambda *a: MockProc(0, "shut off", "")
     testdomain.assert_gpu_free()
 
@@ -122,8 +126,37 @@ try:
         failures.append("guard: empty stdout did not raise")
     except testdomain.DomainError:
         pass
+
+    # Case 5: VM shut off but a process still holds /dev/nvidia* - must raise
+    # and name the PID, since this domain has no hooks to stop it for you.
+    testdomain._virsh = lambda *a: MockProc(0, "shut off", "")
+    testdomain.gpu_holders = lambda: ["4242"]
+    try:
+        testdomain.assert_gpu_free()
+        failures.append("guard: GPU holder did not raise")
+    except testdomain.DomainError as e:
+        if "4242" not in str(e):
+            failures.append(f"guard: error message missing holder PID: {e}")
+    testdomain.gpu_holders = lambda: []
+
+    # Case 6: the holder scan itself errors - fail closed, never treat a
+    # broken scan as "no holders".
+    def _broken_find(*a, **kw):
+        return MockProc(2, "", "find: /proc: some races")
+    original_run = testdomain.subprocess.run
+    testdomain.subprocess.run = _broken_find
+    try:
+        try:
+            # The real function, not the case-5 stub still installed above.
+            original_gpu_holders()
+            failures.append("gpu_holders: broken scan did not raise")
+        except testdomain.DomainError:
+            pass
+    finally:
+        testdomain.subprocess.run = original_run
 finally:
     testdomain._virsh = original_virsh
+    testdomain.gpu_holders = original_gpu_holders
 
 if failures:
     print(f"FAIL ({len(failures)})")

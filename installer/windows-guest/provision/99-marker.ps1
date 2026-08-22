@@ -12,7 +12,9 @@ $ErrorActionPreference = 'Stop'
 $StateDir = 'C:\nivuus\state'
 
 # Keep the probe on C: so it can be run again without the payload medium.
-Copy-Item -Path (Join-Path $PayloadRoot 'probe') -Destination 'C:\nivuus\probe' `
+# Destination is the parent, not 'C:\nivuus\probe': Copy-Item nests into
+# ...\probe\probe when the destination directory already exists.
+Copy-Item -Path (Join-Path $PayloadRoot 'probe') -Destination 'C:\nivuus' `
           -Recurse -Force
 
 $gpu = Get-PnpDevice -Class Display | Where-Object { $_.FriendlyName -match 'NVIDIA' }

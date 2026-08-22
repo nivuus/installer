@@ -7,9 +7,12 @@ on /media/data, and never receives the Samsung NVMe hostdev.
 OPERATIONAL TRAPS:
 - assert_gpu_free() guards the `define` action only, not manual `virsh start`;
   protection at start time relies on libvirt/vfio refusing a second GPU attach.
-- This domain has no libvirt hooks, so no automatic GPU-holder stopping; any
-  process holding /dev/nvidia* must be stopped by hand before starting it.
-- Only domain_xml() and assert_gpu_free() have automated test coverage.
+- Domain name is Windows-LTSC-test, so none of
+  /etc/libvirt/hooks/qemu.d/Windows-LTSC-test/** runs: unlike the production
+  VM, nothing here stops nvidia-persistenced/ollama/Tdarr for you.
+  assert_gpu_free() refuses the define instead when gpu_holders() finds one;
+  a manual `virsh start` is not covered by that guard.
+- Only domain_xml(), assert_gpu_free() and gpu_holders() are tested.
 
 Usage:
     python3 testdomain.py xml
@@ -66,22 +69,45 @@ def domain_xml(*, disk_path: str = DISK_PATH, windows_iso: str,
     )
 
 
+def gpu_holders() -> list[str]:
+    """PIDs with an open fd on /dev/nvidia* (a pure-bash scan took 40s here;
+    this find(1) invocation takes ~200ms - see CLAUDE.md)."""
+    proc = subprocess.run(
+        ["find", "/proc", "-maxdepth", "3", "-path", "/proc/[0-9]*/fd/*",
+         "-lname", "/dev/nvidia*"],
+        text=True, capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise DomainError(f"GPU holder scan failed: {proc.stderr.strip()}")
+    pids = set()
+    for line in proc.stdout.splitlines():
+        parts = line.split("/")
+        if len(parts) > 2 and parts[2].isdigit():
+            pids.add(parts[2])
+    return sorted(pids, key=int)
+
+
 def assert_gpu_free() -> None:
     """The production VM owns the GPU while it runs; refuse rather than fight."""
     proc = _virsh("domstate", "Windows")
     if proc.returncode != 0:
-        raise DomainError(
-            f"could not determine Windows domain state: {proc.stderr.strip()}"
-        )
+        raise DomainError(f"could not determine Windows domain state: "
+                          f"{proc.stderr.strip()}")
     state = proc.stdout.strip()
     if not state:
-        raise DomainError(
-            "could not determine Windows domain state: domstate returned empty"
-        )
+        raise DomainError("could not determine Windows domain state: "
+                          "domstate returned empty")
     if state != "shut off":
         raise DomainError(
             f"the Windows domain is {state!r}: shut it down first, the GPU "
             "cannot be assigned to two domains"
+        )
+    holders = gpu_holders()
+    if holders:
+        raise DomainError(
+            "process(es) still hold /dev/nvidia*: PID " + ", ".join(holders) +
+            " - no libvirt hooks stop them for you here (nvidia-persistenced, "
+            "nivuus-ollama, Tdarr are the usual suspects); stop them by hand"
         )
 
 
@@ -111,7 +137,13 @@ def guest_ip(domain: str = DOMAIN_NAME) -> str | None:
 
 
 def wait_ready(domain: str = DOMAIN_NAME, timeout_s: int = 5400) -> str:
-    """Wait for provisioning to finish: 99-marker.ps1 opens 5985 last."""
+    """Wait for provisioning to finish: 99-marker.ps1 opens 5985 last.
+
+    A reachable 5985 IS the readiness signal - a successful TCP connect, and
+    nothing else. It does NOT read C:\\nivuus\\state\\PROVISION.done: that
+    marker is diagnostic only, read by hand over WinRM once this returns,
+    compared against payload.PROVISION_VERSION (Task 8 runbook).
+    """
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         ip = guest_ip(domain)

@@ -4,6 +4,7 @@
 # test-engine   Run the install engine against a loopback disk image (root).
 # test-portal   Launch the web portal locally on :8080 for wizard testing.
 # test-vm       Boot the built ISO in QEMU (UEFI) with the portal on :8080.
+# windows-unattend  Build the secondary ISO that unattends the Windows guest install.
 # clean         Remove build artefacts.
 
 INSTALLER_DIR := $(CURDIR)

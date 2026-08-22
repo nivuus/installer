@@ -114,8 +114,16 @@ def inspect_iso(iso_path: str, mount_dir: str = MOUNT_DIR,
     """Loop-mount the ISO read-only and return its target image record."""
     if os.geteuid() != 0:
         raise MediaError("inspecting the medium requires root (loop mount)")
+    if os.path.ismount(mount_dir):
+        raise MediaError(
+            f"{mount_dir} is already a mount point; unmount it first "
+            f"(umount {mount_dir}) - a previous run may have crashed"
+        )
     os.makedirs(mount_dir, exist_ok=True)
-    subprocess.run(["mount", "-o", "loop,ro", iso_path, mount_dir], check=True)
+    proc = subprocess.run(["mount", "-o", "loop,ro", iso_path, mount_dir],
+                          text=True, capture_output=True)
+    if proc.returncode != 0:
+        raise MediaError(f"cannot mount {iso_path}: {proc.stderr.strip()}")
     try:
         wim = os.path.join(mount_dir, "sources", "install.wim")
         if not os.path.exists(wim):

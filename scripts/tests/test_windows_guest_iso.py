@@ -10,8 +10,11 @@ import sys
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "installer" / "windows-guest"))
+GUEST = REPO / "installer" / "windows-guest"
+sys.path.insert(0, str(GUEST))
 
+import autounattend as ua  # noqa: E402
+import payload  # noqa: E402
 import unattend_iso as ui  # noqa: E402
 
 if shutil.which("xorriso") is None:
@@ -90,6 +93,29 @@ with tempfile.TemporaryDirectory() as tmp:
         failures.append("build_iso: accepted nonexistent staging directory")
     except ui.IsoError:
         pass
+
+# Five places encode "the payload root is called nivuus, its marker is
+# PAYLOAD.id" independently, and until now only agreed by luck: pin them
+# against each other so a drift in any one fails loudly instead of producing
+# an ISO the guest bootstrap silently never finds its payload on.
+parts = ua.PAYLOAD_MARKER.split("\\")
+check("autounattend.PAYLOAD_MARKER filename matches payload.MARKER_NAME",
+      parts[-1], payload.MARKER_NAME)
+root = parts[1]
+check("payload root name is non-empty", bool(root), True)
+
+unattend_iso_src = (GUEST / "unattend_iso.py").read_text()
+build_src = (GUEST / "build.py").read_text()
+bootstrap_src = (GUEST / "provision" / "00-bootstrap.ps1").read_text()
+
+check("unattend_iso.verify_iso requires the same marker path",
+      f"/{root}/{payload.MARKER_NAME}" in unattend_iso_src, True)
+check("unattend_iso.verify_iso requires the same run-all.ps1 path",
+      f"/{root}/provision/run-all.ps1" in unattend_iso_src, True)
+check("build.py stages the payload into the same root directory name",
+      f'stage / "{root}"' in build_src, True)
+check("00-bootstrap.ps1 resume loop scans for the same marker path",
+      ua.PAYLOAD_MARKER in bootstrap_src, True)
 
 if failures:
     print(f"FAIL ({len(failures)})")
