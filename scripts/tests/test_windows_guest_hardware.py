@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Tests for the PCI/NVMe detection helpers used by the Windows guest domain.
 
-Both parsers are pure: they take captured `lspci` text, so these tests run
+The parsers are pure: they take captured `lspci` text. `_whole_disk_name` is
+exercised against a fake sysfs tree built in a temp dir. So these tests run
 anywhere and do not depend on the machine they execute on.
 
 Run: python3 scripts/tests/test_windows_guest_hardware.py
 """
+import os
 import pathlib
 import sys
+import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "installer"))
@@ -63,10 +66,45 @@ check(
 check("unknown slot yields nothing", hardware.parse_pci_functions(LSPCI, "09:00.0"), [])
 check("empty input yields nothing", hardware.parse_pci_functions("", "01:00.0"), [])
 
-# Test the whole-disk name extractor (sysfs-based, so testable on this host)
-# This verifies F2 fix: partition names resolve correctly, and whole-disk names stay unchanged
-check("partition name resolves to disk", hardware._whole_disk_name("nvme0n1p3"), "nvme0n1")
-check("whole-disk name unchanged", hardware._whole_disk_name("nvme0n1"), "nvme0n1")
+# Test the whole-disk name extractor against a fake sysfs tree (same approach
+# as scripts/tests/test_pcie_wifi_link_guard.sh), so this does not depend on
+# what block devices happen to exist on the machine running the test.
+with tempfile.TemporaryDirectory() as fake_root:
+    def _make_partition(disk, part):
+        disk_dir = os.path.join(fake_root, disk)
+        part_dir = os.path.join(disk_dir, part)
+        os.makedirs(part_dir, exist_ok=True)
+        with open(os.path.join(part_dir, "partition"), "w") as fh:
+            fh.write("3\n")
+        os.symlink(os.path.join(disk, part), os.path.join(fake_root, part))
+
+    def _make_whole_disk(disk):
+        os.makedirs(os.path.join(fake_root, disk), exist_ok=True)
+
+    _make_partition("nvme0n1", "nvme0n1p3")
+    _make_whole_disk("sda")
+    _make_partition("mmcblk0", "mmcblk0p1")
+
+    check(
+        "partition name resolves to parent disk",
+        hardware._whole_disk_name("nvme0n1p3", sysfs_root=fake_root),
+        "nvme0n1",
+    )
+    check(
+        "whole-disk name unchanged",
+        hardware._whole_disk_name("sda", sysfs_root=fake_root),
+        "sda",
+    )
+    check(
+        "mmcblk-style partition resolves to parent disk",
+        hardware._whole_disk_name("mmcblk0p1", sysfs_root=fake_root),
+        "mmcblk0",
+    )
+    check(
+        "missing node falls back to the name unchanged",
+        hardware._whole_disk_name("nonexistent0", sysfs_root=fake_root),
+        "nonexistent0",
+    )
 
 ctrls = hardware.parse_nvme_controllers(LSPCI)
 check("two NVMe controllers", len(ctrls), 2)

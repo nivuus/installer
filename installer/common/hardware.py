@@ -365,25 +365,29 @@ def parse_nvme_controllers(raw: str) -> list[dict]:
     return sorted(out, key=lambda c: c["address"])
 
 
-def _whole_disk_name(name: str) -> str:
+def _whole_disk_name(name: str, sysfs_root: str = "/sys/class/block") -> str:
     """Get the whole-disk name from a device name (partition or disk).
 
     Uses sysfs to detect whether the device is a partition:
-    - If /sys/class/block/<name>/partition exists, extract parent disk name
+    - If <sysfs_root>/<name>/partition exists, extract parent disk name
     - Otherwise, the name already is the whole disk
 
-    Falls back to returning the name unchanged on any sysfs error.
+    `sysfs_root` defaults to the real sysfs location; tests point it at a
+    fake tree so this stays testable without depending on the machine it
+    runs on. Falls back to returning the name unchanged on any sysfs error
+    or if the node does not exist at all.
     """
     try:
-        partition_file = f"/sys/class/block/{name}/partition"
+        partition_file = os.path.join(sysfs_root, name, "partition")
         if os.path.exists(partition_file):
             # It's a partition; find the parent disk
             # Resolve the symlink to get the sysfs path, then go up one level
-            sysfs_path = os.path.realpath(f"/sys/class/block/{name}")
+            sysfs_path = os.path.realpath(os.path.join(sysfs_root, name))
             parent_path = os.path.dirname(sysfs_path)
             return os.path.basename(parent_path)
         else:
-            # No partition file; this is already the whole disk
+            # No partition file; this is already the whole disk (or the node
+            # does not exist at all)
             return name
     except OSError:
         # Fall back to returning the name unchanged on any error
