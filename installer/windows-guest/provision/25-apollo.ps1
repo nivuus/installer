@@ -66,79 +66,34 @@ Write-Host "SudoVDA OK: $($vda.InstanceId)"
 
 $config = Join-Path $root 'config'
 
-# --- The junction. Stop the service first: it holds its config directory
-# open. Poll for it to actually reach Stopped (same shape as the waits in
-# 15-virtio.ps1 / 20-disk.ps1) instead of guessing a fixed delay - moving a
-# directory the service still holds open would fail in a far more confusing way.
-$svc = Get-Service -Name 'ApolloService' -ErrorAction SilentlyContinue
-if ($svc) {
-    Stop-Service -Name 'ApolloService' -Force -ErrorAction SilentlyContinue
-    $deadline = (Get-Date).AddSeconds(30)
-    while ((Get-Date) -lt $deadline) {
-        $svc = Get-Service -Name 'ApolloService'
-        if ($svc.Status -eq 'Stopped') { break }
-        Start-Sleep -Milliseconds 500
-    }
-    if ($svc.Status -ne 'Stopped') {
-        throw "ApolloService did not reach Stopped (still $($svc.Status)) after 30 seconds: it may still hold $config open"
-    }
-}
-
-New-Item -ItemType Directory -Force -Path $ApolloState | Out-Null
-
-$item = Get-Item -Path $config -ErrorAction SilentlyContinue
-$isJunction = $item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
-
-# A junction that merely exists is not enough: it must point at $ApolloState,
-# or every write below lands on D: while Apollo's real (stale) target is what
-# it actually reads. Compare the resolved target, not just the attribute.
-$pointsAtApolloState = $false
-if ($isJunction) {
-    $currentTarget = ($item.Target | Select-Object -First 1)
-    if ($currentTarget) { $currentTarget = $currentTarget.TrimEnd('\') }
-    $pointsAtApolloState = ($currentTarget -eq $ApolloState.TrimEnd('\'))
-    if (-not $pointsAtApolloState) { Write-Host "config junction points at '$currentTarget', not '$ApolloState': re-pointing it" }
-}
-
-if (-not $pointsAtApolloState) {
-    if ($item) {
-        # Seed if absent, never overwrite: $config (fresh dir, or a junction
-        # pointing somewhere stale) may hold files D: doesn't have yet. Only
-        # top-level names are compared - accepted: a nested-only new file
-        # would be missed, but that only bites a fresh Apollo version on a
-        # rebuilt C: whose D: predates it; an ordinary upgrade already has a
-        # correct junction and never reaches here.
-        foreach ($f in Get-ChildItem -Path $config -Force -ErrorAction SilentlyContinue) {
-            $seedTarget = Join-Path $ApolloState $f.Name
-            if (-not (Test-Path $seedTarget)) { Copy-Item -Path $f.FullName -Destination $seedTarget -Recurse }
-        }
-        if ($isJunction) {
-            # .Delete() unlinks the reparse point only. Remove-Item -Recurse
-            # on a junction is a known PS 5.1 trap: it follows the link and
-            # deletes the TARGET's contents - real state, at the stale path.
-            (Get-Item -Path $config).Delete()
-        }
-        else {
-            Remove-Item -Path $config -Recurse -Force
-        }
-    }
-    $mklinkOutput = cmd.exe /c "mklink /J `"$config`" `"$ApolloState`"" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "mklink /J failed (exit $LASTEXITCODE) linking '$config' -> '$ApolloState': $mklinkOutput"
-    }
-}
-$item = Get-Item -Path $config
-if (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-    throw "$config is not a junction: Apollo would write its pairings onto C:"
-}
+# --- The junction. See provision\assets\apollo-junction.ps1 for the
+# maneuver itself (split out to keep this file under 200 lines).
+. (Join-Path $PayloadRoot 'provision\assets\apollo-junction.ps1')
+Set-ApolloConfigJunction -Config $config -ApolloState $ApolloState
 Write-Host "config junctioned to $ApolloState"
 
-# --- Generated files: always rewritten. They carry no user state, and pinning
-# them to first-install would strand the appliance on an old configuration.
-Copy-Item -Path (Join-Path $PayloadRoot 'config\sunshine.conf') `
-          -Destination (Join-Path $ApolloState 'sunshine.conf') -Force
-Copy-Item -Path (Join-Path $PayloadRoot 'config\apps.json') `
-          -Destination (Join-Path $ApolloState 'apps.json') -Force
+# --- Generated files: always rewritten. The repo stays authoritative on
+# purpose - pinning to first-install would strand the appliance on stale
+# config forever - but sunshine.conf and apps.json are ALSO exactly the two
+# files Apollo's own web UI persists to (its Configuration and Applications
+# pages). Anything the owner added or changed there is therefore lost on
+# every rebuild, silently, unless we say so here: back up the existing file
+# whenever it differs from what we are about to write, and log loudly.
+function Backup-IfChanged {
+    param([Parameter(Mandatory = $true)][string]$Source,
+          [Parameter(Mandatory = $true)][string]$Destination)
+    if ((Test-Path $Destination) -and
+        (Get-Content -Raw -Path $Destination) -ne (Get-Content -Raw -Path $Source)) {
+        $backup = "$Destination.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        Copy-Item -Path $Destination -Destination $backup -Force
+        Write-Host "WARNING: $Destination had owner changes (Apollo's web UI writes to this exact file) - backed up to $backup before overwriting it with the repo version"
+    }
+    Copy-Item -Path $Source -Destination $Destination -Force
+}
+Backup-IfChanged -Source (Join-Path $PayloadRoot 'config\sunshine.conf') `
+                  -Destination (Join-Path $ApolloState 'sunshine.conf')
+Backup-IfChanged -Source (Join-Path $PayloadRoot 'config\apps.json') `
+                  -Destination (Join-Path $ApolloState 'apps.json')
 New-Item -ItemType Directory -Force -Path 'C:\nivuus\apollo' | Out-Null
 Copy-Item -Path (Join-Path $PayloadRoot 'provision\assets\maximize-steam.ps1') `
           -Destination 'C:\nivuus\apollo\maximize-steam.ps1' -Force
