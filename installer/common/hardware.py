@@ -284,6 +284,56 @@ def _pci_slot_ids(slot: str) -> list[str]:
     return ids
 
 
+def parse_pci_functions(raw: str, slot: str) -> list[dict]:
+    """Every PCI function sharing `slot`, decomposed for libvirt <address>.
+
+    `_pci_slot_ids` returns vendor:device pairs, which is what vfio-pci.ids
+    needs. A <hostdev> needs the address instead, split into domain/bus/slot/
+    function and hex-prefixed. `slot` may be "01:00.0" or "0000:01:00.0".
+
+    Sorted by function number so generated <hostdev> entries keep a stable
+    order across runs.
+    """
+    wanted = slot.split(":", 1)[1] if slot.count(":") == 2 else slot
+    wanted_prefix = wanted.rsplit(".", 1)[0]
+    found = []
+    for line in raw.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        addr = parts[0]
+        if addr.count(":") != 2:
+            continue
+        domain, bus, rest = addr.split(":")[0], addr.split(":")[1], addr.split(":")[2]
+        if f"{bus}:{rest}".rsplit(".", 1)[0] != wanted_prefix:
+            continue
+        dev, func = rest.split(".", 1)
+        m = re.search(r"\[([0-9a-fA-F]{4}):([0-9a-fA-F]{4})\]", line)
+        found.append(
+            {
+                "address": addr,
+                "domain": f"0x{domain}",
+                "bus": f"0x{bus}",
+                "slot": f"0x{dev}",
+                "function": f"0x{int(func, 16):x}",
+                "id": f"{m.group(1).lower()}:{m.group(2).lower()}" if m else "",
+                "description": _clean_lspci_desc_from_nn(line),
+            }
+        )
+    return sorted(found, key=lambda f: f["function"])
+
+
+def _clean_lspci_desc_from_nn(line: str) -> str:
+    """Human label from an `lspci -nn` line: the text between ': ' and ' ['."""
+    after_colon = line.split(": ", 1)[1] if ": " in line else line
+    return re.sub(r"\s*\[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\].*$", "", after_colon).strip()
+
+
+def pci_slot_functions(slot: str) -> list[dict]:
+    """parse_pci_functions applied to this machine."""
+    return parse_pci_functions(_run(["lspci", "-nn", "-D"]), slot)
+
+
 def _clean_lspci_desc(line: str) -> str:
     # lspci -nnmm quotes fields; join vendor + device names for a readable label.
     fields = re.findall(r'"([^"]*)"', line)
