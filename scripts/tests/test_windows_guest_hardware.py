@@ -74,9 +74,9 @@ check("picked id", picked["id"], "144d:a808")
 
 # Refusing to guess is the whole point: this disk gets wiped.
 check_raises(
-    "ambiguous when no host disk is known",
+    "host unknown is never a guess",
     hardware.HardwareError,
-    lambda: hardware.select_passthrough_nvme(ctrls, set()),
+    lambda: hardware.select_passthrough_nvme(ctrls[:1], set()),
 )
 check_raises(
     "no candidate left",

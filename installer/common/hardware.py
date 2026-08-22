@@ -5,6 +5,10 @@ returns plain dict/list structures (JSON-serialisable) and never raises on a
 missing tool — it returns an empty/partial result instead. This keeps the web
 wizard usable even on stripped-down live environments.
 
+Exception: the passthrough NVMe helpers (passthrough_nvme, resolve_passthrough_nvme,
+select_passthrough_nvme) raise HardwareError when detection cannot safely decide,
+since the selected disk is wiped by the Windows installer.
+
 Used by both the web portal (to populate the wizard) and the install engine
 (to compute isolcpus / vfio-pci.ids for the generic, non-hardcoded install).
 """
@@ -124,8 +128,6 @@ def list_ethernet() -> list[dict]:
 
 
 def _is_wireless(iface: str) -> bool:
-    import os
-
     return os.path.isdir(f"/sys/class/net/{iface}/wireless") or os.path.exists(
         f"/sys/class/net/{iface}/phy80211"
     )
@@ -363,6 +365,16 @@ def parse_nvme_controllers(raw: str) -> list[dict]:
     return sorted(out, key=lambda c: c["address"])
 
 
+def _device_to_pci_address(device: str) -> Optional[str]:
+    """Resolve a block device name to its PCI address, or None."""
+    try:
+        target = os.path.realpath(f"/sys/block/{device}/device/device")
+    except OSError:
+        return None
+    tail = os.path.basename(target)
+    return tail if tail.count(":") == 2 else None
+
+
 def select_passthrough_nvme(controllers: list[dict],
                             host_addresses: set[str]) -> dict:
     """The one NVMe controller that is not backing the host's own root.
@@ -372,6 +384,10 @@ def select_passthrough_nvme(controllers: list[dict],
     """
     if not controllers:
         raise HardwareError("no NVMe controller found (PCI class 0108)")
+    if not host_addresses:
+        raise HardwareError(
+            "host root not identified; cannot safely select a passthrough device"
+        )
     candidates = [c for c in controllers if c["address"] not in host_addresses]
     if not candidates:
         raise HardwareError(
@@ -386,44 +402,61 @@ def select_passthrough_nvme(controllers: list[dict],
     return candidates[0]
 
 
-def host_root_pci_address() -> Optional[str]:
-    """PCI address of the controller behind the host's root filesystem."""
+def host_root_pci_addresses() -> Optional[set[str]]:
+    """PCI addresses of all controllers backing the host's root filesystem.
+
+    Returns a set of PCI addresses (e.g., {'0000:02:00.0'}), or None if the
+    root device cannot be traced.
+
+    Handles LVM by walking /sys/block/dm-X/slaves/ to find all backing devices,
+    then resolves each to its PCI address. Returns None if no backing devices
+    are found or if any cannot be resolved to a PCI address.
+    """
     src = _run(["findmnt", "-no", "SOURCE", "/"])
     if not src:
         return None
-    pk = _run(["lsblk", "-no", "PKNAME", src]).splitlines()
-    disk = pk[0].strip() if pk else ""
 
-    # Handle LVM: if PKNAME is empty, try to find the underlying device via dmsetup.
-    if not disk:
-        # src might be like /dev/mapper/vg--name
-        # Use dmsetup table to find the underlying device (major:minor)
-        base_src = os.path.basename(src)
-        table = _run(["dmsetup", "table", base_src])
-        if table:
-            # dmsetup table output looks like: "0 1951465472 linear 259:3 2048"
-            # Extract major:minor from the third field
-            parts = table.split()
-            if len(parts) >= 4:
-                major_minor = parts[3]  # e.g., "259:3"
-                try:
-                    # Map major:minor to device name via sysfs
-                    link = os.path.realpath(f"/sys/dev/block/{major_minor}")
-                    # link is like .../nvme0n1/nvme0n1p3
-                    # Extract the disk name (nvme0n1 from nvme0n1p3)
-                    tail = os.path.basename(link)
-                    disk = re.sub(r"(?:p)?[0-9]+$", "", tail)  # nvme0n1p3 -> nvme0n1
-                except OSError:
-                    pass
+    backing_devices = set()
 
-    if not disk:
-        return None
-    try:
-        target = os.path.realpath(f"/sys/block/{disk}/device/device")
-    except OSError:
-        return None
-    tail = os.path.basename(target)
-    return tail if tail.count(":") == 2 else None
+    # Direct block device: try to extract the disk name from the source.
+    if src.startswith("/dev/") and not src.startswith("/dev/mapper/"):
+        # Handle block devices directly (e.g., /dev/nvme0n1p3, /dev/sda1)
+        # Remove partition numbers to get the disk name
+        disk = os.path.basename(src)
+        disk = re.sub(r"(?:p)?[0-9]+$", "", disk)
+        addr = _device_to_pci_address(disk)
+        if addr:
+            backing_devices.add(addr)
+        else:
+            return None
+    else:
+        # Device mapper (LVM): walk /sys/block/dm-X/slaves/ to find all backing devices
+        # Extract the dm device number from the major:minor of the mapped device
+        try:
+            device_stat = os.stat(src)
+            major = os.major(device_stat.st_rdev)
+            minor = os.minor(device_stat.st_rdev)
+            # Device mapper devices have major 254
+            if major != 254:
+                return None
+            dm_path = f"/sys/block/dm-{minor}/slaves"
+            if not os.path.isdir(dm_path):
+                return None
+            # Walk all slaves to find backing devices
+            for slave in os.listdir(dm_path):
+                # Each slave is a symlink to the backing device
+                # E.g., nvme0n1p3, sda1, etc.
+                disk = re.sub(r"(?:p)?[0-9]+$", "", slave)
+                addr = _device_to_pci_address(disk)
+                if addr:
+                    backing_devices.add(addr)
+                else:
+                    # If any backing device cannot be resolved, fail safely
+                    return None
+        except (OSError, TypeError):
+            return None
+
+    return backing_devices if backing_devices else None
 
 
 def resolve_passthrough_nvme(raw: str, host_addresses: set[str]) -> dict:
@@ -435,14 +468,22 @@ def resolve_passthrough_nvme(raw: str, host_addresses: set[str]) -> dict:
     functions = parse_pci_functions(raw, controller["address"])
     if not functions:
         raise HardwareError(f"cannot decompose address {controller['address']}")
-    return functions[0]
+    # Return the function matching the controller's address (usually function 0, but be explicit)
+    matching = next((f for f in functions if f["address"] == controller["address"]), None)
+    if matching is None:
+        raise HardwareError(f"cannot find function for address {controller['address']}")
+    return matching
 
 
 def passthrough_nvme() -> dict:
     """The NVMe controller to hand to the Windows guest, on this machine."""
-    host = host_root_pci_address()
+    host_addrs = host_root_pci_addresses()
+    if host_addrs is None:
+        raise HardwareError(
+            "cannot identify host root filesystem; refusing to guess passthrough device"
+        )
     return resolve_passthrough_nvme(
-        _run(["lspci", "-nn", "-D"]), {host} if host else set()
+        _run(["lspci", "-nn", "-D"]), host_addrs
     )
 
 
@@ -469,7 +510,6 @@ def cpu_topology() -> dict:
         leave efficiency cores for the host.
       * On uniform CPUs, isolate all cores except CPU 0 (kept for the host).
     """
-    import os
     import glob
 
     # /proc/cpuinfo is locale-independent (lscpu output is translated).
