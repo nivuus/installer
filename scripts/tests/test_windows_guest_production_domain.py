@@ -151,6 +151,35 @@ check("no vBIOS override", root.find("devices/hostdev/rom") is None, True)
 check("no i6300esb watchdog",
       [w.get("model") for w in root.findall("devices/watchdog")], ["itco"])
 
+# `define` must refuse an existing domain unless explicitly told to replace it:
+# until the cutover, "Windows" is the owner's production VM.
+check_raises(
+    "define refuses an existing domain",
+    domain.DomainError,
+    lambda: domain.guard_replace(exists=True, replace=False),
+)
+check("define proceeds when replacing", domain.guard_replace(exists=True, replace=True), None)
+check("define proceeds when absent", domain.guard_replace(exists=False, replace=False), None)
+
+# vm-cpu-partition.sh derives the HOST cpuset from cputune, reading the domain
+# XML libvirt feeds it on stdin. It parses cputune/{vcpupin,emulatorpin,
+# iothreadpin}@cpuset with ElementTree. Replicate that parse here: if the
+# generated XML ever stops matching it, the CPU partitioning breaks with no
+# error message at all — the hook exits 0 by design and only
+# /var/log/libvirt-cpu-hook.log would show it.
+pinned = set()
+for tune in root.findall("cputune"):
+    for tag in ("vcpupin", "emulatorpin", "iothreadpin"):
+        for el in tune.findall(tag):
+            for part in el.get("cpuset", "").split(","):
+                if "-" in part:
+                    lo, hi = part.split("-")
+                    pinned |= set(range(int(lo), int(hi) + 1))
+                elif part:
+                    pinned.add(int(part))
+
+check("hook sees every pinned CPU", pinned, set(range(16)))
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

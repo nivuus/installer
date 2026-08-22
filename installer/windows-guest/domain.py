@@ -100,3 +100,80 @@ def domain_xml(*, gpu_functions: list[dict], nvme: dict, plan: dict,
         nvram_path=nvram_path, gpu_functions=gpu_functions, nvme=nvme,
         virtiofs_source=virtiofs_source, virtiofs_tag=virtiofs_tag,
     )
+
+
+def guard_replace(*, exists: bool, replace: bool) -> None:
+    """Refuse to redefine an existing domain unless asked explicitly.
+
+    Until the cutover, "Windows" is the production VM, possibly hibernated with
+    a live session. Silently redefining it would discard that.
+    """
+    if exists and not replace:
+        raise DomainError(
+            f"domain {DOMAIN_NAME!r} already exists; pass --replace to redefine it"
+        )
+
+
+def _virsh(*args: str) -> subprocess.CompletedProcess:
+    # virsh output is localized; LC_ALL=C keeps state strings parseable.
+    return subprocess.run(["virsh", *args], text=True, capture_output=True,
+                          env={**os.environ, "LC_ALL": "C"})
+
+
+def domain_exists(name: str = DOMAIN_NAME) -> bool:
+    return _virsh("dominfo", name).returncode == 0
+
+
+def build_domain_xml() -> str:
+    """Detect this machine's hardware and render its domain."""
+    sys.path.insert(0, str(HERE.parent))
+    from common import hardware  # noqa: PLC0415
+
+    gpus = [g for g in hardware.list_gpus() if g["discrete"]]
+    if len(gpus) != 1:
+        raise DomainError(
+            f"expected exactly one discrete GPU, found {[g['slot'] for g in gpus]}"
+        )
+    topology = hardware.cpu_topology()
+    pool = topology["performance_cpus"] or list(range(1, topology["total_cpus"]))
+    return domain_xml(
+        gpu_functions=hardware.pci_slot_functions(gpus[0]["slot"]),
+        nvme=hardware.passthrough_nvme(),
+        plan=vcpu_plan(pool),
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Production Windows guest domain")
+    parser.add_argument("action", choices=["xml", "define"])
+    parser.add_argument("--replace", action="store_true",
+                        help="redefine the domain even if it already exists")
+    args = parser.parse_args()
+
+    # Imported here, not at module scope: the tests put only
+    # installer/windows-guest on sys.path, and a top-level import of
+    # common.hardware would break them.
+    sys.path.insert(0, str(HERE.parent))
+    from common.hardware import HardwareError  # noqa: PLC0415
+
+    try:
+        xml_text = build_domain_xml()
+        if args.action == "xml":
+            print(xml_text)
+            return 0
+        guard_replace(exists=domain_exists(), replace=args.replace)
+        path = Path("/run") / "nivuus-windows-domain.xml"
+        path.write_text(xml_text)
+        proc = _virsh("define", str(path))
+        sys.stdout.write(proc.stdout)
+        sys.stderr.write(proc.stderr)
+        return proc.returncode
+    except (DomainError, HardwareError) as exc:
+        # Detection and build failures are operator-facing, not bugs: report
+        # them plainly. Anything else keeps its traceback.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
