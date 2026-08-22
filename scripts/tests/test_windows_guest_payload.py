@@ -113,8 +113,23 @@ with tempfile.TemporaryDirectory() as tmp:
     missing = payload.missing_binaries(sources.drivers_dir)
     check("missing sudovda.cer is reported",
           any("sudovda.cer" in m for m in missing), True)
+    check("missing_binaries does not mention Apollo",
+          any("Apollo" in m for m in missing), False)
 
-# Test verify_staged catches missing sudovda files
+# Test stage_payload error includes Apollo guidance for SudoVDA
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    src = root / "src"
+    sources = make_tree(src)
+    (sources.drivers_dir / "sudovda" / "install.bat").unlink()
+    try:
+        payload.stage_payload(root / "dest", sources, "marker")
+        failures.append("stage_payload: accepted incomplete SudoVDA")
+    except payload.PayloadError as e:
+        if "Apollo" not in str(e):
+            failures.append(f"stage_payload error missing Apollo guidance: {e}")
+
+# Test verify_staged catches missing sudovda files (verify no Apollo guidance)
 with tempfile.TemporaryDirectory() as tmp:
     root = pathlib.Path(tmp)
     sources = make_tree(root / "src")
@@ -128,6 +143,8 @@ with tempfile.TemporaryDirectory() as tmp:
     except payload.PayloadError as e:
         if "install.bat" not in str(e):
             failures.append(f"verify_staged error didn't mention install.bat: {e}")
+        if "Apollo" in str(e):
+            failures.append(f"verify_staged error mentions Apollo (should not): {e}")
 
 # Test stage_payload rejects dest_root equal to source directory
 with tempfile.TemporaryDirectory() as tmp:

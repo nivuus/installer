@@ -36,10 +36,7 @@ def missing_binaries(drivers_dir: Path) -> list[str]:
     sudovda_files = ["SudoVDA.inf", "install.bat", "sudovda.cer"]
     for fname in sudovda_files:
         if not (sudovda_dir / fname).exists():
-            missing.append(
-                f"SudoVDA driver file {fname} in {sudovda_dir} - "
-                "copy from a machine's C:\\Program Files\\Apollo\\drivers\\sudovda"
-            )
+            missing.append(f"SudoVDA driver file {fname} in {sudovda_dir}")
     return missing
 
 
@@ -88,10 +85,12 @@ def stage_payload(dest_root: Path, sources: PayloadSources, marker: str) -> None
         raise PayloadError(f"dest_root cannot be filesystem root: {dest_root}")
     missing = missing_binaries(sources.drivers_dir)
     if missing:
-        raise PayloadError(
-            "offline payload incomplete, refusing to build:\n  - "
-            + "\n  - ".join(missing)
-        )
+        error_msg = ("offline payload incomplete, refusing to build:\n  - "
+                     + "\n  - ".join(missing))
+        if any("SudoVDA" in item for item in missing):
+            error_msg += ("\n\nSudoVDA files: copy from a machine's "
+                          "C:\\Program Files\\Apollo\\drivers\\sudovda")
+        raise PayloadError(error_msg)
     if dest_root.exists():
         shutil.rmtree(dest_root)
     for src, rel in plan_payload(sources):
