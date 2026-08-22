@@ -25,20 +25,26 @@ if ($proc.ExitCode -notin @(0, 3010)) {
     throw "pnputil failed on $($netkvm.Name): exit $($proc.ExitCode)"
 }
 
-# Poll for the network adapter with a 60-second timeout. Device enumeration
-# is not instantaneous, and healthy guests can exhibit enumeration delays
-# after pnputil /install depending on boot timing.
+# Poll for the PnP network device to reach OK status with a 60-second timeout.
+# Device enumeration is not instantaneous, and healthy guests can exhibit
+# delays after pnputil /install depending on boot timing. Note: Get-PnpDevice
+# reports driver binding via Status='OK'; Get-NetAdapter reports link state
+# via Status (Up/Down/Disconnected). These are different Status domains.
 $deadline = (Get-Date).AddSeconds(60)
-$nic = $null
+$pnpDevice = $null
 while ((Get-Date) -lt $deadline) {
-    $nic = Get-NetAdapter -ErrorAction SilentlyContinue |
-           Where-Object { $_.InterfaceDescription -match 'VirtIO|Red Hat' }
-    if ($nic -and $nic.Status -eq 'OK') { break }
+    $pnpDevice = Get-PnpDevice -Class Net -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Description -match 'VirtIO|Red Hat' -and $_.Status -eq 'OK' }
+    if ($pnpDevice) { break }
     Start-Sleep -Seconds 2
 }
-if (-not $nic) { throw "no virtio network adapter after installing NetKVM (waited 60 sec)" }
-if ($nic.Status -ne 'OK') { throw "NetKVM adapter present but status is $($nic.Status), not OK" }
-Write-Host "NetKVM OK: $($nic.InterfaceDescription) status $($nic.Status)"
+if (-not $pnpDevice) { throw "no virtio network device reached OK status after installing NetKVM (waited 60 sec)" }
+
+# Get the adapter for logging link state (diagnosis only; link depends on host bridge, not driver).
+$nic = Get-NetAdapter -ErrorAction SilentlyContinue |
+       Where-Object { $_.InterfaceDescription -match 'VirtIO|Red Hat' }
+$linkStatus = if ($nic) { $nic.Status } else { 'not yet enumerated' }
+Write-Host "NetKVM driver OK (PnP device bound): adapter link state is $linkStatus"
 
 # --- Everything below is best-effort. A failure here is logged, never fatal.
 
@@ -50,7 +56,7 @@ try {
         $p = Start-Process -FilePath 'msiexec.exe' `
                            -ArgumentList '/i', $msi.FullName, '/qn', '/norestart' `
                            -Wait -PassThru
-        if ($p.ExitCode -eq 0) {
+        if ($p.ExitCode -in @(0, 3010)) {
             Write-Host "WinFsp installed successfully"
         }
         else {

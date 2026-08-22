@@ -18,10 +18,14 @@ $DataMarker = 'D:\state\NIVUUS-DATA.id'
 # drift. Repair it by label first (which persists across rebuilds), or by
 # size as a fallback.
 if (-not (Test-Path 'D:\')) {
-    # Try to find an unlettered partition with label "Data" — the most reliable
-    # discriminator, since the answer file labels it and rebuilds preserve labels.
+    # Try to find an unlettered partition whose associated volume has label "Data".
+    # Labels persist across rebuilds, making them the most reliable discriminator.
+    # Use -eq for exact match (not -match regex) to avoid false positives like "Database".
     $part = Get-Partition | Where-Object {
-        -not $_.DriveLetter -and $_.AccessPaths -match 'Data'
+        -not $_.DriveLetter
+    } | ForEach-Object {
+        $vol = Get-Volume -Partition $_ -ErrorAction SilentlyContinue
+        if ($vol -and $vol.FileSystemLabel -eq 'Data') { $_ }
     } | Select-Object -First 1
 
     if (-not $part) {
@@ -34,7 +38,7 @@ if (-not (Test-Path 'D:\')) {
         Write-Host "D: assignment: using size heuristic (label not found)"
     }
     else {
-        Write-Host "D: assignment: using label-based detection"
+        Write-Host "D: assignment: using label-based detection (label='Data')"
     }
     Write-Host "assigning D: to partition $($part.PartitionNumber)"
     Set-Partition -InputObject $part -NewDriveLetter D
