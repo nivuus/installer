@@ -27,10 +27,22 @@ fenêtre du propriétaire.
 ce sous-projet.** Le fichier de réponses a deux modes exclusifs : `wipe`
 (efface le disque entier, crée C: et D:) et `rebuild` (reformate C:
 uniquement, ne touche pas à D:). Un mode `rebuild` lancé contre un disque qui
-n'a pas été installé par `wipe` reformaterait une partition arbitraire. La
-parade est un marqueur : `wipe` sème `D:\state\NIVUUS-DATA.id`, et l'étape
-`20-disk.ps1` **refuse de continuer** si ce marqueur manque en mode
-`rebuild`.
+n'a pas été installé par `wipe` reformaterait une partition arbitraire.
+
+⚠️ **Correction après revue de la tâche 2 — ce plan affirmait d'abord une
+garantie qui n'existe pas.** Il présentait le marqueur `D:\state\NIVUUS-DATA.id`
+vérifié par `20-disk.ps1` comme la parade. C'en est une **détection**, pas une
+prévention : `20-disk.ps1` est une étape de provisionnement de l'invité, qui
+s'exécute longtemps **après** que la passe `windowsPE` a repartitionné. Elle
+constate qu'on a visé le mauvais disque ; elle ne peut rien empêcher.
+
+La sûreté réelle du mode `rebuild` est donc **procédurale**, et il faut le dire
+ainsi : l'opérateur le choisit délibérément contre un disque que cet outillage
+a lui-même partitionné. Deux renforts, faute de garde technique possible à cet
+endroit : `build.py` exige un drapeau de confirmation explicite pour ce mode
+(tâche 9), et la recette vérifie la disposition du disque avant de le choisir
+(tâche 10). Le marqueur reste utile — il transforme une erreur silencieuse en
+échec bruyant au premier redémarrage.
 
 🔴 **Aucun secret n'entre dans le dépôt ni dans une ligne de commande de
 l'hôte.** Le mot de passe administrateur, la clé produit et — nouveau en B —
@@ -88,6 +100,7 @@ mesure faite sur l'installeur Apollo 0.4.6 réel.
 - Modify: `installer/windows-guest/payload.py`
 - Create: `installer/windows-guest/fetch_payload.py`
 - Test: `scripts/tests/test_windows_guest_payload.py` (étendre)
+- Test: `scripts/tests/test_windows_guest_fetch_payload.py` (créé après revue : un module, un fichier de tests)
 
 **Interfaces:**
 - Consumes: rien (première tâche).
@@ -100,7 +113,9 @@ de sortie :
 
 ```python
 # --- Sous-projet B : la charge utile déclare ses artefacts en un seul endroit.
-check("provision version is B1", payload.PROVISION_VERSION, "B1")
+# ⚠️ PROVISION_VERSION n'est PAS touché ici : test_windows_guest_provision.py
+# le recoupe avec la chaîne écrite par 99-marker.ps1, donc les deux doivent
+# bouger ensemble. C'est la tâche 8 qui les bascule en B1.
 
 with tempfile.TemporaryDirectory() as tmp:
     root = pathlib.Path(tmp)
@@ -163,6 +178,35 @@ check("downloads are uniquely named", len(names), len(set(names)))
 Ajouter les imports manquants en tête du fichier (`import shutil`,
 `import tempfile`, `import pathlib` s'ils n'y sont pas déjà).
 
+🔴 **Et retirer les assertions SudoVDA existantes du même fichier** (ruling
+R3). Aux alentours des lignes 119-147, deux blocs vérifient que le message
+d'erreur de `stage_payload` mentionne Apollo pour un `sudovda/` incomplet, et
+que `verify_staged` réclame `install.bat`. Ces deux comportements disparaissent
+avec la réécriture de `missing_binaries` : les blocs sont supprimés et
+remplacés par le bloc `agent.exe` ci-dessous, qui teste la nouvelle garde.
+
+```python
+# The irreplaceable artefact deserves its own message: no machine can rebuild
+# agent.exe once the current VM is wiped.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    src = root / "src"
+    (src / "provision").mkdir(parents=True)
+    (src / "probe").mkdir()
+    drivers = src / "drivers"
+    _make_complete_payload(drivers)
+    shutil.rmtree(drivers / "agent")
+    sources = payload.PayloadSources(
+        provision_dir=src / "provision", probe_dir=src / "probe",
+        drivers_dir=drivers)
+    try:
+        payload.stage_payload(root / "dest", sources, "marker")
+        failures.append("stage_payload: accepted a payload with no agent.exe")
+    except payload.PayloadError as e:
+        if "extracted from the current Windows VM" not in str(e):
+            failures.append(f"stage_payload error missing the agent warning: {e}")
+```
+
 - [ ] **Step 2: Lancer les tests et vérifier qu'ils échouent**
 
 Run: `python3 scripts/tests/test_windows_guest_payload.py`
@@ -171,7 +215,8 @@ Expected: FAIL — `provision version is B1: got 'A1', want 'B1'`, puis
 
 - [ ] **Step 3: Étendre `payload.py`**
 
-Remplacer `PROVISION_VERSION = "A1"` par `PROVISION_VERSION = "B1"`.
+Ne PAS toucher à `PROVISION_VERSION` (ruling R1 : il se déplace en tâche 8,
+avec la chaîne jumelle de `99-marker.ps1`).
 
 Remplacer entièrement `missing_binaries` par :
 
@@ -182,7 +227,7 @@ Remplacer entièrement `missing_binaries` par :
 # so no agent, no wake-on-demand, no 192.168.3.2.
 REQUIRED_BINARIES = [
     ("nvidia", "*.exe", "NVIDIA display driver installer"),
-    ("apollo", "*.exe", "Apollo installer (it also carries SudoVDA)"),
+    ("apollo", "*.exe", "Apollo installer (bundles the virtual display driver)"),
     ("steam", "SteamSetup.exe", "Steam installer"),
     ("virtio/netkvm", "*.inf", "NetKVM virtio-net driver"),
     ("winfsp", "*.msi", "WinFsp installer (virtiofs depends on it)"),
@@ -247,7 +292,10 @@ source » doit le couvrir aussi) :
         src_paths.add(sources.config_dir.resolve())
 ```
 
-Étendre la liste `required` de `verify_staged` :
+Étendre la liste `required` de `verify_staged` — **sans** les entrées
+`config/` (ruling R2 : elles arrivent en tâche 9, quand `build.py` commence à
+peupler ce répertoire ; les ajouter ici casserait les fixtures existantes du
+test, qui appellent `verify_staged` sans configuration) :
 
 ```python
     required = [
@@ -256,9 +304,6 @@ source » doit le couvrir aussi) :
         "provision/00-bootstrap.ps1",
         "provision/99-marker.ps1",
         "probe/advanced-color.ps1",
-        "config/sunshine.conf",
-        "config/apps.json",
-        "config/secrets.psd1",
     ]
 ```
 
@@ -393,6 +438,21 @@ Expected: PASS.
 git add installer/windows-guest/payload.py installer/windows-guest/fetch_payload.py scripts/tests/test_windows_guest_payload.py
 git commit -m "feat(windows-guest): declare the B payload and fetch what is fetchable"
 ```
+
+> **Amendements après revue** (le code ci-dessus est celui du premier jet ; la
+> revue de tâche a demandé quatre corrections, dont trois contre ce plan) :
+> **F1** `fetch()` télécharge vers un `.part` renommé seulement à la fin, avec
+> le nettoyage dans un `finally` — sans quoi une interruption laisse un fichier
+> partiel que le passage suivant accepte comme complet, pour toujours.
+> **F3** pas d'empreinte figée (les URL Steam et virtio-win sont des pointeurs
+> mouvants) mais un manifeste `payload-manifest.txt` : confiance au premier
+> téléchargement, **échec bruyant** dès qu'un artefact déjà connu revient avec
+> une empreinte différente.
+> **F4/F5** `extract_virtio` lève sur une collision de nom de base au lieu
+> d'écraser, et refuse tout chemin extrait hors du répertoire cible.
+> **F2** (défaut d'implémentation, pas du plan) : rétablir un test de la garde
+> anti-altération de `verify_staged` sur un arbre déjà déposé.
+> Le détail des arbitrages est dans le journal SDD.
 
 ---
 
@@ -807,6 +867,7 @@ min_log_level = info
 
 ```jinja
 {
+  "version": 2,
   "env": {},
   "apps": [
     {
@@ -844,6 +905,25 @@ min_log_level = info
 
 Run: `python3 scripts/tests/test_windows_guest_apollo.py`
 Expected: PASS.
+
+> **Amendements après revue.**
+> **`"version": 2` est obligatoire**, et la raison mérite d'être lue avant de
+> l'ôter comme redondant : dans la table de chaînes d'Apollo 0.4.6,
+> `virtual-display` figure dans la liste des champs lus **après** la migration
+> `v1 → v2`. Un document sans `version` est traité comme v1 puis migré, et rien
+> hors-ligne ne dit si cette migration préserve une clé que le schéma v1 n'a
+> jamais eue. Déclarer la version supprime l'étape de migration au lieu de
+> parier dessus. Si le pari tournait mal, Apollo journalise « Couldn't read
+> apps.json properly » et retombe sur une entrée Desktop intégrée — panne
+> bruyante, détectée au premier flux. La panne qu'on évite, elle, est
+> silencieuse : pas d'écran virtuel, pas de HDR, et tout le reste normal.
+> **`render_secrets` refuse le non-ASCII**, en plus des guillemets et des sauts
+> de ligne. `Import-PowerShellDataFile` de PowerShell 5.1 lit un fichier sans
+> BOM en ANSI, pas en UTF-8 : un mot de passe accentué serait silencieusement
+> décodé de travers, et l'invité poserait un mot de passe d'ouverture de session
+> différent de celui du fichier de réponses, sans la moindre erreur. L'ASCII est
+> identique en UTF-8 et dans toutes les pages de code — la classe de panne
+> disparaît au lieu d'être gérée.
 
 - [ ] **Step 7: Commit**
 
@@ -1009,13 +1089,16 @@ git commit -m "feat(windows-guest): install virtio drivers and claim the persist
 - Consumes: `drivers\apollo\*.exe`, `config\sunshine.conf`, `config\apps.json`, `config\secrets.psd1` (tâches 1 et 3) ; `D:\state` (tâche 4).
 - Produces: `C:\Program Files\Apollo\config` jonctionné vers `D:\state\apollo` ; service `ApolloService` en démarrage automatique et démarré ; périphérique SudoVDA présent ; `C:\nivuus\apollo\maximize-steam.ps1` déposé.
 
-- [ ] **Step 1: Supprimer l'étape SudoVDA autonome**
+- [ ] **Step 1: Ne PAS encore supprimer l'étape SudoVDA autonome**
 
-```bash
-git rm installer/windows-guest/provision/20-sudovda.ps1
-```
+Ruling R4 : `run-all.ps1` lève `missing provisioning stage` sur un fichier
+absent de son disque, et sa liste d'étapes n'est réécrite qu'en tâche 8. La
+suppression et la réécriture de la liste sont donc **un seul changement
+atomique**, qui appartient à la tâche 8. Ici, `25-apollo.ps1` se contente de
+rendre `20-sudovda.ps1` inutile.
 
-L'installeur Apollo 0.4.6 embarque `drivers\sudovda` à l'identique — même
+La raison de fond, à porter dans le message de commit de la tâche 8 :
+l'installeur Apollo 0.4.6 embarque `drivers\sudovda` à l'identique — même
 `install.bat`, même `sudovda.cer`, même `nefconc.exe` — et ce script pose
 lui-même le certificat dans `Root` et `TrustedPublisher` avant de recréer le
 nœud de périphérique. Installer le même IDD deux fois est un risque gratuit ;
@@ -1484,6 +1567,8 @@ git commit -m "feat(windows-guest): keep the guest awake, logged on, and off dri
 **Files:**
 - Modify: `installer/windows-guest/provision/run-all.ps1`
 - Modify: `installer/windows-guest/provision/99-marker.ps1`
+- Modify: `installer/windows-guest/payload.py` (le seul changement restant : `PROVISION_VERSION`)
+- Delete: `installer/windows-guest/provision/20-sudovda.ps1`
 - Modify: `scripts/tests/test_windows_guest_provision.py`
 
 **Interfaces:**
@@ -1505,6 +1590,8 @@ et ajouter, avant le bloc de sortie :
 
 ```python
 # --- Sous-projet B.
+# R1: the version lives in two languages and must move in one step.
+check("provision version is B1", payload.PROVISION_VERSION, "B1")
 check("the standalone SudoVDA stage is gone",
       (PROVISION / "20-sudovda.ps1").exists(), False)
 
@@ -1549,7 +1636,20 @@ Expected: FAIL — `15-virtio.ps1 exists: got False, want True` n'apparaîtra pa
 (les fichiers existent depuis les tâches 4 à 7), mais
 `run-all lists every stage: got False, want True` oui.
 
-- [ ] **Step 3: Étendre `run-all.ps1`**
+- [ ] **Step 3: Supprimer l'étape autonome et basculer la version**
+
+```bash
+git rm installer/windows-guest/provision/20-sudovda.ps1
+```
+
+Supprimer aussi, dans `scripts/tests/test_windows_guest_provision.py`, le bloc
+qui lit `texts["20-sudovda.ps1"]` (aux alentours de la ligne 101) et ses
+assertions sur le certificat.
+
+Dans `installer/windows-guest/payload.py`, remplacer
+`PROVISION_VERSION = "A1"` par `PROVISION_VERSION = "B1"`.
+
+- [ ] **Step 4: Étendre `run-all.ps1`**
 
 Remplacer la ligne `$stages = @(...)` par :
 
@@ -1564,7 +1664,7 @@ Rien d'autre ne change : le jeton de redémarrage, l'ordre d'écriture du
 `.done` avant la consommation du jeton, et le transcript restent tels quels.
 C'est le seul mécanisme du projet éprouvé en conditions réelles.
 
-- [ ] **Step 4: Réécrire `99-marker.ps1`**
+- [ ] **Step 5: Réécrire `99-marker.ps1`**
 
 ```powershell
 <#
@@ -1633,15 +1733,15 @@ Get-NetFirewallRule -Name 'WINRM-HTTP-In-TCP*' | Enable-NetFirewallRule
 Write-Host 'provisioning marker written, WinRM reachable'
 ```
 
-- [ ] **Step 5: Lancer les tests et vérifier qu'ils passent**
+- [ ] **Step 6: Lancer les deux suites concernées et vérifier qu'elles passent**
 
-Run: `python3 scripts/tests/test_windows_guest_provision.py`
-Expected: PASS.
+Run: `python3 scripts/tests/test_windows_guest_provision.py && python3 scripts/tests/test_windows_guest_payload.py`
+Expected: PASS toutes les deux — la bascule de version touche les deux.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add installer/windows-guest/provision scripts/tests/test_windows_guest_provision.py
+git add -A installer/windows-guest/provision installer/windows-guest/payload.py scripts/tests/test_windows_guest_provision.py
 git commit -m "feat(windows-guest): chain the B stages and prove the appliance before opening 5985"
 ```
 
@@ -1698,7 +1798,23 @@ Expected: FAIL — `PayloadSources.__init__() got an unexpected keyword argument
 'config_dir'` si la tâche 1 n'est pas encore fusionnée ; sinon
 `staged payload is missing or empty: config/sunshine.conf`.
 
-- [ ] **Step 3: Étendre `build.py`**
+- [ ] **Step 3: Exiger la configuration dans `verify_staged`** (ruling R2)
+
+Dans `installer/windows-guest/payload.py`, ajouter les trois entrées à la
+liste `required` de `verify_staged` :
+
+```python
+        "config/sunshine.conf",
+        "config/apps.json",
+        "config/secrets.psd1",
+```
+
+Puis corriger les fixtures existantes du test qui appellent `verify_staged` :
+chacune doit désormais créer un `config/` avec ces trois fichiers et le passer
+via `config_dir`. C'est la contrepartie de R2 — l'exigence et les fixtures
+bougent ensemble.
+
+- [ ] **Step 4: Étendre `build.py`**
 
 Ajouter aux constantes :
 
@@ -1715,6 +1831,9 @@ Ajouter à `parse_args` :
                     choices=list(autounattend.DISK_MODES),
                     help="wipe partitions the whole disk; rebuild reformats C: "
                          "and leaves the games partition alone")
+    ap.add_argument("--target-disk-verified", action="store_true",
+                    help="required with --disk-mode rebuild: confirms the "
+                         "target disk was partitioned by this tooling")
     ap.add_argument("--system-partition-gb", type=int, default=200,
                     help="size of C: in GiB; the rest of the disk becomes D:")
 ```
@@ -1724,6 +1843,23 @@ Dans `main`, après la lecture des deux secrets existants :
 ```python
     apollo_password = read_secret(args.apollo_password_file,
                                   "Apollo web UI password file")
+```
+
+Et, juste après, le refus qui remplace la garde technique impossible (voir
+l'avertissement en tête de plan) :
+
+```python
+    # Nothing downstream can prevent a rebuild from reformatting the wrong
+    # partition: Windows Setup repartitions in the windowsPE pass, long before
+    # any guest-side script runs. The only real gate is the operator saying, on
+    # this command line, that they checked. Refuse rather than assume.
+    if args.disk_mode == "rebuild" and not args.target_disk_verified:
+        raise SystemExit(
+            "--disk-mode rebuild reformats partition 3 of disk 0 in place and "
+            "trusts that partition 4 holds your games. Nothing verifies that "
+            "for you. Re-run with --target-disk-verified once you have "
+            "confirmed the target disk was partitioned by this tooling."
+        )
 ```
 
 Ajouter `import apollo  # noqa: E402` aux imports locaux, passer les deux
@@ -1769,7 +1905,15 @@ Enfin, étendre le message d'avertissement de fin :
               "that way.")
 ```
 
-- [ ] **Step 4: Lancer toute la suite**
+- [ ] **Step 4b: Couvrir le refus par un test**
+
+Ajouter à `scripts/tests/test_windows_guest_payload.py` (ou au fichier de tests
+de `build.py` s'il en existe un d'ici là) une assertion sur `parse_args` +
+la garde : `--disk-mode rebuild` sans `--target-disk-verified` doit lever
+`SystemExit`, et le message doit nommer la partition 4. Un refus sans test est
+un refus qu'un futur remaniement supprimera sans que rien ne s'en aperçoive.
+
+- [ ] **Step 5: Lancer toute la suite**
 
 Run:
 ```bash
@@ -1777,15 +1921,15 @@ for t in scripts/tests/test_windows_guest_*.py; do echo "== $t"; python3 "$t" ||
 ```
 Expected: chaque suite affiche `OK`.
 
-- [ ] **Step 5: Vérifier qu'aucun secret n'est entré dans le dépôt**
+- [ ] **Step 6: Vérifier qu'aucun secret n'est entré dans le dépôt**
 
 Run: `git diff --cached --stat; grep -rn "apollo-ui.pass" installer/ | head`
 Expected: seul le *chemin* du fichier apparaît, jamais son contenu.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add installer/windows-guest/build.py scripts/tests/test_windows_guest_payload.py
+git add installer/windows-guest/build.py installer/windows-guest/payload.py scripts/tests/test_windows_guest_payload.py
 git commit -m "feat(windows-guest): render the Apollo config into the offline payload at build time"
 ```
 
@@ -1827,6 +1971,15 @@ Le document couvre, dans cet ordre :
    par WinRM qui voit zéro chemin d'affichage) rendant `enabled=1 bpc=10` sur
    la cible SudoVDA — cette fois **demandé par le client**, sans appel à
    `DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE`.
+4b. **Ouverture de session automatique après redémarrage** — le seul contrôle
+   qui prouve que les valeurs de registre sont aux chemins que Windows honore.
+   Redémarrer l'invité et vérifier qu'il revient **seul** sur un bureau
+   déverrouillé, sans intervention. Relire une valeur qu'on vient d'écrire
+   n'atteste que l'écriture, jamais que le chemin est le bon ; seul un
+   redémarrage tranche. Vérifier au passage qu'`hiberfil.sys` existe et que
+   `powercfg /availablesleepstates` annonce S4 — sinon le minuteur d'inactivité
+   de l'hôte tenterait d'hiberner un invité qui ne sait pas le faire, et la VM
+   resterait allumée en permanence.
 5. **Test 2 — agent en session 1.** `PROVISION.done` porte `agent_session=1`,
    et `agent.log` montre l'agent vivant. ⚠️ `check-session.sh` de Guacamole
    **ne s'applique pas** : il exige `/media/vm` et un binaire `C:\dev`.
