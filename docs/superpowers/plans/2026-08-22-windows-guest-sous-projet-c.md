@@ -29,7 +29,7 @@
 
 | Fichier | Responsabilité |
 | --- | --- |
-| `installer/common/hardware.py` | **modifié** : ajout de `parse_pci_functions`, `pci_slot_functions`, `parse_nvme_controllers`, `select_passthrough_nvme`, `host_root_pci_address`, `passthrough_nvme` |
+| `installer/common/hardware.py` | **modifié** : ajout de `parse_pci_functions`, `pci_slot_functions`, `parse_nvme_controllers`, `select_passthrough_nvme`, `host_root_pci_addresses`, `passthrough_nvme` |
 | `installer/windows-guest/domain.py` | **créé** : `vcpu_plan`, `domain_xml`, CLI `xml` / `define` |
 | `installer/windows-guest/templates/domain.xml.j2` | **créé** : le gabarit |
 | `scripts/tests/test_windows_guest_hardware.py` | **créé** : les analyseurs purs, sur du texte `lspci` capturé |
@@ -221,7 +221,7 @@ git commit -m "feat(hardware): decompose PCI slot functions for libvirt hostdev"
   - `parse_nvme_controllers(raw: str) -> list[dict]` — `[{"address", "id", "description"}]`
   - `select_passthrough_nvme(controllers: list[dict], host_addresses: set[str]) -> dict` — lève `HardwareError`
   - `resolve_passthrough_nvme(raw: str, host_addresses: set[str]) -> dict` — **pur**, rend la forme décomposée de Task 1 (`{"address", "domain", "bus", "slot", "function", "id", "description"}`)
-  - `host_root_pci_address() -> Optional[str]`
+  - `host_root_pci_addresses() -> Optional[set[str]]`
   - `passthrough_nvme() -> dict` — enveloppe mince, même forme décomposée
 - Produit aussi : `class HardwareError(RuntimeError)`.
 
@@ -344,21 +344,78 @@ def select_passthrough_nvme(controllers: list[dict],
     return candidates[0]
 
 
-def host_root_pci_address() -> Optional[str]:
-    """PCI address of the controller behind the host's root filesystem."""
-    src = _run(["findmnt", "-no", "SOURCE", "/"])
-    if not src:
-        return None
-    pk = _run(["lsblk", "-no", "PKNAME", src]).splitlines()
-    disk = pk[0].strip() if pk else ""
-    if not disk:
-        return None
+def _whole_disk_name(name: str, sysfs_root: str = "/sys/class/block") -> str:
+    """Get the whole-disk name from a device name (partition or disk).
+
+    Uses sysfs to detect whether the device is a partition. `sysfs_root`
+    defaults to the real sysfs location; tests point it at a fake tree so
+    this stays testable without depending on the machine it runs on.
+    """
     try:
-        target = os.path.realpath(f"/sys/block/{disk}/device/device")
+        partition_file = os.path.join(sysfs_root, name, "partition")
+        if os.path.exists(partition_file):
+            sysfs_path = os.path.realpath(os.path.join(sysfs_root, name))
+            parent_path = os.path.dirname(sysfs_path)
+            return os.path.basename(parent_path)
+        return name
+    except OSError:
+        return name
+
+
+def _device_to_pci_address(device: str) -> Optional[str]:
+    """Resolve a block device name to its PCI address, or None."""
+    try:
+        target = os.path.realpath(f"/sys/block/{device}/device/device")
     except OSError:
         return None
     tail = os.path.basename(target)
     return tail if tail.count(":") == 2 else None
+
+
+def host_root_pci_addresses() -> Optional[set[str]]:
+    """PCI addresses of all controllers backing the host's root filesystem.
+
+    A plain block device resolves to one controller. An LVM root does not:
+    `findmnt` returns a `/dev/mapper/...` device-mapper node, which can be
+    striped or mirrored across several physical disks, so it is walked via
+    `/sys/block/dm-X/slaves/` and every slave is resolved individually.
+    Returns `None` — never a guess — if the root cannot be traced at all,
+    or if any backing device cannot be resolved to a PCI address.
+    """
+    src = _run(["findmnt", "-no", "SOURCE", "/"])
+    if not src:
+        return None
+
+    backing_devices = set()
+
+    if src.startswith("/dev/") and not src.startswith("/dev/mapper/"):
+        disk = _whole_disk_name(os.path.basename(src))
+        addr = _device_to_pci_address(disk)
+        if addr:
+            backing_devices.add(addr)
+        else:
+            return None
+    else:
+        try:
+            device_stat = os.stat(src)
+            major = os.major(device_stat.st_rdev)
+            minor = os.minor(device_stat.st_rdev)
+            if major != 254:  # device-mapper major
+                return None
+            dm_path = f"/sys/block/dm-{minor}/slaves"
+            if not os.path.isdir(dm_path):
+                return None
+            for slave in os.listdir(dm_path):
+                disk = _whole_disk_name(slave)
+                addr = _device_to_pci_address(disk)
+                if addr:
+                    backing_devices.add(addr)
+                else:
+                    return None
+        except (OSError, TypeError):
+            return None
+
+    return backing_devices if backing_devices else None
 
 
 def resolve_passthrough_nvme(raw: str, host_addresses: set[str]) -> dict:
@@ -370,24 +427,37 @@ def resolve_passthrough_nvme(raw: str, host_addresses: set[str]) -> dict:
     functions = parse_pci_functions(raw, controller["address"])
     if not functions:
         raise HardwareError(f"cannot decompose address {controller['address']}")
-    return functions[0]
+    # Return the function matching the controller's address (usually function
+    # 0, but be explicit rather than assume the first entry is it).
+    matching = next((f for f in functions if f["address"] == controller["address"]), None)
+    if matching is None:
+        raise HardwareError(f"cannot find function for address {controller['address']}")
+    return matching
 
 
 def passthrough_nvme() -> dict:
     """The NVMe controller to hand to the Windows guest, on this machine."""
-    host = host_root_pci_address()
-    return resolve_passthrough_nvme(
-        _run(["lspci", "-nn", "-D"]), {host} if host else set()
-    )
+    host_addrs = host_root_pci_addresses()
+    if host_addrs is None:
+        raise HardwareError(
+            "cannot identify host root filesystem; refusing to guess passthrough device"
+        )
+    return resolve_passthrough_nvme(_run(["lspci", "-nn", "-D"]), host_addrs)
 ```
 
 Ajouter `import os` en tête du fichier s'il n'y est pas.
 
-⚠️ `lsblk -no PKNAME` sur un volume LVM rend le disque parent (`nvme0n1`), ce
-qui est bien ce qu'on veut. Si la racine est sur un empilement que `PKNAME` ne
-résout pas, `host_root_pci_address()` rend `None`, et
-`select_passthrough_nvme` lève alors sur l'ambiguïté — **échec bruyant, pas
-supposition**.
+⚠️ **`host_root_pci_addresses()` rend un `set`, pas une seule adresse, et
+`passthrough_nvme()` lève au lieu de deviner quand la racine ne peut pas être
+tracée.** Une racine LVM peut être adossée à plusieurs disques physiques
+(striping/mirroring) : une seule adresse ne suffit pas à décrire ça sans
+mentir. Et si la racine ne peut pas être tracée du tout — LVM non résolu,
+`findmnt` muet, périphérique `dm-*` sans PCI address — la fonction rend
+`None`, et **`passthrough_nvme()` lève `HardwareError` immédiatement plutôt
+que d'appeler `select_passthrough_nvme` avec un ensemble vide.** Un ensemble
+vide n'exclurait aucun contrôleur candidat ; sur une machine à un seul NVMe,
+cela choisirait silencieusement ce disque — potentiellement celui de l'hôte —
+pour le passthrough. **Échec bruyant, jamais de supposition.**
 
 - [ ] **Étape 4 : lancer le test pour vérifier qu'il passe**
 
@@ -396,8 +466,8 @@ Expected: `OK - hardware detection checks passed`
 
 - [ ] **Étape 5 : vérifier sur la machine réelle**
 
-Run: `python3 -c "import sys; sys.path.insert(0,'installer'); from common import hardware; print(hardware.host_root_pci_address()); print(hardware.passthrough_nvme())"`
-Expected: `0000:02:00.0` puis le contrôleur `0000:03:00.0` (`144d:a808`).
+Run: `python3 -c "import sys; sys.path.insert(0,'installer'); from common import hardware; print(hardware.host_root_pci_addresses()); print(hardware.passthrough_nvme())"`
+Expected: `{'0000:02:00.0'}` puis le contrôleur `0000:03:00.0` (`144d:a808`).
 
 🔴 Si la sortie désigne `0000:02:00.0`, **arrêter le plan et signaler** : c'est
 le disque de l'hôte.
@@ -941,8 +1011,35 @@ def _virsh(*args: str) -> subprocess.CompletedProcess:
                           env={**os.environ, "LC_ALL": "C"})
 
 
+def domain_in_listing(output: str, name: str) -> bool:
+    """Check if a domain name exists in virsh list output.
+
+    virsh list --all --name emits one name per line, possibly with blank
+    lines. Match exactly: a domain named "Windows-LTSC-test" must not
+    satisfy a query for "Windows".
+    """
+    lines = {line.strip() for line in output.split("\n") if line.strip()}
+    return name in lines
+
+
 def domain_exists(name: str = DOMAIN_NAME) -> bool:
-    return _virsh("dominfo", name).returncode == 0
+    """Check if a domain exists, or raise DomainError if we cannot determine it.
+
+    `virsh dominfo` returns nonzero identically for "absent", "unreachable",
+    and "permission denied" — an ambiguity this function must not have, since
+    the caller uses it to decide whether it is safe to define over an
+    existing domain. `virsh list --all --name` instead returns 0 if and only
+    if libvirt actually answered, which lets us distinguish "doesn't exist"
+    from "cannot be determined": the latter must raise, not silently read as
+    absent, or a define could run against a domain we simply failed to see.
+    """
+    proc = _virsh("list", "--all", "--name")
+    if proc.returncode != 0:
+        raise DomainError(
+            f"could not determine if domain exists (libvirt unreachable?); "
+            f"refusing to proceed: {proc.stderr.strip()}"
+        )
+    return domain_in_listing(proc.stdout, name)
 
 
 def build_domain_xml() -> str:
@@ -1135,6 +1232,11 @@ Créer `docs/superpowers/plans/recette-s4.md` :
 ````markdown
 # Recette S4 — hibernation sous Secure Boot (sous-projet C)
 
+> ⚠️ **Cette recette n'a jamais été exécutée.** Rien ci-dessous n'a été
+> vérifié ; les cases du tableau « Critères » ne sont pas cochées parce que
+> personne ne les a encore mesurées, pas parce qu'elles ont échoué. Ne pas
+> lire l'absence d'exécution comme une réussite tacite.
+
 **Ce qu'on cherche à savoir** : un invité Windows 11 démarré en Secure Boot
 avec vTPM et GPU passé sait-il hiberner et reprendre, session intacte ?
 
@@ -1153,6 +1255,29 @@ for i in $(seq 1 60); do
   [ "$(LC_ALL=C virsh domstate Windows)" = "shut off" ] && break
   sleep 1
 done
+```
+
+```bash
+# 0a. Neutraliser les automatismes systemd pour toute la durée de la recette.
+# vm-idle-shutdown.timer tourne toutes les dix minutes et, tant que Windows
+# est éteint (ce que l'étape 0 garantit pour toute la recette), son script
+# RELANCE nivuus-ollama (le conteneur GPU qu'on vient d'arrêter à l'étape 1)
+# et RÉARME les sockets de réveil vm-trigger-47984/47989 : une simple sonde
+# Moonlight sur 47989 démarrerait alors le domaine Windows de PRODUCTION en
+# pleine recette, entrant en concurrence avec le domaine de test pour le GPU.
+#
+# systemctl NE FONCTIONNE PAS depuis une session automatisée sur cet hôte
+# (voir CLAUDE.md, "Host Shell Gotchas" — la session tourne dans son propre
+# PID namespace, systemd authentifie par SO_PEERCRED). Piloter systemd via
+# le bus D-Bus système à la place. Un humain sur une vraie console peut
+# utiliser `systemctl mask --now vm-idle-shutdown.timer vm-trigger-47984.socket
+# vm-trigger-47989.socket` directement.
+M="--system --print-reply --dest=org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager"
+dbus-send $M.StopUnit string:"vm-idle-shutdown.timer" string:"replace"
+dbus-send $M.StopUnit string:"vm-trigger-47984.socket" string:"replace"
+dbus-send $M.StopUnit string:"vm-trigger-47989.socket" string:"replace"
+dbus-send $M.MaskUnitFiles array:string:"vm-idle-shutdown.timer","vm-trigger-47984.socket","vm-trigger-47989.socket" boolean:false boolean:true
+dbus-send $M.Reload
 ```
 
 ```bash
@@ -1205,8 +1330,9 @@ rien :
 
 ```bash
 virsh dumpxml Windows-LTSC-test > /tmp/s4-test.xml
-# insérer avant </domain> :
-#   <pm><suspend-to-mem enabled='no'/><suspend-to-disk enabled='yes'/></pm>
+sed -i "s#</domain>#  <pm><suspend-to-mem enabled='no'/><suspend-to-disk enabled='yes'/></pm>\n</domain>#" /tmp/s4-test.xml
+# Equivalent interactively: virsh edit Windows-LTSC-test, then add the same
+# <pm> block by hand just before </domain>.
 virsh destroy Windows-LTSC-test
 virsh define /tmp/s4-test.xml
 virsh start Windows-LTSC-test
@@ -1235,7 +1361,9 @@ python3 installer/windows-guest/winrm_exec.py cmd "shutdown /h /f"
 
 # 3. Constater l'arrêt (l'appel WinRM expire pendant l'endormissement :
 #    son code de retour ne veut rien dire, c'est domstate qui compte)
-for i in $(seq 1 30); do
+# 12 x 5s = 60s, pour rester cohérent avec le critère "moins de 60 s" du
+# tableau ci-dessous.
+for i in $(seq 1 12); do
   [ "$(LC_ALL=C virsh domstate Windows-LTSC-test)" = "shut off" ] && break
   sleep 5
 done
@@ -1243,6 +1371,16 @@ LC_ALL=C virsh domstate Windows-LTSC-test
 
 # 4. Reprendre
 virsh start Windows-LTSC-test
+
+# 5. Mesurer chaque critère du tableau ci-dessous, dans l'ordre. Ce sont ces
+#    invocations qui décident le verdict — sans elles, il n'y a que le
+#    domstate de l'étape 3, qui ne couvre aucun des critères Secure
+#    Boot/vTPM/GPU/session.
+python3 installer/windows-guest/winrm_exec.py ps "Get-Process notepad -ErrorAction SilentlyContinue"
+python3 installer/windows-guest/winrm_exec.py ps "Get-Content C:\\temoin-s4.txt"
+python3 installer/windows-guest/winrm_exec.py cmd "nvidia-smi"
+python3 installer/windows-guest/winrm_exec.py ps "Confirm-SecureBootUEFI"
+python3 installer/windows-guest/winrm_exec.py ps "Get-Tpm"
 ```
 
 ## Critères
@@ -1260,6 +1398,36 @@ firmware est le premier suspect — vérifier que `<loader>` et `<nvram>` sont
 explicites. Les descripteurs OVMF de Debian ne déclarent que `acpi-s3`, et
 libvirt refuse alors S4 alors qu'OVMF le gère.
 
+## Ce que cette recette prouve, et ce qu'elle ne prouve pas
+
+Elle patche un bloc `<pm>` sur le domaine jetable de A (`testdomain.py`),
+elle n'exerce pas la sortie de `domain.py` (sous-projet C). C'est une bonne
+mesure de la **physique** de S4 sous Secure Boot — la question que la spec
+de A avait laissée ouverte — mais pas un test de bout en bout du domaine de
+production.
+
+**Couvert** : l'hibernation S4 fonctionne (ou pas) avec Secure Boot actif et
+un vTPM émulé présents en même temps, sur le GPU réel passé en hostdev —
+c'est-à-dire exactement la combinaison que la spec de A prétendait avoir
+vérifiée et ne l'avait pas.
+
+**Pas couvert, dette qui reste due** :
+- **Le NVMe passé en hostdev.** Le domaine jetable de A démarre depuis un
+  qcow2 sur `/media/data`, jamais depuis le Samsung NVMe passé par
+  `hardware.passthrough_nvme()` — ce disque reste délibérément avec la
+  production. S4 depuis un disque `<hostdev>` réel n'est donc jamais exercé
+  ici.
+- **`cputune` / `vm-cpu-partition.sh status`.** Le domaine de test n'a ni
+  `vcpupin` ni `emulatorpin` (A ne les génère pas) : l'étape `status` du
+  script de partitionnement CPU que la spec mentionne est inapplicable ici,
+  faute de `cputune` à lire.
+- **virtio-net.** Le domaine de test utilise `e1000e` (le média LTSC n'a pas
+  le pilote virtio en boîte) ; la production utilise `virtio-net`. Le
+  chemin réseau n'est donc pas identique.
+- **Le rendu réel de `domain.py`.** Cette recette ne définit jamais le XML
+  que `domain.py xml` produirait ; elle ne peut donc pas détecter une
+  régression dans son gabarit.
+
 ## Démontage
 
 ```bash
@@ -1271,6 +1439,17 @@ dbus-send $M.StartUnit string:"nvidia-persistenced.service" string:"replace"
 nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml
 docker start nivuus-ollama mediamanager-tdarr-1 \
              mediamanager-tdarr-node-1 mediamanager-tdarr-node-nvenc-1
+
+# Réarmer les automatismes désactivés en préparation (étape 0a). Sans ça,
+# le réveil à la demande et l'hibernation auto restent cassés en permanence,
+# pas seulement pendant la recette. Un humain sur une vraie console peut
+# utiliser `systemctl unmask --now vm-idle-shutdown.timer
+# vm-trigger-47984.socket vm-trigger-47989.socket` à la place.
+dbus-send $M.UnmaskUnitFiles array:string:"vm-idle-shutdown.timer","vm-trigger-47984.socket","vm-trigger-47989.socket" boolean:false
+dbus-send $M.Reload
+dbus-send $M.StartUnit string:"vm-idle-shutdown.timer" string:"replace"
+dbus-send $M.StartUnit string:"vm-trigger-47984.socket" string:"replace"
+dbus-send $M.StartUnit string:"vm-trigger-47989.socket" string:"replace"
 ```
 
 ⚠️ La régénération CDI n'est pas facultative : `nvidia_uvm` reçoit un majeur
