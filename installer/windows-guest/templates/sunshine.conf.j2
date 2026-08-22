@@ -1,0 +1,25 @@
+# Nivuus appliance - generated, do not edit in place.
+# Every key here was verified present in Apollo 0.4.6 (2026-08-22).
+
+# Deactivate every other display and stream the virtual one alone. Measured:
+# paths=1, enabled=1, bpc=10 on the SudoVDA target. With ensure_primary the
+# dummy plug stayed primary at (0,0) and fullscreen games opened on IT while
+# Apollo captured the virtual display - the 2026-07-23 "only the desktop
+# streams" bug.
+dd_configuration_option = ensure_only_display
+
+# The isolated option pushes the virtual display into a corner and KEEPS the
+# physical ones active. Wrong for a headless box.
+isolated_virtual_display_option = disabled
+
+# Follow the client's request. On Server 2022 this was decorative - the
+# Advanced Color API failed in both directions. On build 26100 it is real.
+dd_hdr_option = auto
+
+# No output_name: the HDMI dummy plug is physically removed, and pinning a
+# display that does not exist would strand every session.
+
+# Apollo restores the display layout this long after a client disconnects.
+dd_config_revert_delay = 3000
+
+min_log_level = info

@@ -1,0 +1,32 @@
+{
+  "env": {},
+  "apps": [
+    {
+      "name": "Desktop",
+      "image-path": "desktop.png",
+      "virtual-display": true,
+      "prep-cmd": [
+        {
+          "do": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\nivuus\\apollo\\maximize-steam.ps1",
+          "undo": "",
+          "elevated": false
+        }
+      ],
+      "detached": ["{{ steam_exe }}"],
+      "allow-client-commands": false
+    },
+    {
+      "name": "Steam Big Picture",
+      "image-path": "steam.png",
+      "virtual-display": true,
+      "prep-cmd": [
+        {
+          "do": "",
+          "undo": "steam://close/bigpicture",
+          "elevated": false
+        }
+      ],
+      "detached": ["steam://open/bigpicture"]
+    }
+  ]
+}
