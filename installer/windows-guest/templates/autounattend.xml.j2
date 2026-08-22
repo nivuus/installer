@@ -18,6 +18,7 @@
         <WillShowUI>OnError</WillShowUI>
         <Disk wcm:action="add">
           <DiskID>0</DiskID>
+{%- if disk_mode == "wipe" %}
           <WillWipeDisk>true</WillWipeDisk>
           <CreatePartitions>
             <CreatePartition wcm:action="add">
@@ -27,7 +28,11 @@
               <Order>2</Order><Type>MSR</Type><Size>16</Size>
             </CreatePartition>
             <CreatePartition wcm:action="add">
-              <Order>3</Order><Type>Primary</Type><Extend>true</Extend>
+              <Order>3</Order><Type>Primary</Type>
+              <Size>{{ system_partition_mb }}</Size>
+            </CreatePartition>
+            <CreatePartition wcm:action="add">
+              <Order>4</Order><Type>Primary</Type><Extend>true</Extend>
             </CreatePartition>
           </CreatePartitions>
           <ModifyPartitions>
@@ -42,7 +47,25 @@
               <Order>3</Order><PartitionID>3</PartitionID>
               <Label>Windows</Label><Letter>C</Letter><Format>NTFS</Format>
             </ModifyPartition>
+            <!-- The letter is claimed here on purpose: leave it to Windows and
+                 the optical drive takes D:, which would send Steam to C:. -->
+            <ModifyPartition wcm:action="add">
+              <Order>4</Order><PartitionID>4</PartitionID>
+              <Label>Data</Label><Letter>D</Letter><Format>NTFS</Format>
+            </ModifyPartition>
           </ModifyPartitions>
+{%- else %}
+          <!-- Rebuild: reformat the system partition and NOTHING else. The
+               games partition keeps Steam, its session and Apollo's pairings.
+               Valid only against a disk this tool partitioned in wipe mode -
+               20-disk.ps1 refuses to continue without D:\state\NIVUUS-DATA.id. -->
+          <ModifyPartitions>
+            <ModifyPartition wcm:action="add">
+              <Order>1</Order><PartitionID>3</PartitionID>
+              <Label>Windows</Label><Letter>C</Letter><Format>NTFS</Format>
+            </ModifyPartition>
+          </ModifyPartitions>
+{%- endif %}
         </Disk>
       </DiskConfiguration>
       <ImageInstall>

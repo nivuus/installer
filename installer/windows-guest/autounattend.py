@@ -27,6 +27,13 @@ ADMIN_ACCOUNT = "Administrator"
 PAYLOAD_MARKER = r"\nivuus\PAYLOAD.id"
 DRIVE_LETTERS = "C D E F G H I J K L M N O P Q R S T U V W X Y Z"
 
+DISK_MODES = ("wipe", "rebuild")
+# 200 GiB for Windows, Apollo and the agent; everything else is D:. Below
+# 60 GiB an LTSC install plus its page/hibernation files leaves no room to
+# service itself, so a typo there is refused rather than discovered later.
+DEFAULT_SYSTEM_PARTITION_MB = 204800
+MIN_SYSTEM_PARTITION_MB = 61440
+
 
 class UnattendError(ValueError):
     """Raised when answer-file parameters cannot produce a valid install."""
@@ -45,6 +52,12 @@ class UnattendParams:
     # The NVIDIA driver reboots, so provisioning must survive at least two
     # extra logons before the automatic logon is turned off again.
     autologon_count: int = 5
+    # "wipe" partitions the whole disk; "rebuild" reformats C: and leaves the
+    # games partition alone. See the plan header: rebuild against a disk this
+    # tool did not partition would reformat an arbitrary partition, which is
+    # why 20-disk.ps1 checks D:\state\NIVUUS-DATA.id before anything writes.
+    disk_mode: str = "wipe"
+    system_partition_mb: int = DEFAULT_SYSTEM_PARTITION_MB
 
 
 def validate(params: UnattendParams) -> None:
@@ -63,6 +76,15 @@ def validate(params: UnattendParams) -> None:
         raise UnattendError("image name must not be empty")
     if params.autologon_count < 3:
         raise UnattendError("autologon count must be >= 3: provisioning reboots")
+    if params.disk_mode not in DISK_MODES:
+        raise UnattendError(
+            f"disk_mode must be one of {DISK_MODES}, got {params.disk_mode!r}"
+        )
+    if params.system_partition_mb < MIN_SYSTEM_PARTITION_MB:
+        raise UnattendError(
+            f"system partition must be at least {MIN_SYSTEM_PARTITION_MB} MB, "
+            f"got {params.system_partition_mb}"
+        )
 
 
 def render(params: UnattendParams, templates_dir: str = TEMPLATES_DIR) -> str:
@@ -84,4 +106,6 @@ def render(params: UnattendParams, templates_dir: str = TEMPLATES_DIR) -> str:
         autologon_count=params.autologon_count,
         drive_letters=DRIVE_LETTERS,
         payload_marker=PAYLOAD_MARKER,
+        disk_mode=params.disk_mode,
+        system_partition_mb=params.system_partition_mb,
     )

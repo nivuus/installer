@@ -25,6 +25,17 @@ def check(label, got, want):
         failures.append(f"{label}: got {got!r}, want {want!r}")
 
 
+def check_raises(label, exc_type, fn):
+    try:
+        fn()
+    except exc_type:
+        return
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"{label}: raised {type(exc).__name__}, want {exc_type.__name__}")
+        return
+    failures.append(f"{label}: did not raise {exc_type.__name__}")
+
+
 def rejects(label, **overrides):
     params = ua.UnattendParams(**{**GOOD, **overrides})
     try:
@@ -113,6 +124,46 @@ check("keyboard is French", "<InputLocale>fr-FR</InputLocale>" in xml_text, True
 amp = ua.render(ua.UnattendParams(**{**GOOD, "admin_password": "a&b<c>"}))
 ET.fromstring(amp)
 check("password is XML-escaped", "a&amp;b&lt;c&gt;" in amp, True)
+
+# --- Sous-projet B : deux partitions, et un mode qui ne détruit pas D:.
+base = dict(product_key="AAAAA-BBBBB-CCCCC-DDDDD-EEEEE",
+            admin_password="s3cret", image_name="Windows 11 IoT Enterprise LTSC")
+
+wipe = ua.render(ua.UnattendParams(**base))
+check("wipe mode wipes the disk", "<WillWipeDisk>true</WillWipeDisk>" in wipe, True)
+check("wipe mode creates four partitions", wipe.count("<CreatePartition "), 4)
+check("wipe mode sizes C at 200 GiB", "<Size>204800</Size>" in wipe, True)
+check("wipe mode extends the last partition", wipe.count("<Extend>true</Extend>"), 1)
+check("wipe mode letters C", "<Letter>C</Letter>" in wipe, True)
+# The optical drive takes D: unless the answer file claims it first.
+check("wipe mode letters D", "<Letter>D</Letter>" in wipe, True)
+check("wipe mode installs to partition 3",
+      "<InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>" in wipe,
+      True)
+
+rebuild = ua.render(
+    ua.UnattendParams(**base, disk_mode="rebuild"))
+check("rebuild never wipes the disk", "WillWipeDisk" in rebuild, False)
+check("rebuild creates no partition", "<CreatePartition " in rebuild, False)
+check("rebuild formats exactly one partition", rebuild.count("<ModifyPartition "), 1)
+check("rebuild formats partition 3", "<PartitionID>3</PartitionID>" in rebuild, True)
+# Partition 4 is D:. Naming it at all in rebuild mode would be a bug.
+check("rebuild never names partition 4", "<PartitionID>4</PartitionID>" in rebuild,
+      False)
+check("rebuild installs to partition 3",
+      "<InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>" in rebuild,
+      True)
+
+check_raises("unknown disk mode is refused", ua.UnattendError,
+             lambda: ua.render(
+                 ua.UnattendParams(**base, disk_mode="format-everything")))
+check_raises("an absurdly small C is refused", ua.UnattendError,
+             lambda: ua.render(
+                 ua.UnattendParams(**base, system_partition_mb=1024)))
+
+# The guest must stay logged on forever: Apollo captures an interactive desktop
+# and the agent must live in session 1.
+check("autologon is enabled", "<Enabled>true</Enabled>" in wipe, True)
 
 if failures:
     print(f"FAIL ({len(failures)})")
