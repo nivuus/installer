@@ -13,7 +13,7 @@ TARGET_IMG    ?= /tmp/nivuus-target.img
 TARGET_SIZE   ?= 16G
 OVMF          ?= /usr/share/OVMF/OVMF_CODE.fd
 
-.PHONY: build-iso test-engine test-portal test-vm clean help
+.PHONY: build-iso test-engine test-portal test-vm windows-unattend clean help
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*' $(MAKEFILE_LIST) | sed 's/:.*//' | sort
@@ -49,6 +49,16 @@ test-vm:
 	  -drive file=$(TARGET_IMG),format=raw,if=virtio \
 	  -netdev user,id=n0,hostfwd=tcp::8080-:80 \
 	  -device virtio-net,netdev=n0
+
+# Build the secondary ISO that unattends the Windows guest install (root:
+# inspecting the LTSC medium needs a loop mount).
+# Usage: sudo make windows-unattend WINDOWS_ISO=/path/ltsc.iso DRIVERS_DIR=/path/payload
+windows-unattend:
+	@test -n "$(WINDOWS_ISO)" || { echo "Set WINDOWS_ISO=/path/to/ltsc.iso"; exit 1; }
+	@test -n "$(DRIVERS_DIR)" || { echo "Set DRIVERS_DIR=/path/to/payload"; exit 1; }
+	python3 $(INSTALLER_DIR)/windows-guest/build.py \
+	  --windows-iso $(WINDOWS_ISO) --drivers-dir $(DRIVERS_DIR) \
+	  $(if $(OUTPUT),--output $(OUTPUT),)
 
 clean:
 	-cd $(ISO_DIR) && sudo lb clean --purge
