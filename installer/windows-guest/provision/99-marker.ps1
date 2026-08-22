@@ -71,6 +71,44 @@ $agentTask = Get-ScheduledTask -TaskName $AgentTaskName -ErrorAction SilentlyCon
 if (-not $agentTask) { throw "scheduled task $AgentTaskName is not registered" }
 if ($agentTask.State -eq 'Disabled') { throw "scheduled task $AgentTaskName is disabled" }
 
+# --- Rebuild invariants. Everything above proves the guest works RIGHT NOW;
+# these prove it will still be Apollo's paired guest after the next C:
+# rebuild - the entire reason D: and the junction exist. A junction that
+# quietly reverted to a plain directory (antivirus, a backup tool, a future
+# Apollo update recreating it) would still pass every check above, certify
+# this guest as ready, and only show up as lost pairings at the next rebuild.
+$apolloRootFile = Join-Path $StateDir 'apollo.root'
+if (-not (Test-Path $apolloRootFile)) { throw 'apollo.root is missing: cannot verify the Apollo config junction' }
+$apolloRoot = (Get-Content $apolloRootFile -Raw).Trim()
+$apolloConfig = Join-Path $apolloRoot 'config'
+$configItem = Get-Item -Path $apolloConfig -ErrorAction SilentlyContinue
+if (-not $configItem -or -not ($configItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    throw "$apolloConfig is not a junction: Apollo would write its pairings onto C:, lost on the next rebuild"
+}
+# Normalize like 25-apollo.ps1: on PowerShell 5.1, .Target can come back as
+# the raw NT substitute name (\??\D:\state\apollo) instead of the plain path.
+$junctionTarget = ($configItem.Target | Select-Object -First 1)
+if ($junctionTarget) { $junctionTarget = ($junctionTarget -replace '^\\\?\?\\', '').TrimEnd('\') }
+$expectedApolloState = 'D:\state\apollo'
+if ($junctionTarget -ne $expectedApolloState) {
+    throw "config junction points at '$junctionTarget', not '$expectedApolloState': pairings would not survive a rebuild"
+}
+if (-not (Test-Path (Join-Path $expectedApolloState 'sunshine.conf'))) {
+    throw "$expectedApolloState\sunshine.conf is missing"
+}
+if (-not (Test-Path (Join-Path $expectedApolloState 'apps.json'))) {
+    throw "$expectedApolloState\apps.json is missing"
+}
+
+# Hibernation is the host's entire energy strategy for this guest
+# (vm-idle-shutdown.timer hibernates it after 10 minutes of inactivity).
+# 50-power.ps1 only warns when hiberfil.sys is absent, because at that point
+# there could still be a legitimate reason it has not appeared yet; by this
+# closing stage there is none left, so make it fatal here instead.
+if (-not (Test-Path 'C:\hiberfil.sys')) {
+    throw 'hiberfil.sys is absent: hibernation is unavailable, and the host would silently never be able to sleep this guest'
+}
+
 Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' `
                     -Name 'NivuusProvision' -ErrorAction SilentlyContinue
 
