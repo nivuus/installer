@@ -62,6 +62,9 @@
   </clock>
   <on_poweroff>destroy</on_poweroff>
   <on_reboot>restart</on_reboot>
+  <!-- destroy, not the libvirt default coredump-destroy: a 16 GiB guest RAM
+       core dump onto a host / already alarmed at 85% disk usage is worse
+       than losing the crash diagnostics. -->
   <on_crash>destroy</on_crash>
   <pm>
     <suspend-to-mem enabled='no'/>
@@ -86,6 +89,7 @@
     </interface>
     <input type='mouse' bus='ps2'/>
     <input type='keyboard' bus='ps2'/>
+    <input type='tablet' bus='usb'/>
     <audio id='1' type='none'/>
     <graphics type='vnc' port='-1' listen='127.0.0.1'/>
     <video>

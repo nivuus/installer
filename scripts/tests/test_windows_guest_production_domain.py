@@ -170,6 +170,18 @@ check_raises(
 check("define proceeds when replacing", domain.guard_replace(exists=True, replace=True), None)
 check("define proceeds when absent", domain.guard_replace(exists=False, replace=False), None)
 
+# `define` must also refuse when the target varstore file already exists:
+# libvirt only populates <nvram> from its Secure Boot template on first
+# creation, so reusing an existing (pre-Secure-Boot) varstore would silently
+# boot the guest with Secure Boot disabled.
+check_raises(
+    "define refuses an existing varstore",
+    domain.DomainError,
+    lambda: domain.guard_fresh_varstore(exists=True),
+)
+check("define proceeds when varstore is absent",
+      domain.guard_fresh_varstore(exists=False), None)
+
 # vm-cpu-partition.sh derives the HOST cpuset from cputune, reading the domain
 # XML libvirt feeds it on stdin. It parses cputune/{vcpupin,emulatorpin,
 # iothreadpin}@cpuset with ElementTree. Replicate that parse here: if the

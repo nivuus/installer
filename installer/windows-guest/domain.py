@@ -17,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from jinja2 import Environment, FileSystemLoader
 
 HERE = Path(__file__).resolve().parent
 TEMPLATES_DIR = HERE / "templates"
@@ -31,6 +31,9 @@ BRIDGE = "internalBridge"
 NVRAM_PATH = "/var/lib/libvirt/qemu/nvram/Windows_VARS.fd"
 VIRTIOFS_SOURCE = "/media/data"
 VIRTIOFS_TAG = "Data"
+# NOT detected: hardcoded to 16 GiB (16777216 KiB), matching the static
+# `vm.nr_hugepages = 8448` pool in /etc/sysctl.d/50-virsh.conf on this host.
+# Hugepage sizing is deferred -- see the spec's detection table.
 MEMORY_KIB = 16777216
 
 
@@ -92,7 +95,7 @@ def domain_xml(*, gpu_functions: list[dict], nvme: dict, plan: dict,
         raise DomainError("no GPU function to pass through")
     env = Environment(
         loader=FileSystemLoader(str(TEMPLATES_DIR)),
-        autoescape=select_autoescape(["xml"]),
+        autoescape=True,
         keep_trailing_newline=True,
     )
     return env.get_template("domain.xml.j2").render(
@@ -111,6 +114,30 @@ def guard_replace(*, exists: bool, replace: bool) -> None:
     if exists and not replace:
         raise DomainError(
             f"domain {DOMAIN_NAME!r} already exists; pass --replace to redefine it"
+        )
+
+
+def guard_fresh_varstore(*, exists: bool, path: str = NVRAM_PATH) -> None:
+    """Refuse to define when the target varstore file already exists.
+
+    libvirt only copies its <nvram template=...> into the target file the
+    first time that file is created; if it already exists, libvirt reuses it
+    verbatim. On this host the target is the production varstore, which was
+    created long before Secure Boot templates existed and carries no
+    Microsoft keys (verified: `grep -c Microsoft` returns 0 on it, 6 on the
+    template). Pairing that varstore with the secure-boot loader would boot
+    the guest in Setup Mode with Secure Boot effectively disabled -
+    `Confirm-SecureBootUEFI` returns False - and nothing in the chain errors.
+    The fix is operator action, not code: `virsh undefine Windows --nvram`
+    (already the first step of the cutover spec) deletes the stale varstore
+    so the next define lets libvirt populate a fresh, keyed one.
+    """
+    if exists:
+        raise DomainError(
+            f"varstore {path!r} already exists; libvirt will NOT repopulate "
+            "it from the Secure Boot template, so the guest would silently "
+            "boot with Secure Boot disabled. Run `virsh undefine Windows "
+            "--nvram` first, then retry."
         )
 
 
@@ -148,8 +175,14 @@ def domain_exists(name: str = DOMAIN_NAME) -> bool:
     return domain_in_listing(proc.stdout, name)
 
 
-def build_domain_xml() -> str:
-    """Detect this machine's hardware and render its domain."""
+def build_domain_xml(*, announce: bool = False) -> str:
+    """Detect this machine's hardware and render its domain.
+
+    `announce`, when set, prints the selected passthrough NVMe controller's
+    description and PCI address to stderr before rendering. That selection
+    wipes a disk; on `define` it must be a decision the operator can read,
+    not one baked silently into the XML.
+    """
     sys.path.insert(0, str(HERE.parent))
     from common import hardware  # noqa: PLC0415
 
@@ -160,9 +193,17 @@ def build_domain_xml() -> str:
         )
     topology = hardware.cpu_topology()
     pool = topology["performance_cpus"] or list(range(1, topology["total_cpus"]))
+    nvme = hardware.passthrough_nvme()
+    if announce:
+        print(
+            f"selected passthrough NVMe: {nvme['description']} "
+            f"({nvme['address']}) -- this disk will be WIPED by the Windows "
+            "installer",
+            file=sys.stderr,
+        )
     return domain_xml(
         gpu_functions=hardware.pci_slot_functions(gpus[0]["slot"]),
-        nvme=hardware.passthrough_nvme(),
+        nvme=nvme,
         plan=vcpu_plan(pool),
     )
 
@@ -171,7 +212,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Production Windows guest domain")
     parser.add_argument("action", choices=["xml", "define"])
     parser.add_argument("--replace", action="store_true",
-                        help="redefine the domain even if it already exists")
+                        help="redefine the domain even if it already exists "
+                             "-- the next boot of a hibernated Windows then "
+                             "resumes into changed hardware and discards the "
+                             "saved session")
     args = parser.parse_args()
 
     # Imported here, not at module scope: the tests put only
@@ -181,11 +225,12 @@ def main() -> int:
     from common.hardware import HardwareError  # noqa: PLC0415
 
     try:
-        xml_text = build_domain_xml()
+        xml_text = build_domain_xml(announce=(args.action == "define"))
         if args.action == "xml":
             print(xml_text)
             return 0
         guard_replace(exists=domain_exists(), replace=args.replace)
+        guard_fresh_varstore(exists=Path(NVRAM_PATH).exists())
         path = Path("/run") / "nivuus-windows-domain.xml"
         # Write with mode 0600 to avoid leaving host topology world-readable
         path.write_text(xml_text)
