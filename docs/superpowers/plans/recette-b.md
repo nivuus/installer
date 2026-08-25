@@ -233,11 +233,27 @@ virsh start Windows-LTSC-test
 Le média Windows attend une frappe (« Press any key to boot from CD »). Sans
 elle : `No bootable option or device was found`.
 
+🔴 **NE PAS marteler ENTER quarante fois.** L'invite « Press any key to boot
+from CD » ne dure que quelques secondes ; passé ce délai, l'écran « Installing
+Windows » affiche un bouton **Cancel qui a le focus clavier**, et chaque ENTER
+supplémentaire l'active. Piège payé le 2026-08-25 : une boîte « Are you sure you
+want to quit? » a gelé une reconstruction à 8 %, et il a fallu la refermer à la
+main. `ESC` ne la ferme pas — seul le raccourci souligné du bouton fonctionne
+(`virsh send-key … KEY_N`).
+
+Envoyer les frappes seulement pendant la fenêtre d'amorçage, puis s'arrêter :
+
 ```bash
-for i in $(seq 1 40); do
+for i in $(seq 1 12); do
   virsh send-key Windows-LTSC-test --codeset linux KEY_ENTER >/dev/null 2>&1
   sleep 1
 done
+```
+
+Vérifier ensuite que l'installation a bien démarré avant de la laisser tourner :
+
+```bash
+virsh screenshot Windows-LTSC-test --file /tmp/boot.ppm
 ```
 
 ### Étape 2 — attendre le MARQUEUR, pas le port
