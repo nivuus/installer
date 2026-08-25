@@ -87,3 +87,42 @@ try {
 catch {
     Write-Host "viofs install skipped (optional): $($_.Exception.Message)"
 }
+
+# UDP Segmentation Offload : LE DESARMER, sinon le streaming ne marche pas du
+# tout — et il echoue d'une facon qui n'accuse jamais le reseau.
+#
+# NetKVM emet alors des super-datagrammes UDP (mesures : 5660 et 7068 octets),
+# a charge pour l'hote de les segmenter. Leur en-tete UDP annonce une longueur
+# incoherente ; le conntrack de l'hote les classe « invalid », et la chaine
+# FORWARD de firewalld porte un « ct state invalid drop » dont la regle de
+# journalisation ne couvre QUE les paquets destines a l'hote lui-meme. Les
+# paquets forwardes disparaissent donc sans laisser la moindre trace.
+#
+# Le canal de controle, lui, passe : ses paquets font 20 octets et ne
+# declenchent aucun offload. On obtient donc un hote qui croit streamer (Apollo
+# journalise un encodeur NVENC AV1 10 bits parfaitement cree), un client qui
+# n'affiche jamais rien, et zero ligne d'erreur des deux cotes. Mesure du
+# 2026-08-25 : cote invite 114 paquets video emis par flux, cote LAN 0 recus,
+# compteur conntrack « invalid » +126.
+#
+# Le cout est negligeable — un peu de CPU invite pour segmenter — face a un
+# streaming qui, autrement, ne fonctionne simplement pas.
+foreach ($family in 'IPv4', 'IPv6') {
+    $name = "UDP Segmentation Offload ($family)"
+    try {
+        Set-NetAdapterAdvancedProperty -Name '*' -DisplayName $name `
+                                       -DisplayValue 'Disabled' -NoRestart -ErrorAction Stop
+    }
+    catch {
+        # Une carte qui n'expose pas la propriete n'a pas l'offload : rien a
+        # desarmer, et rien qui justifie d'interrompre le provisionnement.
+        Write-Host "$name not exposed by the adapter, nothing to disable"
+        continue
+    }
+    $now = Get-NetAdapterAdvancedProperty -Name '*' -DisplayName $name -ErrorAction SilentlyContinue
+    if ($now -and $now.DisplayValue -ne 'Disabled') {
+        throw "$name is still '$($now.DisplayValue)' after being disabled"
+    }
+    Write-Host "$name disabled"
+}
+Restart-NetAdapter -Name '*' -ErrorAction SilentlyContinue

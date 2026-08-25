@@ -300,6 +300,15 @@ check("le lanceur interroge la table des processus, pas -Wait",
       "Get-Process" in _shell and
       not any("-Wait" in ln for ln in _shell_code), True)
 
+# USO laisse NetKVM emettre des super-datagrammes UDP que le conntrack de
+# l'hote classe « invalid » et que firewalld jette sans journaliser : Apollo
+# croit streamer, le client ne recoit rien, et aucun des deux ne le dit.
+_virtio = (PROVISION / "15-virtio.ps1").read_text(encoding="utf-8")
+check("15-virtio.ps1 desarme UDP Segmentation Offload",
+      "UDP Segmentation Offload" in _virtio, True)
+check("15-virtio.ps1 relit la valeur au lieu de croire l ecriture",
+      "is still" in _virtio, True)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
