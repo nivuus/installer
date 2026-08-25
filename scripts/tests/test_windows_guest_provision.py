@@ -31,6 +31,19 @@ for name in STAGES + ["run-all.ps1"]:
 for name in ["AdvancedColor.cs", "advanced-color.ps1"]:
     check(f"{name} exists", (PROBE / name).is_file(), True)
 
+# hiberfil.sys carries Hidden + System, and PowerShell's FileSystem provider
+# filters those out: Test-Path returns $false on a 6.8 GB file that is plainly
+# there, and it has no -Force to override that. Measured on the guest on
+# 2026-08-25 - it made 99-marker.ps1 refuse an appliance that hibernates
+# perfectly, an hour into provisioning. [System.IO.File]::Exists sees it.
+for stage in ("50-power.ps1", "99-marker.ps1"):
+    body = (PROVISION / stage).read_text(encoding="utf-8")
+    hiberfil_lines = [ln for ln in body.splitlines()
+                      if "hiberfil.sys" in ln and not ln.lstrip().startswith("#")]
+    check(f"{stage} tests hiberfil.sys at all", bool(hiberfil_lines), True)
+    check(f"{stage} never uses Test-Path on hiberfil.sys (Hidden+System)",
+          any("Test-Path" in ln for ln in hiberfil_lines), False)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
@@ -235,6 +248,19 @@ for name in STAGES:
 disk_stages = sorted(p.name for p in PROVISION.glob("*.ps1") if p.name != "run-all.ps1")
 check("every provision stage on disk is listed in STAGES",
       all(name in STAGES for name in disk_stages), True)
+
+# hiberfil.sys carries Hidden + System, and PowerShell's FileSystem provider
+# filters those out: Test-Path returns $false on a 6.8 GB file that is plainly
+# there, and it has no -Force to override that. Measured on the guest on
+# 2026-08-25 - it made 99-marker.ps1 refuse an appliance that hibernates
+# perfectly, an hour into provisioning. [System.IO.File]::Exists sees it.
+for stage in ("50-power.ps1", "99-marker.ps1"):
+    body = (PROVISION / stage).read_text(encoding="utf-8")
+    hiberfil_lines = [ln for ln in body.splitlines()
+                      if "hiberfil.sys" in ln and not ln.lstrip().startswith("#")]
+    check(f"{stage} tests hiberfil.sys at all", bool(hiberfil_lines), True)
+    check(f"{stage} never uses Test-Path on hiberfil.sys (Hidden+System)",
+          any("Test-Path" in ln for ln in hiberfil_lines), False)
 
 if failures:
     print(f"FAIL ({len(failures)})")

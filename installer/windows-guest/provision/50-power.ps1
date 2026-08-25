@@ -74,6 +74,14 @@ if ($check.AutoAdminLogon -ne '1') {
 }
 Write-Host 'permanent autologon configured'
 
-if (-not (Test-Path 'C:\hiberfil.sys')) {
+# NE PAS employer Test-Path ici : hiberfil.sys porte les attributs Hidden +
+# System, et le fournisseur FileSystem de PowerShell les filtre — Test-Path
+# rend $false sur un fichier de 6,8 Go parfaitement present, et Test-Path n'a
+# pas de parametre -Force pour passer outre. Mesure sur l'invite le 2026-08-25 :
+# Test-Path = False alors que [System.IO.File]::GetAttributes rend
+# « Hidden, System, Archive, NotContentIndexed ». Le piege est d'autant plus
+# vicieux que le `if exist` de cmd, lui, voit le fichier — la recette manuelle
+# passait donc au vert pendant que ce controle-ci echouait.
+if (-not [System.IO.File]::Exists('C:\hiberfil.sys')) {
     Write-Host 'warning: hiberfil.sys is absent; hibernation may not be available'
 }

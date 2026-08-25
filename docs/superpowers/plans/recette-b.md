@@ -1,7 +1,12 @@
 # Recette B — provisionnement automatisé de l'invité (sous-projet B)
 
-> 🔴 **CETTE RECETTE N'A JAMAIS ÉTÉ EXÉCUTÉE ET NE DOIT PAS L'ÊTRE PENDANT
-> L'IMPLÉMENTATION.** Elle démarre un domaine, prend le GPU réel à l'hôte et
+> ⚠️ **Exécutée partiellement le 2026-08-25** (voir « Résultat de la première
+> exécution » en fin de document) : construction, installation, marqueur, test
+> 4b et test 2 sont mesurés ; les tests 1 et 3 restent dus, ils exigent la TV
+> et un compte Steam. Le paragraphe ci-dessous reste valable pour toute
+> exécution ultérieure.
+>
+> 🔴 **NE PAS L'EXÉCUTER PENDANT L'IMPLÉMENTATION.** Elle démarre un domaine, prend le GPU réel à l'hôte et
 > arrête des conteneurs de production (Ollama, Tdarr). Rien ci-dessous n'a été
 > vérifié ; les cases des tableaux de critères ne sont pas cochées parce que
 > personne ne les a encore mesurées, pas parce qu'elles ont échoué.
@@ -608,3 +613,119 @@ supprimés par ce nettoyage : ils portent trois secrets en clair (mode 0600) et
 pourraient servir de base à la vraie bascule de production plus tard — décider
 au cas par cas s'il faut les conserver ou les effacer, ce n'est pas cette
 recette qui en décide.
+
+---
+
+## Résultat de la première exécution (2026-08-25)
+
+### Ce qui est mesuré et passe
+
+| Étape | Résultat |
+| --- | --- |
+| Précondition 1 — `agent.exe` dans la charge utile | `payload complete` — extrait de la VM de production le jour même (`/media/backup/agent-msvc-20260825/`, compilation MSVC depuis les sources à jour) |
+| Précondition 2 — recette S4 | passée le 2026-08-25, voir `recette-s4.md` |
+| Préconditions 3 et 4 | disque jetable absent au départ, 981 G libres, VM `Windows` hibernée |
+| Construction — `fetch_payload.py` | Steam, WinFsp, virtio-win récupérés ; `netkvm`+`viofs` extraits |
+| Construction — `build.py` | ISO 993 MiB, mode 600, **exactement trois** fichiers sous `/nivuus/config`, dix étages + trois ressources |
+| Installation — OOBE | **franchi sans aucune intervention** |
+| Étapes 15 à 55 | NetKVM lié, WinFsp+viofs installés, `D:` 140 GiB NTFS initialisé, Apollo 0.4.6 installé, SudoVDA `ROOT\DISPLAY\0001` statut OK, config jonctionnée vers `D:\state\apollo`, Steam installé dans `D:\Steam`, autologon permanent, mises à jour de pilotes exclues |
+| Marqueur | `provision_version=B1`, `agent_session=1` |
+| Test 4b — ouverture de session automatique | **passe** : `agent-session.txt` supprimé, redémarrage, réapparu à `1` en 3 min 40 sans qu'aucune commande n'ouvre de session ; `query session` montre la console 1 `Active` / `Administrator` |
+| Hibernation | `hiberfil.sys` 6,86 Go présent, `powercfg /a` liste `Hibernate` |
+| Pare-feu après le marqueur | les trois profils `ON` et 5985 joignable — la réouverture ciblée de `99-marker.ps1` fonctionne |
+
+**Le correctif OOBE de 24H2 est désormais VÉRIFIÉ.** L'ISO du 22/08 s'arrêtait
+sur « Is this the right country or region? » puis sur le clavier, et il a fallu
+trois `virsh send-key KEY_ENTER` pour la franchir. L'ISO reconstruite avec
+`Microsoft-Windows-International-Core` dans la passe `oobeSystem` va d'un trait
+jusqu'au bureau, locale française appliquée.
+
+### 🔴 Défaut bloquant trouvé et corrigé : `Test-Path` ne voit pas `hiberfil.sys`
+
+`99-marker.ps1` a **refusé de certifier une appliance parfaitement saine**, une
+heure après le début du provisionnement :
+
+```
+=== 99-marker.ps1 ===
+PS>TerminatingError(): "hiberfil.sys is absent: hibernation is unavailable, and
+the host would silently never be able to sleep this guest"
+```
+
+Or le fichier était là — 6 863 724 544 octets, créé à 14:50, cinq minutes avant
+le contrôle. Mesure sur l'invité :
+
+```
+Test-Path 'C:\hiberfil.sys'                        -> False
+[System.IO.File]::GetAttributes('C:\hiberfil.sys') -> Hidden, System, Archive, NotContentIndexed
+dir /a C:\hiberfil.sys                             -> 6 863 724 544 octets
+```
+
+**Le fournisseur `FileSystem` de PowerShell filtre les éléments `Hidden` +
+`System`, et `Test-Path` n'a pas de `-Force` pour passer outre** (le paramètre
+n'existe pas : le lier lève `NamedParameterNotFound`). Le piège est d'autant
+plus vicieux que le `if exist` de cmd, lui, voit le fichier — donc le contrôle
+que cette recette prescrit à l'étape 4b passait au vert pendant que celui de
+l'invité échouait sur le même fichier. Les deux sites (`50-power.ps1` en
+avertissement, `99-marker.ps1` en refus fatal) emploient désormais
+`[System.IO.File]::Exists`, avec une assertion de non-régression dans
+`scripts/tests/test_windows_guest_provision.py`.
+
+Reprise sans réinstaller : ISO reconstruite, média réinséré à chaud
+(`virsh change-media … --eject` puis `--insert`), puis `resume.cmd` relancé en
+session 1 par tâche planifiée — `run-all.ps1` saute les étages déjà faits et
+ne rejoue que le dernier.
+
+### 🔴 Test 2 — l'agent démarre en session 1 puis meurt aussitôt
+
+Le critère est à moitié tenu. Ce qui passe : `PROVISION.done` porte bien
+`agent_session=1`, et `agent.log` prouve que l'agent a été **invoqué dans la
+session interactive**. Ce qui échoue : `Get-Process agent` ne rend rien, à
+chaque ouverture de session. La cause est dans le journal de l'agent :
+
+```
+Error: aucune fenêtre visible dont le titre contient « firefox »
+WARN agent: AGENT_VM ou AGENT_SECRET absent, et aucun AGENT_JETON hérité :
+     aucun jeton d'agent. La plateforme REFUSERA la poignée de main et aucune
+     session ne s'établira.
+```
+
+Deux manques distincts, aucun n'est une coquille :
+
+1. **`assets/run-agent.ps1` ne pose ni `WINDOW_TITLE` ni `SUPERVISEUR`.**
+   `agent/src/demarrage/source.rs` retombe alors sur le défaut `"firefox"` et
+   `find_window_by_title` échoue — il n'y a pas de Firefox sur une appliance.
+   L'agent sait pourtant fonctionner sans titre figé : le mode `SUPERVISEUR`
+   découvre les fenêtres et lance un enfant par fenêtre, ce qui est le
+   comportement qu'une appliance veut.
+2. **Aucune identité de plateforme n'est provisionnée.** `AGENT_VM` et
+   `AGENT_SECRET` sont des secrets par-VM ; rien dans B ne les dépose, donc
+   même avec une fenêtre l'agent serait refusé à la poignée de main.
+
+Choisir la cible de capture et la source de ces secrets est une décision de
+conception, pas un correctif mécanique : elle appartient à la spec de bascule.
+**Consigné comme dette, non corrigé à l'aveugle.**
+
+### Mineur : la détection « owner changes » d'Apollo faux-positive à la première installation
+
+```
+WARNING: D:\statepollo\sunshine.conf had owner changes … - backed up to
+         sunshine.conf.bak-20260825-145433 before overwriting it
+```
+
+Émis sur une installation **neuve**, où aucun propriétaire n'a rien pu modifier.
+La sauvegarde est inoffensive (elle préserve au lieu d'écraser), mais le message
+apprend à l'opérateur à ignorer un avertissement qui, lui, comptera lors d'une
+reconstruction. À rendre silencieux quand `D:` vient d'être initialisé.
+
+### Restent dus — ils exigent une présence humaine
+
+- **Test 1 — HDR de bout en bout.** Il faut appairer la TV à *ce* domaine de
+  test (PIN dans l'IHM Apollo `https://<GUEST_IP>:47990`), lancer un flux, puis
+  relever `Client dynamicRange: 1` soutenu et la sonde `enabled=1 bpc=10`.
+  L'infrastructure est prête et vérifiée : `ApolloService` tourne,
+  `dd_configuration_option = ensure_only_display`,
+  `isolated_virtual_display_option = disabled`, `dd_hdr_option = auto`, SudoVDA
+  statut OK.
+- **Test 3 — reconstruction préservant `D:`.** Il exige d'abord une connexion
+  Steam réelle depuis la TV, sans quoi `loginusers.vdf` n'existe pas et le test
+  passe au vert sans rien avoir mesuré (le document le dit déjà).
