@@ -729,3 +729,97 @@ reconstruction. À rendre silencieux quand `D:` vient d'être initialisé.
 - **Test 3 — reconstruction préservant `D:`.** Il exige d'abord une connexion
   Steam réelle depuis la TV, sans quoi `loginusers.vdf` n'existe pas et le test
   passe au vert sans rien avoir mesuré (le document le dit déjà).
+
+---
+
+## Test 3 — ÉCHEC : `D:` n'est pas préservé (2026-08-25)
+
+Exécuté avec toute la matière que le test exige : une connexion Steam réelle
+(`loginusers.vdf`, 224 octets), un vrai jeu installé (Don't Starve Together,
+appid 322330, 4,25 Go dans `steamapps\common`) et l'état enregistré avant.
+
+| | Avant | Après |
+| --- | --- | --- |
+| `D:\state\NIVUUS-DATA.id` | `created=2026-08-25T14:53:19` | `created=2026-08-25T21:51:58` |
+| `loginusers.vdf` | 224 octets | **absent** |
+| `steamapps\common` | 4,25 Go | **0 Go** |
+| appmanifests | 228980, 322330 | **aucun** |
+
+**La partition de données a été effacée et recréée.** L'argument central de
+cette branche — `C:` jetable, `D:` persistant — n'est pas tenu en l'état.
+
+### La cause, et ce qu'elle n'est pas
+
+Ni le fichier de réponses ni les scripts de l'invité n'en sont responsables,
+c'est vérifié :
+
+- L'autounattend de rebuild est correct : `WillWipeDisk=false`, **zéro**
+  `CreatePartition`, un seul `ModifyPartition` visant `PartitionID 3`, et la
+  seule lettre nommée est `C`. Comparé au mode wipe (5 créations, partitions
+  1 à 4, lettres C et D), le contraste est net.
+- `20-disk.ps1` ne formate rien : il crée `D:\state` et `D:\Steam` s'ils
+  manquent et pose le témoin s'il est absent. Il a d'ailleurs journalisé
+  « D: is 140 GiB NTFS » puis « D: initialised (first install) » — la partition
+  lui est donc arrivée **déjà vide**, avec la bonne taille.
+
+La cause est **Windows Setup lui-même**, dans la passe windowsPE.
+`C:\Windows\Panther\setupact.log` montre l'opération « Setup the recovery
+partition » rejouée pendant ce rebuild, et la table de partitions finale
+explique le reste :
+
+```
+1  System      0,3 GiB
+2  Reserved    0   GiB
+3  C         199,4 GiB
+4  Recovery    0,6 GiB
+5  D         139,7 GiB
+```
+
+**La partition de données est la 5, pas la 4.** Setup rétrécit la partition
+Windows pour glisser sa partition Recovery juste après elle (199,4 + 0,6 = les
+200 GiB demandés), ce qui décale la partition de données. À la reconstruction,
+Setup recrée cette Recovery — et l'opération emporte ce qui la suit.
+
+### Le remède, non appliqué
+
+Le correctif ne peut pas être dans un script d'invité : tout se joue avant
+qu'aucun ne s'exécute. Il faut que la partition de données **précède** la
+partition Windows, puisque Setup ne réorganise jamais ce qui est en amont
+d'elle — disposition `Data, System EFI, MSR, Windows`, Setup ajoutant sa
+Recovery en dernier, où elle ne gêne personne.
+
+C'est un changement de la disposition des partitions dans `autounattend.py`,
+donc du mode wipe autant que du mode rebuild, et il exige un cycle complet
+d'installation pour être vérifié. **Décision du propriétaire requise avant de
+l'appliquer** — il touche du partitionnement destructif.
+
+⚠️ Tant qu'il n'est pas fait et vérifié, **le mode rebuild ne doit pas être
+présenté comme préservant quoi que ce soit**, et la bascule ne doit pas
+s'appuyer sur cette propriété.
+
+## Test 1 — HDR : PASSÉ (2026-08-25)
+
+Depuis la TV, sur un flux réel, sans rien forcer :
+
+```
+sizes rc=0 paths=1 modes=2
+target=261 rc=0 supported=1 enabled=1 bpc=10  name=TV (2)
+```
+
+et côté hôte, `Client dynamicRange: 1, Display is HDR: true`,
+`Color coding: HDR (Rec. 2020 + SMPTE 2084 PQ)`, `Color depth: 10-bit`,
+`NvEnc: created encoder AV1 P1 async 10-bit two-pass rfi`, écran 3840x2160 à
+60 Hz, luminance maximale 3805 nits.
+
+`paths=1` prouve qu'`ensure_only_display` a bien désactivé tout le reste.
+`rc=0` prouve que l'API Advanced Color répond, contre le `rc=31
+ERROR_GEN_FAILURE` que Server 2022 rendait systématiquement. Et
+**`enabled=1 bpc=10`** est du 10 bits réel, pas une capacité annoncée. La
+sonde ne fait que lire — elle n'appelle jamais
+`DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE` —, donc c'est ce que le client a
+obtenu, pas ce que Windows sait faire quand on le lui impose. C'est la
+différence avec la mesure du 2026-08-22 qui avait fondé ce sous-projet.
+
+⚠️ Une session ultérieure est retombée en SDR (`dynamicRange: 0`, Rec. 709,
+8 bits) avec `Display is HDR: true` inchangé : c'est le client qui demande du
+SDR, pas l'hôte qui échoue. Vérifier le réglage HDR côté TV avant de conclure.
