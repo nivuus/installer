@@ -82,18 +82,34 @@ Write-Host "config junctioned to $ApolloState"
 function Backup-IfChanged {
     param([Parameter(Mandatory = $true)][string]$Source,
           [Parameter(Mandatory = $true)][string]$Destination)
-    if ((Test-Path $Destination) -and
+    # $stamp distingue « Apollo vient d ecrire ses defauts » de « le
+    # proprietaire a modifie sa config ». Sans lui l avertissement se declenche
+    # a la PREMIERE installation, ou personne n a rien pu modifier : le service
+    # Apollo demarre avant cette copie et depose ses propres sunshine.conf et
+    # apps.json dans le repertoire jonctionne. Un avertissement qui crie a
+    # chaque installation neuve apprend a l operateur a l ignorer — et il
+    # comptera, lui, a la reconstruction.
+    $stamp = Join-Path (Split-Path -Parent $Destination) '.nivuus-config-written'
+    if ((Test-Path $stamp) -and (Test-Path $Destination) -and
         (Get-Content -Raw -Path $Destination) -ne (Get-Content -Raw -Path $Source)) {
         $backup = "$Destination.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
         Copy-Item -Path $Destination -Destination $backup -Force
         Write-Host "WARNING: $Destination had owner changes (Apollo's web UI writes to this exact file) - backed up to $backup before overwriting it with the repo version"
     }
     Copy-Item -Path $Source -Destination $Destination -Force
+    # Le media de reponses est un CD-ROM : Copy-Item en reporte l attribut
+    # ReadOnly sur la copie. Or ces deux fichiers sont exactement ceux que l IHM
+    # web d Apollo reecrit — ReadOnly les gele, et toute sauvegarde depuis l IHM
+    # echoue. Mesure sur l invite le 2026-08-25 : un WriteAllBytes sur
+    # apps.json levait UnauthorizedAccessException.
+    Set-ItemProperty -Path $Destination -Name Attributes -Value 'Archive'
 }
 Backup-IfChanged -Source (Join-Path $PayloadRoot 'config\sunshine.conf') `
                   -Destination (Join-Path $ApolloState 'sunshine.conf')
 Backup-IfChanged -Source (Join-Path $PayloadRoot 'config\apps.json') `
                   -Destination (Join-Path $ApolloState 'apps.json')
+Set-Content -Path (Join-Path $ApolloState '.nivuus-config-written') `
+            -Value (Get-Date -Format o) -Encoding ASCII
 New-Item -ItemType Directory -Force -Path 'C:\nivuus\apollo' | Out-Null
 Copy-Item -Path (Join-Path $PayloadRoot 'provision\assets\maximize-steam.ps1') `
           -Destination 'C:\nivuus\apollo\maximize-steam.ps1' -Force

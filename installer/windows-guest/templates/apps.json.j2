@@ -1,9 +1,27 @@
+{#
+  Declarer version 2 evite la migration v1 -> v2 (qui perdrait virtual-display),
+  MAIS le schema v2 EXIGE un uuid par application : sans lui Apollo 0.4.6 rejette
+  CHAQUE entree avec [json.exception.out_of_range.403] key 'uuid' not found, puis
+  « Apps will not be loaded » et « adding fallback Desktop entry ». L appliance
+  streame alors le bureau de la VGA emulee en x264 LOGICIEL, sans ecran virtuel
+  ni NVENC — et Moonlight affiche le numero d exception 403 comme s il s agissait
+  d un code HTTP. Mesure sur l invite le 2026-08-25.
+
+  Les uuid sont DETERMINISTES et ne doivent jamais changer : un client Moonlight
+  identifie ses raccourcis par uuid. Derivation :
+  uuid5(uuid5(NAMESPACE_URL, 'https://nivuus.local/apollo/apps'), <nom>).
+
+  Ce commentaire est du Jinja, pas du JSON : il disparait au rendu. La forme
+  rendue est exactement celle validee sur le binaire Apollo reel — n y ajouter
+  aucune cle inconnue.
+#}
 {
   "version": 2,
   "env": {},
   "apps": [
     {
       "name": "Desktop",
+      "uuid": "59a5f434-e7d4-5124-b98c-eef9441c650c",
       "image-path": "desktop.png",
       "virtual-display": true,
       "prep-cmd": [
@@ -18,6 +36,7 @@
     },
     {
       "name": "Steam Big Picture",
+      "uuid": "26d810f3-c03b-5cb9-a30c-3f4b153db202",
       "image-path": "steam.png",
       "virtual-display": true,
       "prep-cmd": [

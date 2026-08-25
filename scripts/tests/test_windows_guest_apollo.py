@@ -107,6 +107,25 @@ admin_with_space = apollo.render_secrets("admin pass", "nivuus", "p4ssw0rd")
 check("a space in AdminPassword is still accepted",
       "admin pass" in admin_with_space, True)
 
+# Apollo 0.4.6 en version 2 EXIGE un uuid par application : sans lui il rejette
+# chaque entree avec [json.exception.out_of_range.403] key 'uuid' not found, ne
+# charge AUCUNE appli, et fabrique une entree « Desktop (fallback) » sans
+# virtual-display — l appliance streame alors la VGA emulee en x264 logiciel.
+# Mesure sur l invite le 2026-08-25.
+import json as _json
+_apps = _json.loads(apollo.render_apps(apollo.ApolloParams()))
+check("apps.json declare la version 2", _apps.get("version"), 2)
+check("aucune cle racine inconnue (forme validee sur le binaire reel)",
+      sorted(_apps.keys()), ["apps", "env", "version"])
+check("chaque application porte un uuid",
+      all(a.get("uuid") for a in _apps["apps"]), True)
+# Un client Moonlight identifie ses raccourcis par uuid : les changer casserait
+# les raccourcis de tous les clients appaires. Ils sont donc figes ici.
+check("les uuid sont stables",
+      [a["uuid"] for a in _apps["apps"]],
+      ["59a5f434-e7d4-5124-b98c-eef9441c650c",
+       "26d810f3-c03b-5cb9-a30c-3f4b153db202"])
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

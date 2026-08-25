@@ -262,6 +262,14 @@ for stage in ("50-power.ps1", "99-marker.ps1"):
     check(f"{stage} never uses Test-Path on hiberfil.sys (Hidden+System)",
           any("Test-Path" in ln for ln in hiberfil_lines), False)
 
+# Le media de reponses est un CD-ROM : Copy-Item reporte son attribut ReadOnly
+# sur la copie, et sunshine.conf/apps.json sont exactement les fichiers que
+# l IHM web d Apollo reecrit — geles, elle ne peut plus rien enregistrer.
+# Mesure sur l invite le 2026-08-25 : UnauthorizedAccessException a l ecriture.
+_apollo = (PROVISION / "25-apollo.ps1").read_text(encoding="utf-8")
+check("25-apollo.ps1 retire l attribut ReadOnly herite du media",
+      "Set-ItemProperty" in _apollo and "Attributes" in _apollo, True)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
