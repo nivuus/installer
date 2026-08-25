@@ -80,6 +80,17 @@ nic = root.find("devices/interface/model")
 # aborts - an e1000e test domain would test a machine production never uses.
 check("virtio nic (matches production, exercises stage 15)", nic.get("type"), "virtio")
 
+# ...but an answer ISO built before sub-project B carries no NetKVM driver, and
+# the LTSC medium has none in box: such a guest installs and provisions fine,
+# then never obtains an address, so 5985 never opens. The escape hatch has to
+# exist AND has to reach the rendered XML - it went missing once and cost a
+# full install cycle diagnosing a black screen.
+e1000e_xml = testdomain.domain_xml(windows_iso="/w.iso", unattend_iso="/u.iso",
+                                   nic_model="e1000e")
+check("nic model is overridable",
+      ET.fromstring(e1000e_xml).find("devices/interface/model").get("type"),
+      "e1000e")
+
 # Hibernation: 50-power.ps1 makes `powercfg /hibernate on` fatal, and
 # recette-b.md asserts S4. Without this block the guest may not be offered
 # S4 at all - matching domain.xml.j2 exactly.

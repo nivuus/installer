@@ -1,9 +1,8 @@
 # Recette S4 — hibernation sous Secure Boot (sous-projet C)
 
-> ⚠️ **Cette recette n'a jamais été exécutée.** Rien ci-dessous n'a été
-> vérifié ; les cases du tableau « Critères » ne sont pas cochées parce que
-> personne ne les a encore mesurées, pas parce qu'elles ont échoué. Ne pas
-> lire l'absence d'exécution comme une réussite tacite.
+> ✅ **Exécutée le 2026-08-25, tous les critères passés.** Voir « Résultat de
+> la première exécution » en fin de document pour les mesures et les deux
+> dérives constatées entre ce mode opératoire et l'arbre.
 
 **Ce qu'on cherche à savoir** : un invité Windows 11 démarré en Secure Boot
 avec vTPM et GPU passé sait-il hiberner et reprendre, session intacte ?
@@ -234,3 +233,65 @@ dbus-send $M.StartUnit string:"vm-trigger-47989.socket" string:"replace"
 ⚠️ La régénération CDI n'est pas facultative : `nvidia_uvm` reçoit un majeur
 **dynamique**, et une spécification figée fait renvoyer 999 à tout CUDA
 pendant que `nvidia-smi` continue de fonctionner.
+
+---
+
+## Résultat de la première exécution (2026-08-25)
+
+| Ce qu'on vérifie | Attendu | Mesuré |
+| --- | --- | --- |
+| Le domaine passe à l'arrêt après `shutdown /h /f` | `shut off` en moins de 60 s | **~30 s** (14:17:42 → 14:18:12) |
+| La reprise restitue la session | processus toujours vivants | **oui** — voir ci-dessous |
+| Le GPU est réinitialisé | `nvidia-smi` répond dans l'invité | **RTX 4070, pilote 610.88, 35 °C, WDDM** |
+| Secure Boot actif | `Confirm-SecureBootUEFI` → `True` | **True** |
+| vTPM présent | `TpmPresent`/`TpmReady` → `True` | **True / True / True**, `ManufacturerIdTxt: IBM` (swtpm) |
+
+**La preuve que c'est bien une reprise S4 et pas un démarrage à froid** — c'est
+le point à mesurer, parce que les deux se ressemblent depuis l'hôte :
+
+- `Kernel-Boot` **événement 27, `boot type 0x2`** à 14:19:16 (`0x0` = démarrage
+  à froid, `0x1` = démarrage hybride, `0x2` = reprise d'hibernation), suivi de
+  `Power-Troubleshooter` « The system has returned from a low power state ».
+- `LastBootUpTime` reste **14:12:32**, soit l'amorçage d'AVANT l'hibernation,
+  avec un uptime continu de 7 min 34 qui enjambe celle-ci. Un démarrage à
+  froid aurait remis ce compteur à 14:18.
+- Les processus antérieurs à l'hibernation sont toujours vivants avec leurs PID
+  d'origine, en session 0 comme en session 1 (`winlogon` PID 928 session 1,
+  démarré à 14:13:00).
+
+⚠️ **Le témoin `notepad` prescrit plus haut ne fonctionne pas et ne doit pas
+être utilisé.** Un WinRM place chaque shell dans un *Job Object* : tout
+processus lancé par `Start-Process` depuis ce shell est tué quand le shell se
+ferme, bien avant l'hibernation. Le témoin a donc disparu pour une raison qui
+n'a rien à voir avec S4, et un opérateur qui s'y fierait conclurait à tort à
+un échec. Le contrôle qui vaut est celui ci-dessus : `boot type 0x2` +
+`LastBootUpTime` inchangé + PID antérieurs vivants. De plus, l'invité de A
+n'ouvre pas de session interactive automatiquement (c'est `50-power.ps1`, une
+étape de B), donc une tâche planifiée `/IT` ne démarre rien non plus.
+
+### Deux dérives entre ce document et l'arbre
+
+1. **Le bloc `<pm>` est désormais émis par `templates/domain-test.xml.j2`** (il
+   y a été ajouté pendant la vague de correctifs finale de B). La section
+   « Ajouter le bloc `<pm>` au domaine jetable » est donc sans objet pour un
+   domaine défini par le `testdomain.py` courant — vérifier avec
+   `virsh dumpxml --inactive Windows-LTSC-test | grep -A3 '<pm>'` avant de
+   patcher quoi que ce soit.
+
+2. **La carte réseau du gabarit est passée à `virtio`, ce qui rend cette
+   recette-ci inexécutable telle quelle.** Le changement sert B, dont l'étape
+   `15-virtio.ps1` installe NetKVM. Mais cette recette utilise l'ISO de
+   réponses du sous-projet A, qui ne porte que quatre étages
+   (`00-bootstrap`, `10-nvidia`, `20-sudovda`, `99-marker`) et **aucun pilote
+   virtio** ; le média LTSC n'en a pas non plus en boîte. L'invité démarre,
+   provisionne et termine normalement — mais sans adresse IP, donc 5985 ne
+   s'ouvre jamais et `wait-ready` expire au bout de 90 min sans rien dire
+   d'utile. Symptôme à reconnaître : `virsh domstate` dit `running`, l'écran
+   est noir (le pilote NVIDIA a pris l'affichage), et
+   `/var/lib/NetworkManager/dnsmasq-internalBridge.leases` est vide.
+   Contournement employé ici : `virsh attach-interface Windows-LTSC-test bridge
+   internalBridge --model e1000e --live` pour confirmer que l'invité est sain,
+   puis une redéfinition avec `<model type='e1000e'/>` (adresse PCI retirée
+   pour que libvirt en réassigne une). **Correctif de fond dû** :
+   `testdomain.py` doit exposer le modèle de carte en paramètre
+   (`--nic-model`, défaut `virtio` pour B, `e1000e` pour un média A).

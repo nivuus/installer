@@ -42,6 +42,14 @@ NVRAM_PATH = "/var/lib/libvirt/qemu/nvram/Windows-LTSC-test_VARS.fd"
 BRIDGE = "internalBridge"
 # Locally administered MAC, distinct from the production VM's.
 MAC = "52:54:00:4c:54:53"
+# virtio-net has no in-box driver on the LTSC medium: the guest only gets a
+# working NIC once 15-virtio.ps1 installs NetKVM, which exists in sub-project
+# B's payload and NOT in A's. An A-era answer ISO on a virtio NIC produces a
+# guest that installs and provisions correctly but never obtains an address -
+# 5985 never opens, wait_ready() burns its full 90 minutes, and the only
+# visible symptoms are a black screen (the NVIDIA driver took the display) and
+# an empty DHCP lease file. Pass --nic-model e1000e for such a medium.
+NIC_MODEL = "virtio"
 WINRM_PORT = 5985
 
 
@@ -58,7 +66,8 @@ def _virsh(*args: str) -> subprocess.CompletedProcess:
 def domain_xml(*, disk_path: str = DISK_PATH, windows_iso: str,
                unattend_iso: str, name: str = DOMAIN_NAME,
                nvram_path: str = NVRAM_PATH, bridge: str = BRIDGE,
-               mac: str = MAC, memory_gib: int = 16, vcpus: int = 8) -> str:
+               mac: str = MAC, memory_gib: int = 16, vcpus: int = 8,
+               nic_model: str = NIC_MODEL) -> str:
     env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)),
                       autoescape=select_autoescape(enabled_extensions=("j2",),
                                                    default=True),
@@ -66,7 +75,7 @@ def domain_xml(*, disk_path: str = DISK_PATH, windows_iso: str,
     return env.get_template("domain-test.xml.j2").render(
         name=name, disk_path=disk_path, windows_iso=windows_iso,
         unattend_iso=unattend_iso, nvram_path=nvram_path, bridge=bridge,
-        mac=mac, memory_gib=memory_gib, vcpus=vcpus,
+        mac=mac, memory_gib=memory_gib, vcpus=vcpus, nic_model=nic_model,
     )
 
 
@@ -171,17 +180,23 @@ def main(argv=None) -> int:
     ap.add_argument("--windows-iso", default="/media/backup/en-us_windows_11_iot_enterprise_ltsc_2024_x64_dvd_f6b14814.iso")
     ap.add_argument("--unattend-iso", default="/media/data/iso/nivuus-unattend.iso")
     ap.add_argument("--disk-size", type=int, default=120)
+    ap.add_argument("--nic-model", default=NIC_MODEL,
+                    choices=["virtio", "e1000e"],
+                    help="virtio needs NetKVM from sub-project B's payload; "
+                         "use e1000e with an answer ISO that lacks it")
     args = ap.parse_args(argv)
 
     if args.action == "xml":
         print(domain_xml(windows_iso=args.windows_iso,
-                         unattend_iso=args.unattend_iso))
+                         unattend_iso=args.unattend_iso,
+                         nic_model=args.nic_model))
         return 0
     if args.action == "define":
         assert_gpu_free()
         create_disk(size_gib=args.disk_size)
         define(domain_xml(windows_iso=args.windows_iso,
-                          unattend_iso=args.unattend_iso))
+                          unattend_iso=args.unattend_iso,
+                          nic_model=args.nic_model))
         print(f"defined {DOMAIN_NAME}; start it with: virsh start {DOMAIN_NAME}")
         return 0
     if args.action == "wait-ready":

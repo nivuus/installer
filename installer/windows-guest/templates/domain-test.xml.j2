@@ -56,7 +56,7 @@
     <interface type='bridge'>
       <source bridge='{{ bridge }}'/>
       <mac address='{{ mac }}'/>
-      <model type='virtio'/>
+      <model type='{{ nic_model }}'/>
     </interface>
     <tpm model='tpm-crb'>
       <backend type='emulator' version='2.0'/>
