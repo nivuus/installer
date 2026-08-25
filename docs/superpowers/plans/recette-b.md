@@ -203,13 +203,19 @@ dbus-send $M.StopUnit string:"nvidia-persistenced.service" string:"replace"
 ```bash
 cd installer/windows-guest
 
-# --disk-size DOIT dépasser l'arithmétique du fichier de réponses : 200 GiB
-# pour C: (--system-partition-gb par défaut de build.py) + un D: d'au moins
-# 100 GiB (le plancher que 20-disk.ps1 impose lui-même) >= 300 GiB. La valeur
+# --disk-size DOIT dépasser l'arithmétique du fichier de réponses : 140 GiB
+# pour D: (--data-partition-gb par défaut de build.py) + de quoi loger C:,
+# qui prend tout le reste et doit rester au-dessus de ~60 GiB pour qu'un LTSC
+# avec ses fichiers d'échange et d'hibernation puisse se maintenir. La valeur
 # par défaut de testdomain.py (--disk-size 120) est trop petite — Windows
 # Setup échouera bruyamment en créant les partitions, mais aura fait perdre
-# tout un cycle d'installation pour rien. 340 laisse un D: confortable
-# (~140 GiB) pour vraiment installer un jeu au test 3.
+# tout un cycle d'installation pour rien. 340 donne un C: d'environ 199 GiB.
+#
+# Depuis le 2026-08-25, D: est la PREMIÈRE partition du disque et c'est elle
+# qui porte une taille fixe, C: prenant le reste — l'inverse de la disposition
+# d'avant. La raison est dans le gabarit : en aval de la partition Windows,
+# Windows Setup déplace la partition de données et l'emporte à la
+# reconstruction.
 sudo python3 testdomain.py define \
   --windows-iso /media/backup/en-us_windows_11_iot_enterprise_ltsc_2024_x64_dvd_f6b14814.iso \
   --unattend-iso /media/data/iso/nivuus-unattend.iso \

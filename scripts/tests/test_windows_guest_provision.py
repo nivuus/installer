@@ -309,6 +309,15 @@ check("15-virtio.ps1 desarme UDP Segmentation Offload",
 check("15-virtio.ps1 relit la valeur au lieu de croire l ecriture",
       "is still" in _virtio, True)
 
+# Windows numerote les sessions en incrementant : la session console n'est pas
+# forcement la 1. Apres la reconstruction du 2026-08-25 elle valait 2, et un
+# controle code en dur a refuse une appliance saine.
+_marker = (PROVISION / "99-marker.ps1").read_text(encoding="utf-8")
+check("99-marker.ps1 ne compare pas la session a 1 en dur",
+      "-ne '1'" in _marker, False)
+check("99-marker.ps1 compare a la session console",
+      "(Get-Process -Id $PID).SessionId" in _marker, True)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

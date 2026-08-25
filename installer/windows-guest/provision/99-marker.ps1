@@ -52,13 +52,25 @@ if (-not $svc -or $svc.Status -ne 'Running') {
 if (-not (Test-Path 'D:\Steam\steam.exe')) { throw 'no steam.exe on D:' }
 if (-not (Test-Path 'D:\state\NIVUUS-DATA.id')) { throw 'D: carries no Nivuus marker' }
 
-# The session-1 proof. check-session.sh cannot be used on an appliance: it
-# needs the CIFS mount the cutover removes and a C:\dev development build.
+# La preuve que l'agent vit dans la session INTERACTIVE. check-session.sh ne
+# peut pas servir sur une appliance : il exige le montage CIFS que la bascule
+# supprime et un binaire de developpement sous C:\dev.
+#
+# NE PAS comparer a 1 en dur. Windows numerote les sessions en incrementant, et
+# rien ne garantit que la session console porte l'ID 1 : apres la
+# reconstruction du 2026-08-25 elle valait 2, et ce controle a refuse une
+# appliance parfaitement saine. Ce qui compte n'est pas la valeur de l'ID, c'est
+# que ce soit la MEME session que celle ou tourne le bureau.
+#
+# Cet etage est lance par la cle Run a l'ouverture de session, donc il s'execute
+# LUI-MEME dans la session console : son propre SessionId est la reference, sans
+# appel d'API ni Add-Type (qui couterait trois minutes de compilation C#).
 $sessionFile = Join-Path $StateDir 'agent-session.txt'
 if (-not (Test-Path $sessionFile)) { throw 'the agent never reported a session id' }
 $sid = (Get-Content $sessionFile -Raw).Trim()
-if ($sid -ne '1') {
-    throw "the agent runs in session '$sid', not 1: window capture and input injection would both fail"
+$consoleSid = "$((Get-Process -Id $PID).SessionId)"
+if ($sid -ne $consoleSid) {
+    throw "the agent runs in session '$sid', not the interactive session '$consoleSid': window capture and input injection would both fail"
 }
 
 # The session file only proves the agent ran once, at stage-40 time. What

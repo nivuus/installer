@@ -132,14 +132,28 @@ base = dict(product_key="AAAAA-BBBBB-CCCCC-DDDDD-EEEEE",
 wipe = ua.render(ua.UnattendParams(**base))
 check("wipe mode wipes the disk", "<WillWipeDisk>true</WillWipeDisk>" in wipe, True)
 check("wipe mode creates four partitions", wipe.count("<CreatePartition "), 4)
-check("wipe mode sizes C at 200 GiB", "<Size>204800</Size>" in wipe, True)
+# C n'a plus de taille : la partition de donnees est en premier, donc c'est
+# elle qui est dimensionnee et Windows prend le reste (<Extend> ne vaut que
+# pour la derniere partition creee).
+check("wipe mode sizes the data partition at 140 GiB",
+      "<Size>143360</Size>" in wipe, True)
 check("wipe mode extends the last partition", wipe.count("<Extend>true</Extend>"), 1)
 check("wipe mode letters C", "<Letter>C</Letter>" in wipe, True)
 # The optical drive takes D: unless the answer file claims it first.
 check("wipe mode letters D", "<Letter>D</Letter>" in wipe, True)
-check("wipe mode installs to partition 3",
-      "<InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>" in wipe,
+check("wipe mode installs to partition 4",
+      "<InstallTo><DiskID>0</DiskID><PartitionID>4</PartitionID></InstallTo>" in wipe,
       True)
+# L'ORDRE EST L'INVARIANT DE SECURITE, pas un detail de mise en page : la
+# partition de donnees doit preceder la partition Windows. En aval d'elle,
+# Windows Setup retrecit la partition Windows pour y glisser sa Recovery et
+# decale tout ce qui suit ; a la reconstruction il recree cette Recovery et
+# emporte la partition suivante. C'est ce qui a efface la session Steam et
+# 4,25 Go de jeu le 2026-08-25. En amont, Setup ne reorganise jamais rien.
+_data_pos = wipe.index("<Label>Data</Label>")
+_win_pos = wipe.index("<Label>Windows</Label>")
+check("la partition de donnees precede la partition Windows",
+      _data_pos < _win_pos, True)
 
 rebuild = ua.render(
     ua.UnattendParams(**base, disk_mode="rebuild"))
@@ -147,12 +161,13 @@ check("rebuild never wipes the disk", "<WillWipeDisk>true</WillWipeDisk>" in reb
 check("rebuild explicitly disables disk wipe", "<WillWipeDisk>false</WillWipeDisk>" in rebuild, True)
 check("rebuild creates no partition", "<CreatePartition " in rebuild, False)
 check("rebuild formats exactly one partition", rebuild.count("<ModifyPartition "), 1)
-check("rebuild formats partition 3", "<PartitionID>3</PartitionID>" in rebuild, True)
-# Partition 4 is D:. Naming it at all in rebuild mode would be a bug.
-check("rebuild never names partition 4", "<PartitionID>4</PartitionID>" in rebuild,
+check("rebuild formats partition 4", "<PartitionID>4</PartitionID>" in rebuild, True)
+# La partition 1 est D:. La nommer, ne serait-ce qu'une fois, en mode rebuild
+# serait un defaut.
+check("rebuild never names partition 1", "<PartitionID>1</PartitionID>" in rebuild,
       False)
-check("rebuild installs to partition 3",
-      "<InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>" in rebuild,
+check("rebuild installs to partition 4",
+      "<InstallTo><DiskID>0</DiskID><PartitionID>4</PartitionID></InstallTo>" in rebuild,
       True)
 
 check_raises("unknown disk mode is refused", ua.UnattendError,
@@ -160,7 +175,7 @@ check_raises("unknown disk mode is refused", ua.UnattendError,
                  ua.UnattendParams(**base, disk_mode="format-everything")))
 check_raises("an absurdly small C is refused", ua.UnattendError,
              lambda: ua.render(
-                 ua.UnattendParams(**base, system_partition_mb=1024)))
+                 ua.UnattendParams(**base, data_partition_mb=1024)))
 
 # The guest must stay logged on forever: Apollo captures an interactive desktop
 # and the agent must live in session 1.

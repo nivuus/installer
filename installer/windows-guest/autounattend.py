@@ -28,11 +28,17 @@ PAYLOAD_MARKER = r"\nivuus\PAYLOAD.id"
 DRIVE_LETTERS = "C D E F G H I J K L M N O P Q R S T U V W X Y Z"
 
 DISK_MODES = ("wipe", "rebuild")
-# 200 GiB for Windows, Apollo and the agent; everything else is D:. Below
-# 60 GiB an LTSC install plus its page/hibernation files leaves no room to
-# service itself, so a typo there is refused rather than discovered later.
-DEFAULT_SYSTEM_PARTITION_MB = 204800
-MIN_SYSTEM_PARTITION_MB = 61440
+# The GAMES partition is the one with a fixed size now, and Windows takes
+# whatever is left - the opposite of the layout used until 2026-08-25. That
+# reversal is forced by putting the data partition FIRST (see the template's
+# comment for why it must come first): <Extend> only applies to the last
+# partition created, so whichever partition sits first has to be sized.
+#
+# 140 GiB holds a comfortable Steam library. The floor matches the one
+# 20-disk.ps1 enforces from inside the guest, so a typo is refused here rather
+# than discovered forty minutes into an install.
+DEFAULT_DATA_PARTITION_MB = 143360
+MIN_DATA_PARTITION_MB = 102400
 
 
 class UnattendError(ValueError):
@@ -62,9 +68,10 @@ class UnattendParams:
     # target post-install via D:\state\NIVUUS-DATA.id, but cannot prevent the
     # reformat (runs after Setup's windowsPE pass). Real guard is in build.py.
     disk_mode: str = "wipe"
-    # Size in MB. Validated even in rebuild mode (where template ignores it),
-    # as a typo guard; error message does not distinguish the two modes.
-    system_partition_mb: int = DEFAULT_SYSTEM_PARTITION_MB
+    # Size in MB of the games partition. Validated even in rebuild mode (where
+    # the template ignores it), as a typo guard; the error message does not
+    # distinguish the two modes.
+    data_partition_mb: int = DEFAULT_DATA_PARTITION_MB
 
 
 def validate(params: UnattendParams) -> None:
@@ -87,10 +94,10 @@ def validate(params: UnattendParams) -> None:
         raise UnattendError(
             f"disk_mode must be one of {DISK_MODES}, got {params.disk_mode!r}"
         )
-    if params.system_partition_mb < MIN_SYSTEM_PARTITION_MB:
+    if params.data_partition_mb < MIN_DATA_PARTITION_MB:
         raise UnattendError(
-            f"system partition must be at least {MIN_SYSTEM_PARTITION_MB} MB, "
-            f"got {params.system_partition_mb}"
+            f"data partition must be at least {MIN_DATA_PARTITION_MB} MB, "
+            f"got {params.data_partition_mb}"
         )
 
 
@@ -114,5 +121,5 @@ def render(params: UnattendParams, templates_dir: str = TEMPLATES_DIR) -> str:
         drive_letters=DRIVE_LETTERS,
         payload_marker=PAYLOAD_MARKER,
         disk_mode=params.disk_mode,
-        system_partition_mb=params.system_partition_mb,
+        data_partition_mb=params.data_partition_mb,
     )

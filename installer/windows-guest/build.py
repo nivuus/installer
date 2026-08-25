@@ -77,8 +77,11 @@ def parse_args(argv=None):
     ap.add_argument("--target-disk-verified", action="store_true",
                     help="required with --disk-mode rebuild: confirms the "
                          "target disk was partitioned by this tooling")
-    ap.add_argument("--system-partition-gb", type=int, default=200,
-                    help="size of C: in GiB; the rest of the disk becomes D:")
+    ap.add_argument("--data-partition-gb", type=int, default=140,
+                    help="size of the games partition (D:); Windows takes the "
+                         "rest. The data partition comes FIRST on the disk so "
+                         "Windows Setup cannot displace it - see "
+                         "templates/autounattend.xml.j2")
     ap.add_argument("--hostname", default="NIVUUS-WIN")
     ap.add_argument("--image-name", default=None,
                     help="pick an image explicitly when the medium has several")
@@ -129,7 +132,7 @@ def main(argv=None) -> int:
             product_key=key, admin_password=password,
             image_name=image["name"], hostname=args.hostname,
             disk_mode=args.disk_mode,
-            system_partition_mb=args.system_partition_gb * 1024,
+            data_partition_mb=args.data_partition_gb * 1024,
         )
         answer_file = autounattend.render(params)
 

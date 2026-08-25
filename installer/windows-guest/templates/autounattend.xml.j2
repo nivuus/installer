@@ -20,38 +20,56 @@
           <DiskID>0</DiskID>
 {%- if disk_mode == "wipe" %}
           <WillWipeDisk>true</WillWipeDisk>
+          <!-- LA PARTITION DE DONNEES EST EN PREMIER, ET CE N'EST PAS UN
+               DETAIL D'ESTHETIQUE. Elle etait en derniere position jusqu'au
+               2026-08-25 : la reconstruction l'a effacee, avec la session Steam
+               et 4,25 Go de jeu. Windows Setup retrecit la partition Windows
+               pour glisser sa partition Recovery juste derriere elle (mesure :
+               199,4 + 0,6 = les 200 GiB demandes), ce qui decale de un tout ce
+               qui suit ; a la reconstruction il recree cette Recovery et
+               emporte la partition suivante. Le fichier de reponses n'y pouvait
+               rien - il ne demandait qu'un ModifyPartition sur la partition
+               systeme - et aucun script d'invite non plus, puisque tout se joue
+               dans la passe windowsPE, avant qu'aucun ne s'execute.
+               En amont de la partition Windows, Setup ne reorganise jamais rien
+               et la partition de donnees est hors d'atteinte quoi qu'il decide
+               de faire en aval. C'est une garantie de disposition, pas un pari
+               sur son comportement.
+               Corollaire : la partition de donnees a une TAILLE FIXE et c'est
+               Windows qui prend le reste, l'inverse d'avant - <Extend> ne vaut
+               que pour la derniere partition creee. -->
           <CreatePartitions>
             <CreatePartition wcm:action="add">
-              <Order>1</Order><Type>EFI</Type><Size>260</Size>
+              <Order>1</Order><Type>Primary</Type>
+              <Size>{{ data_partition_mb }}</Size>
             </CreatePartition>
             <CreatePartition wcm:action="add">
-              <Order>2</Order><Type>MSR</Type><Size>16</Size>
+              <Order>2</Order><Type>EFI</Type><Size>260</Size>
             </CreatePartition>
             <CreatePartition wcm:action="add">
-              <Order>3</Order><Type>Primary</Type>
-              <Size>{{ system_partition_mb }}</Size>
+              <Order>3</Order><Type>MSR</Type><Size>16</Size>
             </CreatePartition>
             <CreatePartition wcm:action="add">
               <Order>4</Order><Type>Primary</Type><Extend>true</Extend>
             </CreatePartition>
           </CreatePartitions>
           <ModifyPartitions>
-            <ModifyPartition wcm:action="add">
-              <Order>1</Order><PartitionID>1</PartitionID>
-              <Label>System</Label><Format>FAT32</Format>
-            </ModifyPartition>
-            <ModifyPartition wcm:action="add">
-              <Order>2</Order><PartitionID>2</PartitionID>
-            </ModifyPartition>
-            <ModifyPartition wcm:action="add">
-              <Order>3</Order><PartitionID>3</PartitionID>
-              <Label>Windows</Label><Letter>C</Letter><Format>NTFS</Format>
-            </ModifyPartition>
             <!-- The letter is claimed here on purpose: leave it to Windows and
                  the optical drive takes D:, which would send Steam to C:. -->
             <ModifyPartition wcm:action="add">
-              <Order>4</Order><PartitionID>4</PartitionID>
+              <Order>1</Order><PartitionID>1</PartitionID>
               <Label>Data</Label><Letter>D</Letter><Format>NTFS</Format>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>2</Order><PartitionID>2</PartitionID>
+              <Label>System</Label><Format>FAT32</Format>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>3</Order><PartitionID>3</PartitionID>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>4</Order><PartitionID>4</PartitionID>
+              <Label>Windows</Label><Letter>C</Letter><Format>NTFS</Format>
             </ModifyPartition>
           </ModifyPartitions>
 {%- else %}
@@ -66,7 +84,7 @@
                a known previously-partitioned disk. -->
           <ModifyPartitions>
             <ModifyPartition wcm:action="add">
-              <Order>1</Order><PartitionID>3</PartitionID>
+              <Order>1</Order><PartitionID>4</PartitionID>
               <Label>Windows</Label><Letter>C</Letter><Format>NTFS</Format>
             </ModifyPartition>
           </ModifyPartitions>
@@ -81,7 +99,7 @@
               <Value>{{ image_name }}</Value>
             </MetaData>
           </InstallFrom>
-          <InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>
+          <InstallTo><DiskID>0</DiskID><PartitionID>4</PartitionID></InstallTo>
           <WillShowUI>OnError</WillShowUI>
         </OSImage>
       </ImageInstall>
