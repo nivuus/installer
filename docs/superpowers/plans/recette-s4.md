@@ -38,13 +38,19 @@ done
 # (voir CLAUDE.md, "Host Shell Gotchas" — la session tourne dans son propre
 # PID namespace, systemd authentifie par SO_PEERCRED). Piloter systemd via
 # le bus D-Bus système à la place. Un humain sur une vraie console peut
-# utiliser `systemctl mask --now vm-idle-shutdown.timer vm-trigger-47984.socket
+# utiliser `systemctl disable --now vm-idle-shutdown.timer vm-trigger-47984.socket
 # vm-trigger-47989.socket` directement.
 M="--system --print-reply --dest=org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager"
 dbus-send $M.StopUnit string:"vm-idle-shutdown.timer" string:"replace"
 dbus-send $M.StopUnit string:"vm-trigger-47984.socket" string:"replace"
 dbus-send $M.StopUnit string:"vm-trigger-47989.socket" string:"replace"
-dbus-send $M.MaskUnitFiles array:string:"vm-idle-shutdown.timer","vm-trigger-47984.socket","vm-trigger-47989.socket" boolean:false boolean:true
+# MaskUnitFiles ECHOUE ici : les trois unites sont des fichiers reguliers dans
+# /etc/systemd/system, pas des liens, et systemd renvoie -EEXIST avant meme de
+# consulter le drapeau « force » — l'etape errerait, ce qui aborte un script en
+# set -e APRES l'extinction de la VM de production. DisableUnitFiles retire les
+# liens .wants, ce qui suffit : seul vm-idle-shutdown.sh rearme les sockets, et
+# son timer vient d'etre arrete.
+dbus-send $M.DisableUnitFiles array:string:"vm-idle-shutdown.timer","vm-trigger-47984.socket","vm-trigger-47989.socket" boolean:false
 dbus-send $M.Reload
 ```
 
@@ -140,6 +146,11 @@ LC_ALL=C virsh domstate Windows-LTSC-test
 # 4. Reprendre
 virsh start Windows-LTSC-test
 
+# 4b. ATTENDRE que l'invite ait fini de reprendre. Sans cette attente, les
+#     appels WinRM de l'etape 5 visent un invite encore en sortie de S4 et
+#     leurs echecs se lisent comme des echecs de critere.
+(cd installer/windows-guest && python3 testdomain.py wait-ready) >/dev/null
+
 # 5. Mesurer chaque critère du tableau ci-dessous, dans l'ordre. Ce sont ces
 #    invocations qui décident le verdict — sans elles, il n'y a que le
 #    domstate de l'étape 3, qui ne couvre aucun des critères Secure
@@ -211,9 +222,9 @@ docker start nivuus-ollama mediamanager-tdarr-1 \
 # Réarmer les automatismes désactivés en préparation (étape 0a). Sans ça,
 # le réveil à la demande et l'hibernation auto restent cassés en permanence,
 # pas seulement pendant la recette. Un humain sur une vraie console peut
-# utiliser `systemctl unmask --now vm-idle-shutdown.timer
+# utiliser `systemctl enable --now vm-idle-shutdown.timer
 # vm-trigger-47984.socket vm-trigger-47989.socket` à la place.
-dbus-send $M.UnmaskUnitFiles array:string:"vm-idle-shutdown.timer","vm-trigger-47984.socket","vm-trigger-47989.socket" boolean:false
+dbus-send $M.EnableUnitFiles array:string:"vm-idle-shutdown.timer","vm-trigger-47984.socket","vm-trigger-47989.socket" boolean:false boolean:true
 dbus-send $M.Reload
 dbus-send $M.StartUnit string:"vm-idle-shutdown.timer" string:"replace"
 dbus-send $M.StartUnit string:"vm-trigger-47984.socket" string:"replace"
