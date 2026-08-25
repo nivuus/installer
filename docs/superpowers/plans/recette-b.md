@@ -220,6 +220,13 @@ sudo python3 testdomain.py define \
   --windows-iso /media/backup/en-us_windows_11_iot_enterprise_ltsc_2024_x64_dvd_f6b14814.iso \
   --unattend-iso /media/data/iso/nivuus-unattend.iso \
   --disk-size 340
+```
+
+⚠️ **L'ISO doit avoir été construite avec `--data-partition-gb 140`.** Le défaut
+de `build.py` vise le NVMe de production (820 GiB de jeux sur un disque de 1 To,
+soit environ 110 GiB pour Windows) et ne tient pas sur un banc de 340 GiB.
+
+```bash
 virsh start Windows-LTSC-test
 ```
 

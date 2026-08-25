@@ -77,9 +77,11 @@ def parse_args(argv=None):
     ap.add_argument("--target-disk-verified", action="store_true",
                     help="required with --disk-mode rebuild: confirms the "
                          "target disk was partitioned by this tooling")
-    ap.add_argument("--data-partition-gb", type=int, default=140,
-                    help="size of the games partition (D:); Windows takes the "
-                         "rest. The data partition comes FIRST on the disk so "
+    ap.add_argument("--data-partition-gb", type=int, default=820,
+                    help="size of the games partition (D:) in GiB; Windows takes "
+                         "the rest. Default targets the 1 TB production NVMe "
+                         "(Windows gets ~110 GiB); a smaller disk needs an "
+                         "explicit value. D: comes FIRST on the disk so "
                          "Windows Setup cannot displace it - see "
                          "templates/autounattend.xml.j2")
     ap.add_argument("--hostname", default="NIVUUS-WIN")

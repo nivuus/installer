@@ -61,3 +61,29 @@ if ($shellNow -notlike "*steam-shell.ps1*") {
     throw "Winlogon Shell did not take the appliance launcher, got '$shellNow'"
 }
 Write-Host 'Steam is the session shell (no explorer, no taskbar, no desktop)'
+
+# C: DISPARAIT DE L'INTERFACE. Le kiosque a deja supprime explorer.exe, donc il
+# n'y a plus de bureau ni d'explorateur pour y naviguer ; il reste les boites de
+# dialogue de fichiers que Steam ouvre lui-meme (ajouter une bibliotheque, un
+# jeu non-Steam). Or C: est REGENEREE a chaque reconstruction : tout ce qu'on y
+# depose est perdu, et une bibliotheque Steam qui y atterrit par megarde est
+# exactement le defaut que la separation C:/D: existe pour empecher.
+#
+# NoDrives masque le lecteur dans l'explorateur et les boites de dialogue ;
+# NoViewOnDrive en refuse l'ouverture meme quand le chemin est saisi a la main.
+# Le masque est un champ de bits, une lettre par bit depuis A : C: vaut 4.
+#
+# Ce sont des restrictions d'INTERFACE, pas de securite. Le compte de
+# l'appliance est administrateur et peut les lever ; Windows, Apollo, Steam et
+# l'agent continuent d'acceder normalement a C: par les API de fichiers, sans
+# quoi rien ne fonctionnerait. On empeche l'erreur, pas l'adversaire.
+$policies = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer'
+New-Item -Path $policies -Force | Out-Null
+$driveC = 4
+Set-ItemProperty -Path $policies -Name 'NoDrives' -Value $driveC -Type DWord
+Set-ItemProperty -Path $policies -Name 'NoViewOnDrive' -Value $driveC -Type DWord
+$readback = Get-ItemProperty -Path $policies
+if ($readback.NoDrives -ne $driveC -or $readback.NoViewOnDrive -ne $driveC) {
+    throw "hiding C: did not take: NoDrives=$($readback.NoDrives) NoViewOnDrive=$($readback.NoViewOnDrive)"
+}
+Write-Host 'C: hidden from the file dialogs (interface restriction, not a security boundary)'

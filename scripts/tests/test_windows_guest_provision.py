@@ -318,6 +318,13 @@ check("99-marker.ps1 ne compare pas la session a 1 en dur",
 check("99-marker.ps1 compare a la session console",
       "(Get-Process -Id $PID).SessionId" in _marker, True)
 
+# C: est regeneree a chaque reconstruction : une bibliotheque Steam qui y
+# atterrit par megarde est exactement le defaut que la separation C:/D: existe
+# pour empecher. Le masque est un champ de bits, une lettre par bit depuis A.
+check("30-steam.ps1 masque C: dans les boites de dialogue",
+      "NoDrives" in _steam and "NoViewOnDrive" in _steam, True)
+check("30-steam.ps1 relit les valeurs posees", "did not take" in _steam, True)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

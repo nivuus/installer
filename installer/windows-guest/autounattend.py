@@ -34,10 +34,19 @@ DISK_MODES = ("wipe", "rebuild")
 # comment for why it must come first): <Extend> only applies to the last
 # partition created, so whichever partition sits first has to be sized.
 #
-# 140 GiB holds a comfortable Steam library. The floor matches the one
-# 20-disk.ps1 enforces from inside the guest, so a typo is refused here rather
-# than discovered forty minutes into an install.
-DEFAULT_DATA_PARTITION_MB = 143360
+# The default targets the PRODUCTION disk, not the test bench: 820 GiB of games
+# on the 1 TB NVMe, which leaves Windows about 110 GiB. A 1 TB disk offers
+# 931 GiB, of which ~1.3 GiB goes to EFI, MSR and the Recovery partition Setup
+# carves out for itself. Windows settles around 70-80 GiB in service (the OS,
+# a ~12 GiB hibernation file - the host's whole energy strategy depends on S4 -
+# a ~16 GiB page file, the NVIDIA driver, Apollo and the agent); the rest
+# absorbs years of cumulative updates and WinSxS growth.
+#
+# A smaller disk needs an explicit --data-partition-gb: the 340 GiB test bench
+# passes 140. The floor matches the one 20-disk.ps1 enforces from inside the
+# guest, so a typo is refused here rather than discovered forty minutes into an
+# install.
+DEFAULT_DATA_PARTITION_MB = 839680
 MIN_DATA_PARTITION_MB = 102400
 
 

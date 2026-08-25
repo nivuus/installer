@@ -135,8 +135,8 @@ check("wipe mode creates four partitions", wipe.count("<CreatePartition "), 4)
 # C n'a plus de taille : la partition de donnees est en premier, donc c'est
 # elle qui est dimensionnee et Windows prend le reste (<Extend> ne vaut que
 # pour la derniere partition creee).
-check("wipe mode sizes the data partition at 140 GiB",
-      "<Size>143360</Size>" in wipe, True)
+check("wipe mode sizes the data partition from the parameter",
+      f"<Size>{ua.DEFAULT_DATA_PARTITION_MB}</Size>" in wipe, True)
 check("wipe mode extends the last partition", wipe.count("<Extend>true</Extend>"), 1)
 check("wipe mode letters C", "<Letter>C</Letter>" in wipe, True)
 # The optical drive takes D: unless the answer file claims it first.
@@ -180,6 +180,11 @@ check_raises("an absurdly small C is refused", ua.UnattendError,
 # The guest must stay logged on forever: Apollo captures an interactive desktop
 # and the agent must live in session 1.
 check("autologon is enabled", "<Enabled>true</Enabled>" in wipe, True)
+
+# Le defaut vise le NVMe de production (1 To), pas le banc de 340 GiB : un
+# defaut cale sur le banc donnerait silencieusement un Windows de 790 GiB et
+# une bibliotheque de jeux minuscule sur la vraie machine.
+check("le defaut vise le disque de production", ua.DEFAULT_DATA_PARTITION_MB, 839680)
 
 if failures:
     print(f"FAIL ({len(failures)})")
