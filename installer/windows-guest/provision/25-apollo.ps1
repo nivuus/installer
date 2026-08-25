@@ -110,6 +110,32 @@ Backup-IfChanged -Source (Join-Path $PayloadRoot 'config\apps.json') `
                   -Destination (Join-Path $ApolloState 'apps.json')
 Set-Content -Path (Join-Path $ApolloState '.nivuus-config-written') `
             -Value (Get-Date -Format o) -Encoding ASCII
+
+# adapter_name : SANS lui, l'appliance streame en x264 LOGICIEL.
+#
+# Apollo capture par Desktop Duplication, et l'encodeur doit vivre sur
+# l'adaptateur qui possede la sortie capturee. Quand AUCUN ecran physique n'est
+# branche sur le GPU — le cas de cette appliance, dont le bouchon HDMI est
+# retire — Apollo retient l'adaptateur par defaut, qui est le « Microsoft Basic
+# Render Driver » (WARP, vendor 0x1414). NVENC est alors essaye SUR WARP,
+# echoue, et la sonde retombe sur libx264. Le flux se negocie en 1280x800 a
+# 1 Hz et tout client abandonne avant d'emettre le moindre paquet UDP :
+# CLIENT CONNECTED puis DISCONNECTED 150 ms plus tard, « Initial Ping Timeout »
+# cote hote et « error -5 » cote Moonlight. Mesure sur l'invite le 2026-08-25 ;
+# epingler l'adaptateur a fait apparaitre h264_nvenc, hevc_nvenc ET av1_nvenc.
+#
+# Le nom est DETECTE ici plutot qu'ecrit dans le gabarit : l'hote de
+# construction ne connait que les identifiants PCI du GPU passe, pas son nom
+# commercial DXGI, et celui-ci change avec la carte.
+$gpuName = (Get-CimInstance Win32_VideoController |
+            Where-Object { $_.Name -like 'NVIDIA*' } |
+            Select-Object -First 1).Name
+if (-not $gpuName) { throw 'no NVIDIA video controller: cannot pin Apollo capture adapter' }
+$confPath = Join-Path $ApolloState 'sunshine.conf'
+$conf = @(Get-Content -Path $confPath | Where-Object { $_ -notmatch '^\s*adapter_name\s*=' })
+$conf += "adapter_name = $gpuName"
+Set-Content -Path $confPath -Value $conf
+Write-Host "capture adapter pinned to $gpuName"
 New-Item -ItemType Directory -Force -Path 'C:\nivuus\apollo' | Out-Null
 Copy-Item -Path (Join-Path $PayloadRoot 'provision\assets\maximize-steam.ps1') `
           -Destination 'C:\nivuus\apollo\maximize-steam.ps1' -Force

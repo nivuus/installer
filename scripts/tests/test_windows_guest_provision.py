@@ -270,6 +270,19 @@ _apollo = (PROVISION / "25-apollo.ps1").read_text(encoding="utf-8")
 check("25-apollo.ps1 retire l attribut ReadOnly herite du media",
       "Set-ItemProperty" in _apollo and "Attributes" in _apollo, True)
 
+_apollo_after = (PROVISION / "25-apollo.ps1").read_text(encoding="utf-8")
+# Sans adapter_name, Apollo capture sur le « Microsoft Basic Render Driver »
+# (WARP) des lors qu'aucun ecran physique n'est branche sur le GPU — le cas de
+# cette appliance. NVENC est alors essaye sur WARP, echoue, et le flux tombe en
+# x264 logiciel a 1280x800/1 Hz : tout client abandonne avec error -5. Le nom
+# est detecte dans l'invite, jamais ecrit en dur : l'hote de construction ne
+# connait que les identifiants PCI, pas le nom commercial DXGI.
+check("25-apollo.ps1 epingle l adaptateur de capture",
+      "adapter_name" in _apollo_after, True)
+check("25-apollo.ps1 detecte le nom du GPU au lieu de le figer",
+      "Win32_VideoController" in _apollo_after and
+      "NVIDIA GeForce RTX 4070" not in _apollo_after, True)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
