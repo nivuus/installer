@@ -283,6 +283,23 @@ check("25-apollo.ps1 detecte le nom du GPU au lieu de le figer",
       "Win32_VideoController" in _apollo_after and
       "NVIDIA GeForce RTX 4070" not in _apollo_after, True)
 
+# Steam est le shell de la session : plus d explorer.exe, donc ni barre des
+# taches, ni fond d ecran, ni icones. Le lanceur boucle parce que Steam qui se
+# ferme ne doit pas laisser un ecran noir sur une machine sans ecran physique.
+_steam = (PROVISION / "30-steam.ps1").read_text(encoding="utf-8")
+check("30-steam.ps1 installe Steam comme shell de session",
+      "Winlogon" in _steam and "steam-shell.ps1" in _steam, True)
+check("30-steam.ps1 arme le filet AutoRestartShell",
+      "AutoRestartShell" in _steam, True)
+_shell = (PROVISION / "assets" / "steam-shell.ps1").read_text(encoding="utf-8")
+# -Wait mentirait : Steam quitte son lanceur et continue dans un enfant, donc
+# une deuxieme instance serait lancee sur un Steam bien vivant.
+_shell_code = [ln for ln in _shell.splitlines()
+               if ln.strip() and not ln.lstrip().startswith(("#", "<#", "»"))]
+check("le lanceur interroge la table des processus, pas -Wait",
+      "Get-Process" in _shell and
+      not any("-Wait" in ln for ln in _shell_code), True)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

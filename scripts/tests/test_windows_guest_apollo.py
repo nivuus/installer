@@ -76,8 +76,11 @@ desktop = next(a for a in apps["apps"] if a["name"] == "Desktop")
 # 🔴 It is the app's virtual-display flag - NOT isolated_virtual_display_option
 # - that makes the SudoVDA display appear (trap paid on 2026-07-23).
 check("Desktop asks for a virtual display", desktop.get("virtual-display"), True)
-check("Desktop launches Steam from D:", desktop.get("detached"),
-      ["D:\\Steam\\steam.exe"])
+# Desktop ne lance plus rien : depuis que Steam est le shell de la session
+# (30-steam.ps1), il tourne deja quand le client se connecte, et un detached
+# ouvrirait une seconde instance sur un Steam vivant. Le lancement de Steam
+# depuis D: est desormais couvert par assets/steam-shell.ps1.
+check("Desktop ne relance pas Steam", desktop.get("detached"), None)
 bp = next(a for a in apps["apps"] if a["name"] == "Steam Big Picture")
 check("Big Picture asks for a virtual display", bp.get("virtual-display"), True)
 
@@ -125,6 +128,13 @@ check("les uuid sont stables",
       [a["uuid"] for a in _apps["apps"]],
       ["59a5f434-e7d4-5124-b98c-eef9441c650c",
        "26d810f3-c03b-5cb9-a30c-3f4b153db202"])
+
+# Sans sunshine_name, Apollo annonce le nom NetBIOS (NIVUUS-WIN) et c'est lui
+# que les clients Moonlight affichent. Verifie sur l'invite : /serverinfo rend
+# <hostname>Nivuus</hostname>.
+_conf = apollo.render_conf()
+check("sunshine.conf nomme l hote pour les clients",
+      any(l.strip() == "sunshine_name = Nivuus" for l in _conf.splitlines()), True)
 
 if failures:
     print(f"FAIL ({len(failures)})")

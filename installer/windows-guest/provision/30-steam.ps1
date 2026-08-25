@@ -33,3 +33,31 @@ else { Write-Host "Steam re-registered against the existing $SteamDir" }
 
 $login = Join-Path $SteamDir 'config\loginusers.vdf'
 if (Test-Path $login) { Write-Host 'existing Steam session preserved' }
+
+# Steam IS the shell: no explorer.exe, therefore no taskbar, no wallpaper and
+# no desktop icons - not hidden, absent. This appliance has no physical screen
+# and no use for a Windows desktop.
+#
+# AutoRestartShell is Winlogon's own safety net (it relaunches the shell when
+# it exits); it defaults to 1 but is set explicitly here, because a session
+# with no live shell shows a streaming client a black screen and there is no
+# monitor to notice it on. The launcher loops on top of that, since Steam
+# closing is not the shell closing.
+#
+# The agent is unaffected: 40-agent.ps1 runs it from an AtLogOn scheduled task,
+# which is independent of the shell.
+$shellScript = 'C:\nivuus\apollo\steam-shell.ps1'
+Copy-Item -Path (Join-Path $PayloadRoot 'provision\assets\steam-shell.ps1') `
+          -Destination $shellScript -Force
+$winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+Set-ItemProperty -Path $winlogon -Name 'Shell' `
+    -Value "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $shellScript"
+Set-ItemProperty -Path $winlogon -Name 'AutoRestartShell' -Value 1 -Type DWord
+
+# Read back: writing a registry value proves the write, never that Windows
+# will honour it - but a value that did not land cannot be honoured either.
+$shellNow = (Get-ItemProperty -Path $winlogon -Name 'Shell').Shell
+if ($shellNow -notlike "*steam-shell.ps1*") {
+    throw "Winlogon Shell did not take the appliance launcher, got '$shellNow'"
+}
+Write-Host 'Steam is the session shell (no explorer, no taskbar, no desktop)'

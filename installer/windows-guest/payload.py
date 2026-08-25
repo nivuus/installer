@@ -138,6 +138,7 @@ def verify_staged(dest_root: Path) -> None:
         "provision/assets/run-agent.ps1",
         "provision/assets/maximize-steam.ps1",
         "provision/assets/apollo-junction.ps1",
+        "provision/assets/steam-shell.ps1",
         "probe/advanced-color.ps1",
         "config/sunshine.conf",
         "config/apps.json",

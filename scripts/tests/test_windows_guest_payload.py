@@ -31,6 +31,7 @@ def make_tree(root: pathlib.Path) -> "payload.PayloadSources":
     (root / "provision" / "assets" / "run-agent.ps1").write_text("# run-agent\n")
     (root / "provision" / "assets" / "maximize-steam.ps1").write_text("# maximize\n")
     (root / "provision" / "assets" / "apollo-junction.ps1").write_text("# junction\n")
+    (root / "provision" / "assets" / "steam-shell.ps1").write_text("# steam-shell\n")
     (root / "probe").mkdir()
     (root / "probe" / "advanced-color.ps1").write_text("# probe\n")
     drivers = root / "drivers"
@@ -287,6 +288,7 @@ with tempfile.TemporaryDirectory() as tmp:
     (src / "provision" / "assets" / "run-agent.ps1").write_text("x")
     (src / "provision" / "assets" / "maximize-steam.ps1").write_text("x")
     (src / "provision" / "assets" / "apollo-junction.ps1").write_text("x")
+    (src / "provision" / "assets" / "steam-shell.ps1").write_text("x")
     (src / "probe").mkdir()
     (src / "probe" / "advanced-color.ps1").write_text("x")
     drivers = src / "drivers"

@@ -23,3 +23,10 @@ dd_hdr_option = auto
 dd_config_revert_delay = 3000
 
 min_log_level = info
+
+# Le nom que les clients Moonlight affichent. Sans lui, Apollo annonce le nom
+# NetBIOS de la machine (NIVUUS-WIN) : correct pour le DNS et le bail DHCP,
+# mais ce n'est pas un nom d'appareil qu'on veut lire sur une TV. Poser
+# sunshine_name ne renomme PAS l'ordinateur Windows — c'est deliberement plus
+# cible, le nom reseau reste celui que l'unattend a fixe.
+sunshine_name = Nivuus
