@@ -1,5 +1,8 @@
 <domain type='kvm'>
   <name>{{ name }}</name>
+{%- if uuid %}
+  <uuid>{{ uuid }}</uuid>
+{%- endif %}
   <memory unit='KiB'>{{ memory_kib }}</memory>
   <currentMemory unit='KiB'>{{ memory_kib }}</currentMemory>
   <memoryBacking>

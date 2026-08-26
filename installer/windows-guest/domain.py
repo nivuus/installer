@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import os
 import subprocess
 import sys
@@ -103,11 +104,29 @@ def vcpu_plan(pool: list[int], reserve: int = 2) -> dict:
     }
 
 
+def existing_uuid(name: str = DOMAIN_NAME) -> str | None:
+    """UUID of the domain if it is already defined, else None.
+
+    Without it, `domain.py xml | virsh define` fails with "domain already
+    exists with uuid ..." - libvirt mints a fresh UUID for a UUID-less XML and
+    refuses to attach it to an existing name. Paid twice on 2026-08-26: once on
+    the throwaway bench, where the silent failure made a rebuild replay the
+    wipe ISO, and once here, on the production domain, when dropping the
+    install media after the cutover.
+    """
+    out = _virsh("dumpxml", "--inactive", name)
+    if out.returncode != 0:
+        return None
+    match = re.search(r"<uuid>([0-9a-fA-F-]{36})</uuid>", out.stdout)
+    return match.group(1) if match else None
+
+
 def domain_xml(*, gpu_functions: list[dict], nvme: dict, plan: dict,
                memory_kib: int = MEMORY_KIB, name: str = DOMAIN_NAME,
                mac: str = MAC, bridge: str = BRIDGE,
                nvram_path: str = NVRAM_PATH,
-               shares: tuple = SHARES) -> str:
+               shares: tuple = SHARES,
+               uuid: str | None = None) -> str:
     """Render the production domain XML."""
     if len(gpu_functions) < 1:
         raise DomainError("no GPU function to pass through")
@@ -119,7 +138,7 @@ def domain_xml(*, gpu_functions: list[dict], nvme: dict, plan: dict,
     return env.get_template("domain.xml.j2").render(
         name=name, memory_kib=memory_kib, plan=plan, mac=mac, bridge=bridge,
         nvram_path=nvram_path, gpu_functions=gpu_functions, nvme=nvme,
-        shares=shares,
+        shares=shares, uuid=uuid,
     )
 
 
@@ -223,6 +242,7 @@ def build_domain_xml(*, announce: bool = False) -> str:
         gpu_functions=hardware.pci_slot_functions(gpus[0]["slot"]),
         nvme=nvme,
         plan=vcpu_plan(pool),
+        uuid=existing_uuid(),
     )
 
 
