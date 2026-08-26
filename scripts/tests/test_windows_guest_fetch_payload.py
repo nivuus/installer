@@ -88,6 +88,17 @@ with tempfile.TemporaryDirectory() as tmp:
         if "collide" not in str(e):
             failures.append(f"flatten_extracted collision error is unclear: {e}")
 
+# L en-tete disait « networking is allowed HERE and nowhere else [...] une URL
+# qui pourrit doit casser la construction, jamais une installation », ce qui
+# n est plus vrai depuis l etape 32. Meme garde bon marche que du cote de
+# payload.py : restaurer le texte mensonger fait tomber ce controle.
+_doc = fetch_payload.__doc__
+check("l en-tete de fetch_payload.py ne dit plus « nowhere else » sans reserve",
+      "allowed HERE and nowhere else" in _doc, False)
+check("... et nomme l exception, son objet et sa contrepartie",
+      "exception" in _doc.lower() and "retro install" in _doc
+      and "sha256" in _doc, True)
+
 # --- Tache 4 (sous-projet C2) : les artefacts du retrogaming ne sont
 # telecharges que si l option est cochee. Une installation sans retrogaming
 # n a pas a payer un interpreteur, un extracteur et un magasin de roues.

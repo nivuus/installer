@@ -684,6 +684,16 @@ check("00-bootstrap.ps1 relit la regle au lieu de croire Enable-PSRemoting",
 _retro = (PROVISION / "32-retro.ps1").read_text(encoding="utf-8")
 _retro_code = code_only(_retro)
 _retro_lines = [ln.strip() for ln in _retro_code.splitlines() if ln.strip()]
+# Deux morceaux de l etape vivent dans provision/assets/, comme apollo-drivers
+# pour l etape 25 : le temoin durable et la mise en place de 7zr. Ils sont
+# dot-sources, donc ils tournent DANS l etape - les controles les suivent la
+# ou le code est parti, ils ne s allegent pas d avoir traverse un fichier.
+_status_ps1 = (PROVISION / "assets" / "retro-status.ps1").read_text(encoding="utf-8")
+_status_code = code_only(_status_ps1)
+_7zr_code = code_only((PROVISION / "assets" / "retro-7zr.ps1").read_text(encoding="utf-8"))
+for _asset in ("retro-status.ps1", "retro-7zr.ps1"):
+    check(f"32-retro.ps1 dot-source assets\\{_asset} (dans le code)",
+          f"assets\\{_asset}')" in _retro_code, True)
 
 # L etape reste dans la liste MEME quand l option n est pas cochee : une etape
 # absente ne laisse aucune trace. La position se lit sur le code de
@@ -732,8 +742,10 @@ check("la levee dit pourquoi l absence n est pas un refus",
 _idx_guard = _first_line_with("if (-not $retro.Enabled) {")
 _idx_msg = _first_line_with("retrogaming desactive", _idx_guard if _idx_guard >= 0 else 0)
 _idx_return = _first_line_with("return", _idx_guard if _idx_guard >= 0 else 0)
+# Install-Retro7zr remplace le Copy-Item parti dans l asset : c est la meme
+# action, appelee depuis ici, et elle doit rester derriere les memes gardes.
 _actions = ["Start-Process", "pip install", "$retroExe install",
-            "Copy-Item", "New-Item -ItemType Directory"]
+            "Install-Retro7zr", "New-Item -ItemType Directory"]
 _idx_actions = [_first_line_with(a) for a in _actions]
 check("la garde « option non cochee » est bien localisee", _idx_guard >= 0, True)
 check("toutes les actions d installation ont ete localisees",
@@ -776,20 +788,20 @@ check("l espace est verifie AVANT toute installation",
 # soit copie quelque part mais qu il se RESOLVE par le PATH - y compris pour
 # un « retro install » relance depuis l hote, dans une autre session.
 check("32-retro.ps1 depose 7zr.exe depuis la charge utile",
-      "$sevenZr = Join-Path $PayloadRetro '7zr.exe'" in _retro_code
-      and "Copy-Item -Path $sevenZr -Destination $RetroBinDir" in _retro_code, True)
+      "$sevenZr = Join-Path $PayloadRetro '7zr.exe'" in _7zr_code
+      and "Copy-Item -Path $sevenZr -Destination $BinDir" in _7zr_code, True)
 check("7zr.exe survit a la reconstruction de C: (il va sur le volume persistant)",
       "$RetroBinDir = 'D:\\Emulation\\bin'" in _retro_code, True)
 check("son dossier entre dans le PATH machine, pas seulement dans ce processus",
-      "[Environment]::SetEnvironmentVariable('Path'" in _retro_code, True)
+      "[Environment]::SetEnvironmentVariable('Path'" in _7zr_code, True)
 check("le PATH machine est relu au lieu d etre cru",
       "[Environment]::GetEnvironmentVariable('Path', 'Machine') -notlike"
-      in _retro_code, True)
+      in _7zr_code, True)
 check("la resolution par le PATH est verifiee, pas supposee",
-      "Get-Command '7zr.exe'" in _retro_code, True)
+      "Get-Command '7zr.exe'" in _7zr_code, True)
 check("un 7zr.exe absent de la charge utile leve",
-      "sans 7zr.exe" in _retro_code, True)
-_idx_7zr = _first_line_with("Copy-Item -Path $sevenZr")
+      "sans 7zr.exe" in _7zr_code, True)
+_idx_7zr = _first_line_with("Install-Retro7zr -PayloadRetro")
 _idx_install = _first_line_with("$retroExe install")
 check("7zr.exe est en place AVANT que les emulateurs s installent",
       _idx_7zr >= 0 and _idx_install > _idx_7zr, True)
@@ -833,14 +845,63 @@ check("un echec total leve",
 # vit que dans le journal de C:, efface a la reconstruction suivante. Le
 # temoin doit donc etre sur D:, comme le PROVISION.failed de run-all.ps1.
 check("le temoin est ecrit sur le volume PERSISTANT, pas dans le journal de C:",
-      "$RetroStatusFile = 'D:\\state\\retro.status'" in _retro_code, True)
+      "$RetroStatusFile = 'D:\\state\\retro.status'" in _status_code, True)
 check("le temoin dit quand",
-      "when=$(Get-Date -Format o)" in _retro_code, True)
+      "when=$(Get-Date -Format o)" in _status_code, True)
 check("le temoin porte le rapport, donc ce qui a reussi et ce qui a echoue",
-      "\"report:\") + $Report" in _retro_code, True)
+      "'report:') + $Report" in _status_code, True)
+
+# Le temoin doit dire de QUEL passage il parle. D: survit aux reconstructions :
+# sans identifiant, le « status=ok » d une installation ANTERIEURE affirme que
+# tout va bien pour le passage courant, et rien ne permet de le contester. Un
+# temoin perime qui dit « ok » est pire que pas de temoin du tout.
+check("le temoin porte un identifiant de passage",
+      "run=$RetroRunId" in _status_code, True)
+# Sur le fichier lu, pas sur le mot : le contrat inscrit dans le temoin nomme
+# lui aussi provision.started, et il satisferait un « in » sur le texte.
+check("l identifiant vient de l horodatage que run-all pose a chaque passage",
+      "$RetroRunFile = 'C:\\nivuus\\state\\provision.started'" in _status_code
+      and "Get-Content -Path $RetroRunFile" in _status_code, True)
+# Ecrit AVANT tout le reste : c est ce qui empeche un temoin ancien de se
+# faire passer pour recent, puisque le passage courant l ecrase des l entree.
+_idx_started = _first_line_with("Write-RetroStatus 'started'")
+_idx_volume = _first_line_with("D:\\state\\NIVUUS-DATA.id")
+check("le temoin « en cours » est ecrit des l entree dans l etape",
+      _idx_started >= 0 and all(i > _idx_started for i in _idx_actions), True)
+check("... juste apres le volume qui le porte, seul endroit ou l ecrire",
+      _idx_volume >= 0 and _idx_started > _idx_volume, True)
+# Une interruption entre « started » et l installation doit laisser un temoin
+# qui le DIT, plutot que le silence - lequel ne se distingue pas d une etape
+# jamais atteinte.
+check("toute levee ulterieure laisse un temoin qui le dit",
+      "Write-RetroStatus 'interrupted'" in _retro_code
+      and "error=$($_.Exception.Message)" in _retro_code, True)
+_catch = _retro_code[_retro_code.rindex("catch {"):]
+check("le rattrapage releve apres avoir temoigne, il n avale pas l echec",
+      "throw" in _catch, True)
+check("un status precis deja pose n est pas ecrase par le generique",
+      "if ($RetroStatusLast -eq 'started')" in _retro_code, True)
+
+# Le vocabulaire doit nommer la situation reelle : « failed » ne couvrait que
+# le manifeste illisible, et les echecs plus precoces n ecrivaient rien.
 check("chaque issue de l etape laisse un temoin, l option decochee comprise",
-      sorted(re.findall(r"Write-RetroStatus '(\w+)'", _retro_code)),
-      ["disabled", "failed", "ok", "partial"])
+      sorted(set(re.findall(r"Write-RetroStatus '([\w-]+)'", _retro_code))),
+      ["disabled", "interrupted", "manifest-unreadable", "ok", "partial",
+       "started"])
+# Le contrat vit dans le fichier PRODUIT : le lecteur qui l ouvre a la liste
+# des status sous les yeux sans avoir a retrouver le script qui l ecrit.
+check("le contrat est ECRIT dans le temoin, pas seulement declare a cote",
+      "$lines = $RetroStatusHeader + @(" in _status_code, True)
+_header = _status_code[_status_code.find("$RetroStatusHeader"):
+                       _status_code.find("function Write-RetroStatus")]
+for _state in ["started", "disabled", "interrupted", "ok", "partial",
+               "manifest-unreadable"]:
+    check(f"le temoin documente lui-meme son status « {_state} »",
+          _state in _header, True)
+check("le temoin dit lui-meme lequel autorise la synchronisation",
+      'Seul "ok" autorise la synchronisation' in _header, True)
+check("le temoin explique lui-meme a quoi sert run=",
+      "run= identifie le passage" in _header, True)
 # Le rapport doit voyager jusqu au temoin : un temoin qui ne porte que
 # « status=partial » ne dit pas QUEL emulateur manque.
 check("le temoin d un echec partiel embarque le rapport de l installation",

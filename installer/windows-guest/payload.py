@@ -245,6 +245,11 @@ def verify_staged(dest_root: Path) -> None:
         "provision/assets/steam-launch.ps1",
         "provision/assets/apollo-junction.ps1",
         "provision/assets/steam-shell.ps1",
+        # Dot-sources par 32-retro.ps1 AVANT qu'elle lise le basculement, donc
+        # requis meme sans retrogaming: absents, l'etape meurt au lieu de dire
+        # posement que l'option n'est pas cochee.
+        "provision/assets/retro-status.ps1",
+        "provision/assets/retro-7zr.ps1",
         "assets/wallpaper.png",
         "probe/advanced-color.ps1",
         "config/sunshine.conf",

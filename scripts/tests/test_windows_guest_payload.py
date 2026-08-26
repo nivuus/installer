@@ -33,6 +33,8 @@ def make_tree(root: pathlib.Path) -> "payload.PayloadSources":
     (root / "provision" / "assets" / "steam-launch.ps1").write_text("# steam-launch\n")
     (root / "provision" / "assets" / "apollo-junction.ps1").write_text("# junction\n")
     (root / "provision" / "assets" / "steam-shell.ps1").write_text("# steam-shell\n")
+    (root / "provision" / "assets" / "retro-status.ps1").write_text("# retro-status\n")
+    (root / "provision" / "assets" / "retro-7zr.ps1").write_text("# retro-7zr\n")
     (root / "assets").mkdir(exist_ok=True)
     (root / "assets" / "wallpaper.png").write_bytes(b"\x89PNG\r\n")
     (root / "probe").mkdir()
@@ -194,8 +196,11 @@ with tempfile.TemporaryDirectory() as tmp:
 # apollo-junction.ps1), and must be declared in verify_staged's required
 # list just like any other stage script - a rename would otherwise fail
 # deep inside the offline guest instead of at build time.
+# retro-status.ps1 et retro-7zr.ps1 : dot-sources par 32-retro.ps1, le premier
+# AVANT meme qu elle lise le basculement - une charge utile sans eux tue une
+# etape qui n avait, peut-etre, rien a faire.
 for asset in ["run-agent.ps1", "steam-session.ps1", "steam-launch.ps1",
-              "apollo-junction.ps1"]:
+              "apollo-junction.ps1", "retro-status.ps1", "retro-7zr.ps1"]:
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
         sources = make_tree(root / "src")
@@ -319,6 +324,8 @@ with tempfile.TemporaryDirectory() as tmp:
     (src / "provision" / "assets" / "steam-launch.ps1").write_text("x")
     (src / "provision" / "assets" / "apollo-junction.ps1").write_text("x")
     (src / "provision" / "assets" / "steam-shell.ps1").write_text("x")
+    (src / "provision" / "assets" / "retro-status.ps1").write_text("x")
+    (src / "provision" / "assets" / "retro-7zr.ps1").write_text("x")
     (src / "assets").mkdir(exist_ok=True)
     (src / "assets" / "wallpaper.png").write_bytes(b"\x89PNG\r\n")
     (src / "probe").mkdir()
@@ -342,6 +349,17 @@ with tempfile.TemporaryDirectory() as tmp:
           (dest / "config" / "secrets.psd1").is_file(), True)
     check("the staged payload carries the retro toggle",
           (dest / "config" / "retro.psd1").is_file(), True)
+
+# L en-tete du module disait « provisioning runs with no network at all »
+# quand l etape 32 telecharge les emulateurs depuis l invite. La prose n est
+# gardee par rien ; ce controle-ci est le garde bon marche : restaurer le texte
+# mensonger le fait tomber.
+_doc = payload.__doc__
+check("l en-tete de payload.py ne nie plus le reseau de l etape 32",
+      "no network at all" in _doc, False)
+check("... et nomme l exception, son objet et sa contrepartie",
+      "exception" in _doc.lower() and "retro install" in _doc
+      and "sha256" in _doc, True)
 
 # --- Tache 4 (sous-projet C2) : ce que la charge utile doit PORTER quand le
 # retrogaming est active, et surtout ne pas porter sinon.
