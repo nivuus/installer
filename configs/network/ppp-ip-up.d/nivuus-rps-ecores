@@ -1,0 +1,5 @@
+#!/bin/sh
+# pppd runs every script here when a link comes up; $1 is the fresh interface.
+# ppp0 is recreated at each reconnection with rps_cpus back to 0, so the mask
+# has to be rewritten here rather than once at boot.
+exec /usr/local/bin/net-rps-ecores.sh apply "$1"
