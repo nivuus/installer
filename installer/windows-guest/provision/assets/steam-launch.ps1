@@ -22,12 +22,27 @@
     Le journal existe pour que la prochaine session tranche sans avoir a
     deviner : il enregistre ce que le script a observe et par quelle condition
     il est sorti.
+
+    STEAM.HOLD : la synchronisation de bibliotheque (hote) arrete Steam pour
+    reecrire shortcuts.vdf, que Steam re-ecrit lui-meme a sa fermeture. C est
+    ce script qui remet Steam en route des qu une session Moonlight redemarre
+    - et donc lui, plus que le shell de session (qui ne lance plus Steam
+    depuis le 2026-08-26), qui pouvait ecraser une synchronisation en cours en
+    relancant Steam pendant qu elle ecrit. Un sentinel pose par l hote fait
+    sauter le lancement ; son age vient de l horodatage du FICHIER, pas d une
+    variable de ce processus qui ne survit pas d un appel a l autre, afin de
+    rester correct meme si l hote qui l a pose disparait en route.
 #>
 param([ValidateSet('Desktop', 'BigPicture')][string]$Mode = 'Desktop')
 
 $ErrorActionPreference = 'Continue'
 $SteamExe = 'D:\Steam\steam.exe'
 $Log = 'C:\nivuus\apollo\steam-launch.log'
+$HoldFile = 'C:\nivuus\state\steam.hold'
+# Une synchronisation qui plante ne doit pas priver la console de Steam
+# indefiniment sans que personne ne le remarque - cette machine n a ni clavier
+# ni ecran physique. Passe ce delai le sentinel est ignore, hote present ou pas.
+$HoldMaxAgeSeconds = 300
 
 # Borne haute VOLONTAIREMENT COURTE. Attendre protege le rendu ; attendre trop
 # reproduit le defaut qu on vient de corriger, ou un prep-cmd retardait chaque
@@ -45,6 +60,15 @@ function Write-Log([string]$Message) {
 }
 
 Write-Log "--- lancement demande, Mode=$Mode"
+
+if (Test-Path $HoldFile) {
+    $age = (Get-Date) - (Get-Item $HoldFile).LastWriteTime
+    if ($age.TotalSeconds -lt $HoldMaxAgeSeconds) {
+        Write-Log ("steam.hold actif depuis {0:N0} s (< {1} s) - bibliotheque en cours de synchronisation, lancement differe" -f $age.TotalSeconds, $HoldMaxAgeSeconds)
+        return
+    }
+    Write-Log ("steam.hold perime depuis {0:N0} s (>= {1} s) - ignore" -f $age.TotalSeconds, $HoldMaxAgeSeconds)
+}
 
 # Deux signaux, dont un seul suffit :
 #  - un moniteur WMI apparait : SudoVDA a presente un EDID, donc un affichage

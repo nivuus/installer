@@ -295,7 +295,7 @@ check(r"D:\Steam: 99-marker.ps1 matches apollo.STEAM_DIR",
       apollo.STEAM_DIR in marker, True)
 
 for name in ["run-all.ps1", "25-apollo.ps1", "40-agent.ps1", "99-marker.ps1",
-             "run-agent.ps1"]:
+             "run-agent.ps1", "steam-launch.ps1", "steam-shell.ps1"]:
     check(rf"C:\nivuus\state: {name} uses the canonical state directory",
           "C:\\nivuus\\state" in texts[name], True)
 
@@ -443,6 +443,40 @@ check("steam-launch.ps1 demarre bien Steam",
 # qu un ecran vide, donc on lance quand meme passe le delai.
 check("l attente est bornee", "WaitSeconds = 45" in _launch, True)
 
+# Task 2 (sub-project C2) : steam.hold. La synchronisation de bibliotheque
+# (hote) arrete Steam pour reecrire shortcuts.vdf, que Steam re-ecrit lui-meme
+# a sa fermeture - sans garde, la synchro reussit sans rien produire, par
+# intermittence, des qu une session redemarre Steam pendant l ecriture.
+#
+# Le shell de session (steam-shell.ps1) ne lance plus Steam depuis le
+# 2026-08-26 (voir les checks plus bas) : c est steam-launch.ps1, l entree
+# « detached » qu Apollo invoque a chaque nouvelle session, qui demarre
+# reellement Steam - et donc le seul endroit ou une garde a quelque chose a
+# empecher. La reintroduire dans le shell rouvrirait exactement les deux bugs
+# que son en-tete documente (rendu logiciel avant l ecran virtuel, et Steam
+# qui se relance quand on le quitte).
+check("steam-launch.ps1 connait le sentinel steam.hold",
+      "steam.hold" in _launch, True)
+# L age doit venir de l horodatage du FICHIER, jamais d une variable interne :
+# ce script est un nouveau processus a chaque invocation, sans etat persistant
+# entre deux sessions - une minuterie en memoire repartirait de zero a chaque
+# lancement, ne garantissant jamais l expiration.
+check("steam-launch.ps1 lit l age du sentinel sur son horodatage de fichier",
+      "LastWriteTime" in _launch, True)
+check("steam-launch.ps1 fait expirer le sentinel au bout de cinq minutes",
+      "$HoldMaxAgeSeconds = 300" in _launch, True)
+# La propriete qui compte le plus : la garde ne doit RIEN casser du
+# comportement normal. En l absence de sentinel (ou perime), Steam doit
+# toujours etre lance - sans quoi la garde aurait cache un vrai defaut derriere
+# un defaut different.
+check("steam-launch.ps1 demarre toujours Steam quand le sentinel est absent ou perime",
+      "Start-Process -FilePath $SteamExe" in _launch, True)
+check("le controle du sentinel precede la tentative de lancement, jamais l inverse",
+      _launch.find("HoldFile") < _launch.find("Start-Process -FilePath $SteamExe"), True)
+check("le sentinel actif fait sortir le script avant tout lancement",
+      "return" in _launch[_launch.find("HoldFile"):_launch.find("Start-Process -FilePath $SteamExe")],
+      True)
+
 # Les lecteurs optiques s emparent des premieres lettres libres et se posent
 # exactement la ou les partages doivent aller : mesure le 2026-08-26, les deux
 # media d installation tenaient E: et F:. L etage doit les deplacer AVANT.
@@ -480,6 +514,26 @@ check("le fond ne passe jamais devant un jeu",
       "$form.TopMost = $false" in _shell and "SendToBack" in _shell, True)
 check("l habillage ne peut pas empecher Steam de demarrer",
       "wallpaper not shown" in _shell, True)
+
+# Task 2 (sub-project C2) : le shell ne pose ni ne consomme le sentinel
+# steam.hold (c est steam-launch.ps1 qui empeche le relancement, voir plus
+# haut), mais c est lui qui possede l ecran - il doit dire au proprietaire que
+# la bibliotheque se met a jour, faute de quoi un ecran fige sans Steam se lit
+# comme une panne et quelqu un finit par redemarrer la machine en plein milieu
+# d une ecriture.
+check("le shell lit le meme sentinel steam.hold que steam-launch.ps1",
+      "steam.hold" in _shell, True)
+# Meme regle d expiration que steam-launch.ps1, sur le meme horodatage de
+# fichier - jamais une minuterie a lui, puisque AutoRestartShell peut relancer
+# ce script pendant la retenue elle-meme.
+check("le shell fait aussi expirer le sentinel au bout de cinq minutes, sur l horodatage du fichier",
+      "LastWriteTime" in _shell and "$HoldMaxAgeSeconds = 300" in _shell, True)
+check("le shell affiche un message pendant la retenue",
+      "bibliotheque" in _shell.lower(), True)
+# Le message doit rester l EXCEPTION : invisible par defaut, il ne doit
+# s afficher que lorsque le sentinel est effectivement pose et frais.
+check("le message de retenue reste cache hors retenue",
+      "$holdLabel.Visible = $false" in _shell, True)
 
 # New-Item -Force sur une cle de registre EXISTANTE ne cree pas : il SUPPRIME
 # l arbre puis le recree, et echoue sur « Cannot delete a subkey tree ». Le
