@@ -47,6 +47,12 @@
   identifie ses raccourcis par uuid. Derivation :
   uuid5(uuid5(NAMESPACE_URL, 'https://nivuus.local/apollo/apps'), <nom>).
 
+  -WindowStyle Hidden SUR LES QUATRE COMMANDES. Sans lui, la commande suivie —
+  qui vit toute la session — laisse une fenetre de console PowerShell posee sur
+  le bureau du client, et le lanceur en fait clignoter une seconde. Sur une
+  machine dont on a retire explorer.exe precisement pour qu'il ne reste rien a
+  l'ecran, c'est le seul element d'interface Windows encore visible.
+
   Ce commentaire est du Jinja, pas du JSON : il disparait au rendu. La forme
   rendue est exactement celle validee sur le binaire Apollo reel — n y ajouter
   aucune cle inconnue.
@@ -60,8 +66,8 @@
       "uuid": "59a5f434-e7d4-5124-b98c-eef9441c650c",
       "image-path": "desktop.png",
       "virtual-display": true,
-      "detached": ["powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\nivuus\\apollo\\steam-launch.ps1 -Mode Desktop"],
-      "cmd": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\nivuus\\apollo\\steam-session.ps1 -Mode Desktop",
+      "detached": ["powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\nivuus\\apollo\\steam-launch.ps1 -Mode Desktop"],
+      "cmd": "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\nivuus\\apollo\\steam-session.ps1 -Mode Desktop",
       "allow-client-commands": false
     },
     {
@@ -69,8 +75,8 @@
       "uuid": "26d810f3-c03b-5cb9-a30c-3f4b153db202",
       "image-path": "steam.png",
       "virtual-display": true,
-      "detached": ["powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\nivuus\\apollo\\steam-launch.ps1 -Mode BigPicture"],
-      "cmd": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\nivuus\\apollo\\steam-session.ps1 -Mode BigPicture",
+      "detached": ["powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\nivuus\\apollo\\steam-launch.ps1 -Mode BigPicture"],
+      "cmd": "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\nivuus\\apollo\\steam-session.ps1 -Mode BigPicture",
       "allow-client-commands": false
     }
   ]

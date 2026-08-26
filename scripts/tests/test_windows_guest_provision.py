@@ -354,6 +354,10 @@ check("steam-session.ps1 ne demarre pas Steam lui-meme",
       any("Start-Process" in ln for ln in _sess_code), False)
 check("steam-session.ps1 rend la main quand Steam a disparu pour de bon",
       "RestartGraceSeconds" in _sess, True)
+# Ce delai EST l attente ressentie apres avoir quitte Steam : 30 s se
+# ressentaient comme une minute (mesure du 2026-08-26). Il doit rester court.
+check("l attente apres la fermeture de Steam reste courte",
+      "$RestartGraceSeconds = 10" in _sess, True)
 # Au premier lancement Steam telecharge sa mise a jour avant d ouvrir une
 # fenetre ; trente secondes n y suffisent pas et la session se fermerait pendant
 # que Steam demarre encore.

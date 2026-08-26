@@ -110,6 +110,15 @@ check("le mode est passe a la commande suivie",
 check("aucune application ne bloque le demarrage avec un prep-cmd",
       any("prep-cmd" in a for a in apps["apps"]), False)
 
+# Sans -WindowStyle Hidden, la commande suivie — qui vit toute la session —
+# laisse une fenetre de console PowerShell posee sur le bureau du client. Sur
+# une machine dont on a retire explorer.exe precisement pour qu'il ne reste
+# rien a l'ecran, ce serait le seul element d'interface Windows visible.
+for _app in apps["apps"]:
+    _cmds = [_app["cmd"]] + list(_app.get("detached", []))
+    check(f"{_app['name']} n ouvre aucune fenetre de console",
+          all("-WindowStyle Hidden" in c for c in _cmds), True)
+
 secrets = apollo.render_secrets("adminpass", "nivuus", "p4ssw0rd")
 check("secrets file is a PowerShell data file", secrets.lstrip().startswith("@{"), True)
 for needle in ["adminpass", "nivuus", "p4ssw0rd"]:

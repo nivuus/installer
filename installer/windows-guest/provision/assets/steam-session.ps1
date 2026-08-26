@@ -35,7 +35,14 @@ $ErrorActionPreference = 'Continue'
 # relance, pas quelqu un qui quitte. Les deux sont indiscernables dans la table
 # des processus et seul le delai les separe : on laisse a Steam le temps de
 # revenir avant de conclure que la session est finie.
-$RestartGraceSeconds = 30
+#
+# CE DELAI EST DIRECTEMENT CE QU ATTEND L UTILISATEUR APRES AVOIR QUITTE STEAM,
+# et 30 s se ressentaient comme une minute (mesure du 2026-08-26 : Steam quitte
+# vers 22:10:00, session fermee a 22:10:31). Steam qui se relance pour sa mise
+# a jour respawne en quelques secondes, jamais dix : la marge reste largement
+# suffisante, et se tromper coute une session a rouvrir, pas un travail perdu —
+# Steam etant detache, la mise a jour se poursuit de toute facon.
+$RestartGraceSeconds = 10
 
 # Au TOUT PREMIER lancement, Steam telecharge sa propre mise a jour avant
 # d ouvrir la moindre fenetre — 242 Mo mesures le 2026-08-26. Attendre moins,
@@ -89,7 +96,9 @@ public static class NivuusWin {
 # --- 3. Tenir la session aussi longtemps que Steam vit ------------------------
 while ($true) {
     if (Test-SteamRunning) {
-        Start-Sleep -Seconds 3
+        # Une seconde, pas trois : ce sondage s ajoute tel quel au delai
+        # ci-dessus, et son cout est nul face aux heures que dure une session.
+        Start-Sleep -Seconds 1
         continue
     }
     $graceEnd = (Get-Date).AddSeconds($RestartGraceSeconds)
