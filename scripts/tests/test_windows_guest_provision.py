@@ -325,6 +325,12 @@ check("30-steam.ps1 masque C: dans les boites de dialogue",
       "NoDrives" in _steam and "NoViewOnDrive" in _steam, True)
 check("30-steam.ps1 relit les valeurs posees", "did not take" in _steam, True)
 
+# Au premier lancement Steam telecharge sa mise a jour avant d ouvrir une
+# fenetre ; trente secondes n y suffisent pas et le client voit un bureau vide.
+_max = (PROVISION / "assets" / "maximize-steam.ps1").read_text(encoding="utf-8")
+check("maximize-steam.ps1 laisse a Steam le temps de sa premiere mise a jour",
+      "AddSeconds(180)" in _max, True)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

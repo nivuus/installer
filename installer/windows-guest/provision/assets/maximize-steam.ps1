@@ -17,7 +17,14 @@ public static class Win {
 }
 '@
 
-$deadline = (Get-Date).AddSeconds(30)
+# 180 s, pas 30. Au TOUT PREMIER lancement, Steam telecharge sa propre mise a
+# jour avant d ouvrir la moindre fenetre — 242 Mo de paquets mesures le
+# 2026-08-26 — et trente secondes expirent largement avant. Le script rendait
+# alors la main sans rien avoir maximise, et le client voyait un bureau vide
+# avec un Steam bien vivant mais sans fenetre. Ce n est pas un cout : la boucle
+# sort des que la fenetre parait, donc l attente longue ne se paie que dans le
+# cas ou elle sert.
+$deadline = (Get-Date).AddSeconds(180)
 while ((Get-Date) -lt $deadline) {
     $p = Get-Process -Name 'steam' -ErrorAction SilentlyContinue |
          Where-Object { $_.MainWindowTitle -eq 'Steam' } | Select-Object -First 1
