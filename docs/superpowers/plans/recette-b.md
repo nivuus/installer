@@ -889,3 +889,42 @@ différence avec la mesure du 2026-08-22 qui avait fondé ce sous-projet.
 ⚠️ Une session ultérieure est retombée en SDR (`dynamicRange: 0`, Rec. 709,
 8 bits) avec `Display is HDR: true` inchangé : c'est le client qui demande du
 SDR, pas l'hôte qui échoue. Vérifier le réglage HDR côté TV avant de conclure.
+
+---
+
+## Test 3 — PASSÉ (2026-08-26, troisième tentative)
+
+Les deux premières tentatives n'avaient rien mesuré : `virsh define` était
+refusé en silence et le domaine rejouait l'ISO wipe (voir plus haut). Avec le
+média échangé par `change-media` et **vérifié** par `virsh domblklist` avant le
+démarrage, la reconstruction a enfin été exercée pour ce qu'elle est.
+
+| Témoin sur `D:` | Avant | Après |
+| --- | --- | --- |
+| `NIVUUS-DATA.id` | `created=2026-08-26T00:13:21` | `created=2026-08-26T00:13:21` |
+| Fichier marqueur | `temoin pose avant reconstruction` | idem |
+| `Steam\config\loginusers.vdf` | 50 octets | 50 octets |
+| `steamapps\common\FauxJeu\donnees.bin` | 200 Mo | 200 Mo |
+| SHA-256 de ce fichier | `C0AAB20BAD2EA4C6…` | `C0AAB20BAD2EA4C6…` |
+
+L'empreinte est le contrôle qui compte : elle prouve que les **octets** sont
+intacts, pas seulement que les noms de fichiers ont survécu.
+
+Et la reconstruction a bien eu lieu — sans quoi le test ne prouverait rien :
+
+- `C:\Windows.old` existe : Windows Setup a archivé l'installation précédente,
+  donc `C:` a réellement été refaite.
+- `20-disk.ps1` a journalisé **« D: carries an existing Nivuus marker:
+  created=2026-08-26T00:13:21 »** au lieu de « D: initialised (first install) ».
+  C'est le chemin de reconstruction du code, emprunté pour la première fois.
+- La disposition est inchangée : `1=D (140 GiB)`, `2=System`, `3=MSR`,
+  `4=C (198,9 GiB)`, `5=Recovery`. Setup a de nouveau rogné `C:` pour sa
+  Recovery — 199,1 → 198,9 GiB — et cette mécanique s'est déroulée entièrement
+  en aval de `C:`, sans toucher la partition de données placée en amont.
+
+**Ce que ce test ne prouve pas.** Les témoins sont synthétiques : un vrai
+`loginusers.vdf` de 224 octets et une bibliothèque Steam réelle n'ont pas été
+rejoués sur ce cycle-ci. Ce qui est établi, c'est que **la partition survit
+intacte, octet pour octet**, ce dont le contenu réel est un cas particulier. Une
+confirmation avec une session Steam authentique reste souhaitable, elle n'est
+plus critique.
