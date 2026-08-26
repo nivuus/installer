@@ -6,10 +6,10 @@ console-provisioning sub-project.
 retro installs nothing inside the Debian chroot - it is entirely a Windows
 guest VM concern, provisioned later and separately by
 windows-guest/build.py. This step's only job is to record the operator's
-choice durably on the target, at "etc/nivuus/retro.json"
-(features.RETRO_STATE_PATH): build.py falls back to reading it when its own
---retro flag is not given explicitly (see test_windows_guest_build.py for
-that side of the bridge). No chroot, no root privileges and no real target
+choice durably on the target, at the path common/retro.py defines once
+(RETRO_STATE_REL_PATH) for both this writer and build.py, its reader -
+see test_retro_marker_bridge.py for the test proving the two agree. No
+chroot, no root privileges and no real target
 filesystem are needed: these tests exercise apply_features() against a
 plain temporary directory, and none of the paths reached with the default
 feature list ("os-base" only) or with "retro" alone invoke chroot/apt at
@@ -24,8 +24,11 @@ import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "installer" / "install-engine"))
+# installer/ root, for `common` - features.py imports common.retro.
+sys.path.insert(0, str(REPO / "installer"))
 
 from steps import features  # noqa: E402
+from common.retro import retro_state_path  # noqa: E402
 
 failures = []
 
@@ -50,7 +53,7 @@ class FakeEmit:
 
 
 def retro_state(target: pathlib.Path) -> dict:
-    return json.loads((target / features.RETRO_STATE_PATH).read_text())
+    return json.loads(pathlib.Path(retro_state_path(str(target))).read_text())
 
 
 # --- _retro() directly -------------------------------------------------- #
@@ -96,7 +99,7 @@ with tempfile.TemporaryDirectory() as tmp:
     features.apply_features({"features": ["os-base"]}, str(target), "/nivuus",
                             {}, emit)
     check("no retro marker is written when retro was not selected",
-          (target / features.RETRO_STATE_PATH).exists(), False)
+          pathlib.Path(retro_state_path(str(target))).exists(), False)
     check("no retro progress line either",
           any("retro" in msg.lower()
               for _, _, msg in emit.info_messages + emit.warn_messages),

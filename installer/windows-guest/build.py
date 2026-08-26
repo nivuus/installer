@@ -21,21 +21,27 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+# installer/ root, for `common` - the single source of the retro marker
+# path shared with install-engine/steps/features.py (see common/retro.py).
+sys.path.insert(0, os.path.dirname(_HERE))
 
 import apollo  # noqa: E402
 import autounattend  # noqa: E402
 import media  # noqa: E402
 import payload  # noqa: E402
 import unattend_iso  # noqa: E402
+from common.retro import retro_state_path  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_KEY_FILE = "/root/.config/nivuus/windows-ltsc.key"
 DEFAULT_PASSWORD_FILE = "/root/.config/nivuus/windows-admin.pass"
 DEFAULT_APOLLO_PASSWORD_FILE = "/root/.config/nivuus/apollo-ui.pass"
-# install-engine/steps/features.py's RETRO_STATE_PATH, on the live host
-# ("etc/nivuus/retro.json" under an install target that is "/" once booted).
-DEFAULT_RETRO_MARKER = "/etc/nivuus/retro.json"
+# Same path install-engine/steps/features.py writes to, resolved against
+# the live host's "/" (that install target has become "/" by the time
+# this runs). Single source: common/retro.py, imported above.
+DEFAULT_RETRO_MARKER = retro_state_path()
 
 
 def read_secret(path: str, what: str) -> str:
@@ -109,10 +115,15 @@ def read_retro_marker(path: str = DEFAULT_RETRO_MARKER) -> bool:
     """Return what the install wizard recorded for retro on this host.
 
     Written by install-engine/steps/features.py only when "retro" was
-    checked - absent otherwise. A missing file, an unreadable one, and one
-    that explicitly says False all resolve to the same "off": a host this
-    tooling never installed, or one installed before this option existed,
-    carries no evidence retro was ever requested.
+    checked - absent otherwise. Only an explicit JSON `true` for "enabled"
+    counts as "on"; every other shape resolves to "off", never by
+    accident: a missing file, an unreadable one, a document that parses
+    but is not a JSON object (`null`, a list, a bare string - all valid
+    JSON, none of them something .get() can be called on), a missing
+    "enabled" key, and a truthy-but-not-boolean value for it (the string
+    "false", the integer 1) all mean the same thing here: no evidence the
+    owner explicitly asked for retro. `is True`, not `bool(...)`, is what
+    makes that last case refuse a coercion instead of accepting it.
     """
     marker = Path(path)
     if not marker.is_file():
@@ -121,7 +132,9 @@ def read_retro_marker(path: str = DEFAULT_RETRO_MARKER) -> bool:
         data = json.loads(marker.read_text())
     except (OSError, json.JSONDecodeError):
         return False
-    return bool(data.get("enabled", False))
+    if not isinstance(data, dict):
+        return False
+    return data.get("enabled") is True
 
 
 def resolve_retro(cli_value: bool | None,

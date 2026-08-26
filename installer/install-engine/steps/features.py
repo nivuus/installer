@@ -18,6 +18,7 @@ import uuid
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .util import StepError, chroot_run, chroot_stream, write_file
+from common.retro import retro_state_path
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates")
 
@@ -29,9 +30,6 @@ BRIDGES = {
 }
 
 NM_DIR = "etc/NetworkManager/system-connections"
-
-# Where the retro toggle is recorded on the target (see _retro()).
-RETRO_STATE_PATH = "etc/nivuus/retro.json"
 
 
 def _env() -> Environment:
@@ -196,10 +194,12 @@ def _retro(target, features, emit) -> None:
     Retro (RetroArch, via the `retro` package) runs entirely on the Windows
     guest VM, built separately and later by windows-guest/build.py -
     possibly on this very host, but as a manual step the wizard cannot see
-    or trigger. build.py falls back to reading this file (RETRO_STATE_PATH)
-    when its own --retro flag is not given explicitly, so this marker is
-    the only durable trace of the operator's choice once the installer has
-    moved on.
+    or trigger. build.py falls back to reading this file
+    (common.retro.retro_state_path()) when its own --retro flag is not
+    given explicitly, so this marker is the only durable trace of the
+    operator's choice once the installer has moved on. The path itself is
+    defined once, in common/retro.py, and imported by both sides - see
+    that module's docstring for why.
 
     Called only when "retro" was selected (see apply_features), like every
     other feature here: an unchecked install writes nothing, exactly as it
@@ -226,7 +226,7 @@ def _retro(target, features, emit) -> None:
         emit.info("features", 93, "Retrogaming (Windows guest VM): enabled")
         enabled = True
     write_file(
-        os.path.join(target, RETRO_STATE_PATH),
+        retro_state_path(target),
         json.dumps({"enabled": enabled}, indent=2) + "\n")
 
 

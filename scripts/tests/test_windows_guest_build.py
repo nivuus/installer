@@ -117,6 +117,45 @@ with tempfile.TemporaryDirectory() as tmp:
     check("an unreadable marker reads as off, not a crash",
           build.read_retro_marker(str(garbage_marker)), False)
 
+    # A truthy-but-not-boolean "enabled" must NOT activate retro: the
+    # owner's constraint is that nothing turns on without them having
+    # explicitly meant it, and bool("false") == True / bool(1) == True
+    # would silently violate that from a hand-edited or malformed marker.
+    string_false_marker = pathlib.Path(tmp) / "string-false.json"
+    string_false_marker.write_text('{"enabled": "false"}')
+    check('a string "false" for enabled reads as off, not on',
+          build.read_retro_marker(str(string_false_marker)), False)
+
+    int_one_marker = pathlib.Path(tmp) / "int-one.json"
+    int_one_marker.write_text('{"enabled": 1}')
+    check("an integer 1 for enabled reads as off, not on",
+          build.read_retro_marker(str(int_one_marker)), False)
+
+    string_true_marker = pathlib.Path(tmp) / "string-true.json"
+    string_true_marker.write_text('{"enabled": "true"}')
+    check('a string "true" for enabled reads as off, not on',
+          build.read_retro_marker(str(string_true_marker)), False)
+
+    missing_key_marker = pathlib.Path(tmp) / "missing-key.json"
+    missing_key_marker.write_text("{}")
+    check("a JSON object with no 'enabled' key reads as off",
+          build.read_retro_marker(str(missing_key_marker)), False)
+
+    # A document that is valid JSON but not an object must not crash the
+    # whole build with an AttributeError from calling .get() on it - it
+    # must resolve to "off", the same as every other shape with no
+    # evidence of an explicit "enabled": true.
+    for _label, _content in [
+        ("a bare JSON null", "null"),
+        ("a JSON list", '["enabled", true]'),
+        ("a bare JSON string", '"true"'),
+        ("a bare JSON number", "1"),
+    ]:
+        non_object_marker = pathlib.Path(tmp) / f"non-object-{_content[:1]}.json"
+        non_object_marker.write_text(_content)
+        check(f"{_label} reads as off, not a crash",
+              build.read_retro_marker(str(non_object_marker)), False)
+
 # --- resolve_retro(): the explicit flag always wins over the marker ----- #
 
 with tempfile.TemporaryDirectory() as tmp:
