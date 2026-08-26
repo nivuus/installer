@@ -87,6 +87,12 @@ def parse_args(argv=None):
     ap.add_argument("--hostname", default="NIVUUS-WIN")
     ap.add_argument("--image-name", default=None,
                     help="pick an image explicitly when the medium has several")
+    # Retrogaming (RetroArch, via the `retro` package) is OPTIONAL and off
+    # by default: the VM's job is cloud gaming infrastructure, not
+    # emulation, unless the operator asks for it.
+    ap.add_argument("--retro", action="store_true",
+                    help="enable retrogaming (RetroArch via the `retro` "
+                         "package) on the guest; off by default")
     return ap.parse_args(argv)
 
 
@@ -149,6 +155,10 @@ def main(argv=None) -> int:
             (config / "apps.json").write_text(apollo.render_apps(apollo.ApolloParams()))
             (config / "secrets.psd1").write_text(
                 apollo.render_secrets(password, args.apollo_user, apollo_password))
+            # Always rendered, checked or not: an absent file cannot be told
+            # apart from a payload built by a version that predates the
+            # option, an explicit Enabled = $false can.
+            (config / "retro.psd1").write_text(apollo.render_retro(args.retro))
             sources = payload.PayloadSources(
                 provision_dir=HERE / "provision", probe_dir=HERE / "probe",
                 drivers_dir=Path(args.drivers_dir), config_dir=config,

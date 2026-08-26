@@ -179,6 +179,27 @@ _conf = apollo.render_conf()
 check("sunshine.conf nomme l hote pour les clients",
       any(l.strip() == "sunshine_name = Nivuus" for l in _conf.splitlines()), True)
 
+# render_retro() must ALWAYS produce a file, in both cases: an absent
+# config/retro.psd1 must never be how "retro is off" is expressed (see
+# apollo.render_retro's docstring and payload.verify_staged's required list).
+_retro_off = apollo.render_retro(False)
+check("retro off is a PowerShell data file",
+      _retro_off.lstrip().startswith("@{"), True)
+check("retro off is explicit, not absent",
+      "Enabled = $false" in _retro_off, True)
+check("retro off does not also claim enabled",
+      "Enabled = $true" in _retro_off, False)
+
+_retro_on = apollo.render_retro(True)
+check("retro on flips the flag", "Enabled = $true" in _retro_on, True)
+check("retro on does not also claim disabled",
+      "Enabled = $false" in _retro_on, False)
+
+# SteamDir defaults to the same D:\Steam every other guest step targets
+# (30-steam.ps1's $SteamDir literal, apollo.STEAM_DIR).
+check("retro.psd1 carries the Steam directory guest steps can read",
+      "SteamDir = 'D:\\Steam'" in _retro_on, True)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

@@ -68,6 +68,22 @@ try:
 except SystemExit as e:
     failures.append(f"disk-mode guard refused the default wipe mode: {e}")
 
+# Retrogaming is optional and off unless explicitly requested: a build run
+# with the same command line as before this option existed must keep
+# producing a guest with retro disabled.
+args = build.parse_args([
+    "--windows-iso", "/nonexistent.iso",
+    "--drivers-dir", "/nonexistent-drivers",
+])
+check("retro defaults to off", args.retro, False)
+
+args = build.parse_args([
+    "--windows-iso", "/nonexistent.iso",
+    "--drivers-dir", "/nonexistent-drivers",
+    "--retro",
+])
+check("--retro turns it on", args.retro, True)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

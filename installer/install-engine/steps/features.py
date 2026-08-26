@@ -3,10 +3,15 @@
 Each feature is self-contained and gated on the wizard's feature list. The KVM/
 VFIO/thermal feature reuses the repo's install.sh (run with computed, non-
 hardcoded kernel params); networking/wifi/firewall render Jinja2 templates from
-the wizard answers; docker/home-assistant deploy the application layer.
+the wizard answers; docker/home-assistant deploy the application layer. retro
+(RetroArch, via the `retro` package) is the odd one out: it installs nothing
+in the chroot - it runs entirely on the Windows guest VM, provisioned
+separately and later by windows-guest/build.py - so its only job here is to
+record the operator's choice durably on the target; see _retro().
 """
 from __future__ import annotations
 
+import json
 import os
 import uuid
 
@@ -24,6 +29,9 @@ BRIDGES = {
 }
 
 NM_DIR = "etc/NetworkManager/system-connections"
+
+# Where the retro toggle is recorded on the target (see _retro()).
+RETRO_STATE_PATH = "etc/nivuus/retro.json"
 
 
 def _env() -> Environment:
@@ -53,6 +61,9 @@ def apply_features(config: dict, target: str, nivuus_dir: str, hw: dict,
         _firewall(config, target, emit)
     if "docker" in features:
         _docker(target, emit)
+    # Unconditional, unlike the features above: the state must be recorded
+    # whether or not "retro" was picked (see _retro()'s docstring).
+    _retro(target, features, emit)
     if features & {"home-assistant", "mqtt"}:
         _home_assistant_mqtt(target, nivuus_dir, features, emit)
 
@@ -177,6 +188,43 @@ def _docker(target, emit) -> None:
     chroot_run(target, ["apt-get", "install", "-y", "docker.io",
                         "docker-compose-v2"], check=False)
     chroot_run(target, ["systemctl", "enable", "docker"], check=False)
+
+
+# --------------------------------------------------------------------------- #
+def _retro(target, features, emit) -> None:
+    """Record the retrogaming toggle on the target filesystem.
+
+    Retro (RetroArch, via the `retro` package) runs entirely on the Windows
+    guest VM, built separately and later by windows-guest/build.py -
+    possibly on this very host, but as a manual step the wizard cannot see
+    or trigger. This step's only job is to leave a durable, unambiguous
+    record of the operator's choice for that later step to read.
+
+    Called unconditionally (contrast with every other feature above, which
+    only acts when selected): the file must exist and say EXPLICITLY
+    "disabled" when the box was not checked. An absent file cannot be told
+    apart from a target built by a version of this installer that predates
+    the retro option at all; a file that says "enabled": false can't be
+    confused with anything.
+
+    retro depends on the Windows guest VM (the "kvm-vfio" feature): checking
+    it without also checking kvm-vfio cannot work, and the wizard already
+    refuses that combination at submit time (see webapp/models.py). This is
+    the same guard, defence in depth, so a config built some other way still
+    fails loudly here rather than leaving a VM built without KVM/VFIO to
+    silently ignore a retro toggle it can never honour.
+    """
+    enabled = "retro" in features
+    if enabled and "kvm-vfio" not in features:
+        raise StepError(
+            "'retro' requires 'kvm-vfio' (the Windows guest VM); "
+            "retrogaming cannot run without the VM it depends on"
+        )
+    emit.info("features", 93,
+              f"Retrogaming (Windows guest VM): "
+              f"{'enabled' if enabled else 'disabled'}")
+    write_file(os.path.join(target, RETRO_STATE_PATH),
+              json.dumps({"enabled": enabled}, indent=2) + "\n")
 
 
 # --------------------------------------------------------------------------- #

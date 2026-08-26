@@ -52,7 +52,7 @@ def make_tree(root: pathlib.Path) -> "payload.PayloadSources":
     (drivers / "agent" / "agent.exe").write_bytes(b"MZ")
     config = root / "config"
     config.mkdir()
-    for name in ["sunshine.conf", "apps.json", "secrets.psd1"]:
+    for name in ["sunshine.conf", "apps.json", "secrets.psd1", "retro.psd1"]:
         (config / name).write_text(f"# {name}\n")
     return payload.PayloadSources(provision_dir=root / "provision",
                                   probe_dir=root / "probe",
@@ -164,6 +164,25 @@ with tempfile.TemporaryDirectory() as tmp:
         if "config/sunshine.conf" not in str(e):
             failures.append(
                 f"verify_staged error doesn't name config/sunshine.conf: {e}")
+
+# retro.psd1 must be required exactly like the other config/* files: it must
+# be present ALWAYS, whether or not retro was checked, so a missing file can
+# never be mistaken for "the option is off" (see apollo.render_retro()).
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    sources = make_tree(root / "src")
+    dest = root / "staging" / "nivuus"
+    marker = payload.marker_text("Windows 11", "20260822")
+    payload.stage_payload(dest, sources, marker)
+    (dest / "config" / "retro.psd1").unlink()
+    try:
+        payload.verify_staged(dest)
+        failures.append(
+            "verify_staged: accepted a staged tree missing config/retro.psd1")
+    except payload.PayloadError as e:
+        if "config/retro.psd1" not in str(e):
+            failures.append(
+                f"verify_staged error doesn't name config/retro.psd1: {e}")
 
 # FIX 6 (final review): provision/assets/*.ps1 scripts are artefacts
 # consumed by 40-agent.ps1 and 25-apollo.ps1 (which also dot-sources
@@ -303,7 +322,7 @@ with tempfile.TemporaryDirectory() as tmp:
     _make_complete_payload(drivers)
     cfg = src / "config"
     cfg.mkdir()
-    for name in ["sunshine.conf", "apps.json", "secrets.psd1"]:
+    for name in ["sunshine.conf", "apps.json", "secrets.psd1", "retro.psd1"]:
         (cfg / name).write_text("x")
     sources = payload.PayloadSources(
         provision_dir=src / "provision", probe_dir=src / "probe",
@@ -315,6 +334,8 @@ with tempfile.TemporaryDirectory() as tmp:
           (dest / "config" / "sunshine.conf").is_file(), True)
     check("the staged payload carries the secrets",
           (dest / "config" / "secrets.psd1").is_file(), True)
+    check("the staged payload carries the retro toggle",
+          (dest / "config" / "retro.psd1").is_file(), True)
 
 if failures:
     print(f"FAIL ({len(failures)})")

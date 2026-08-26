@@ -152,6 +152,7 @@ def verify_staged(dest_root: Path) -> None:
         "config/sunshine.conf",
         "config/apps.json",
         "config/secrets.psd1",
+        "config/retro.psd1",
     ]
     for rel in required:
         path = dest_root / rel

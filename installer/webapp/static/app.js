@@ -18,6 +18,7 @@ const FEATURES = [
   { key: "docker", label: "Docker", desc: "Moteur Docker + docker compose", def: false },
   { key: "home-assistant", label: "Home Assistant + MQTT", desc: "Domotique + agent système MQTT", def: false },
   { key: "gpu-passthrough", label: "GPU passthrough", desc: "Liaison vfio-pci (auto-détecté)", def: false, auto: true },
+  { key: "retro", label: "Rétrogaming (VM Windows)", desc: "RetroArch + bibliothèque de jeux rétro dans Steam (nécessite KVM / VFIO)", def: false },
 ];
 
 let hw = null;          // detected hardware snapshot
@@ -34,6 +35,7 @@ async function init() {
   buildFeatureList();
   wireNav();
   wireConditionalFields();
+  wireRetroDependency();
   await loadHardware();
   showStep(0);
 }
@@ -135,6 +137,26 @@ function wireConditionalFields() {
     const f = $('input[data-feature="wifi-ap"]');
     if (f) f.checked = e.target.checked;
   });
+}
+
+// retro (RetroArch, via the `retro` package, provisioned on the Windows
+// guest VM) makes no sense without the VM itself: say so at the moment of
+// the choice, not as a submit-time error (the backend still refuses the
+// combination too - see models.py).
+function wireRetroDependency() {
+  const vm = $('input[data-feature="kvm-vfio"]');
+  const retro = $('input[data-feature="retro"]');
+  if (!vm || !retro) return;
+  const sync = () => {
+    retro.disabled = !vm.checked;
+    if (!vm.checked) retro.checked = false;
+    const wrap = retro.closest(".feature");
+    wrap.querySelector(".fdesc").textContent = vm.checked
+      ? "RetroArch + bibliothèque de jeux rétro dans Steam (nécessite KVM / VFIO)"
+      : "Nécessite la VM Windows (KVM / VFIO) : cochez-la d'abord.";
+  };
+  vm.addEventListener("change", sync);
+  sync();
 }
 
 function move(delta) {
