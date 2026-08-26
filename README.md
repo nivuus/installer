@@ -12,7 +12,7 @@ No SSH. No config files. No forty-tab how-to. A wizard.
 
 [![Build ISO](https://github.com/nivuus/installer/actions/workflows/build-iso.yml/badge.svg)](https://github.com/nivuus/installer/actions/workflows/build-iso.yml)
 [![Latest ISO](https://img.shields.io/github/v/release/nivuus/installer?label=download%20ISO)](https://github.com/nivuus/installer/releases/latest)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-black.svg)](LICENSE)
 ![Debian 12](https://img.shields.io/badge/base-Debian%2012-black)
 ![UEFI](https://img.shields.io/badge/boot-UEFI-black)
 
