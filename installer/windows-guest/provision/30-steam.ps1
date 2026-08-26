@@ -46,6 +46,11 @@ if (Test-Path $login) { Write-Host 'existing Steam session preserved' }
 #
 # The agent is unaffected: 40-agent.ps1 runs it from an AtLogOn scheduled task,
 # which is independent of the shell.
+$wallpaperSrc = Join-Path $PayloadRoot 'assets\wallpaper.png'
+if (Test-Path $wallpaperSrc) {
+    Copy-Item -Path $wallpaperSrc -Destination 'C:\nivuus\wallpaper.png' -Force
+    Write-Host 'wallpaper installed'
+}
 $shellScript = 'C:\nivuus\apollo\steam-shell.ps1'
 Copy-Item -Path (Join-Path $PayloadRoot 'provision\assets\steam-shell.ps1') `
           -Destination $shellScript -Force

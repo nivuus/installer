@@ -16,7 +16,7 @@ PROBE = GUEST / "probe"
 
 STAGES = ["00-bootstrap.ps1", "10-nvidia.ps1", "15-virtio.ps1", "20-disk.ps1",
           "25-apollo.ps1", "30-steam.ps1", "35-shares.ps1",
-          "40-agent.ps1", "50-power.ps1",
+          "40-agent.ps1", "45-debloat.ps1", "50-power.ps1",
           "55-updates.ps1", "99-marker.ps1"]
 
 failures = []
@@ -342,6 +342,27 @@ check("35-shares.ps1 cree un service par partage (VirtioFsSvc n en monte qu un)"
       "sc.exe create" in _sh, True)
 check("35-shares.ps1 relit le montage au lieu de croire le demarrage du service",
       "Test-Path" in _sh and "not mounted" in _sh, True)
+
+# GameDVR est une SECONDE capture d ecran tournant a cote de celle d Apollo, et
+# WSearch indexerait les partages virtiofs de l etage 35 a travers un systeme de
+# fichiers reseau. Defender et Edge restent : c est un choix, pas un oubli.
+_deb = (PROVISION / "45-debloat.ps1").read_text(encoding="utf-8")
+check("45-debloat.ps1 coupe GameDVR", "GameDVR_Enabled" in _deb, True)
+check("45-debloat.ps1 coupe l indexation", "WSearch" in _deb, True)
+check("45-debloat.ps1 relit chaque service au lieu de croire Set-Service",
+      "is still" in _deb, True)
+check("45-debloat.ps1 ne touche pas a Defender",
+      "Defender" in _deb and "Remove" not in _deb.split("Defender")[1][:200], True)
+
+# Sans explorer.exe il n y a pas de bureau, donc pas de papier peint : une image
+# posee dans le registre ne s afficherait nulle part. Le lanceur la dessine
+# lui-meme, DERRIERE tout le reste, et sous try — un fond qui echoue ne doit pas
+# empecher la console de demarrer.
+check("le lanceur dessine le fond lui-meme", "BackgroundImage" in _shell, True)
+check("le fond ne passe jamais devant un jeu",
+      "$form.TopMost = $false" in _shell and "SendToBack" in _shell, True)
+check("l habillage ne peut pas empecher Steam de demarrer",
+      "wallpaper not shown" in _shell, True)
 
 if failures:
     print(f"FAIL ({len(failures)})")

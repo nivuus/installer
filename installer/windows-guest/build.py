@@ -151,7 +151,8 @@ def main(argv=None) -> int:
                 apollo.render_secrets(password, args.apollo_user, apollo_password))
             sources = payload.PayloadSources(
                 provision_dir=HERE / "provision", probe_dir=HERE / "probe",
-                drivers_dir=Path(args.drivers_dir), config_dir=config)
+                drivers_dir=Path(args.drivers_dir), config_dir=config,
+                assets_dir=HERE / "assets")
 
             stage = Path(tmp) / "stage"
             stage.mkdir()

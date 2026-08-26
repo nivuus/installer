@@ -32,6 +32,8 @@ def make_tree(root: pathlib.Path) -> "payload.PayloadSources":
     (root / "provision" / "assets" / "maximize-steam.ps1").write_text("# maximize\n")
     (root / "provision" / "assets" / "apollo-junction.ps1").write_text("# junction\n")
     (root / "provision" / "assets" / "steam-shell.ps1").write_text("# steam-shell\n")
+    (root / "assets").mkdir(exist_ok=True)
+    (root / "assets" / "wallpaper.png").write_bytes(b"\x89PNG\r\n")
     (root / "probe").mkdir()
     (root / "probe" / "advanced-color.ps1").write_text("# probe\n")
     drivers = root / "drivers"
@@ -54,7 +56,8 @@ def make_tree(root: pathlib.Path) -> "payload.PayloadSources":
     return payload.PayloadSources(provision_dir=root / "provision",
                                   probe_dir=root / "probe",
                                   drivers_dir=drivers,
-                                  config_dir=config)
+                                  config_dir=config,
+                                  assets_dir=root / "assets")
 
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -289,6 +292,8 @@ with tempfile.TemporaryDirectory() as tmp:
     (src / "provision" / "assets" / "maximize-steam.ps1").write_text("x")
     (src / "provision" / "assets" / "apollo-junction.ps1").write_text("x")
     (src / "provision" / "assets" / "steam-shell.ps1").write_text("x")
+    (src / "assets").mkdir(exist_ok=True)
+    (src / "assets" / "wallpaper.png").write_bytes(b"\x89PNG\r\n")
     (src / "probe").mkdir()
     (src / "probe" / "advanced-color.ps1").write_text("x")
     drivers = src / "drivers"
@@ -299,7 +304,7 @@ with tempfile.TemporaryDirectory() as tmp:
         (cfg / name).write_text("x")
     sources = payload.PayloadSources(
         provision_dir=src / "provision", probe_dir=src / "probe",
-        drivers_dir=drivers, config_dir=cfg)
+        drivers_dir=drivers, config_dir=cfg, assets_dir=src / "assets")
     dest = root / "nivuus"
     payload.stage_payload(dest, sources, payload.marker_text("img", "b1"))
     payload.verify_staged(dest)

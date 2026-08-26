@@ -26,6 +26,9 @@ class PayloadSources:
     # Rendered Apollo configuration and the secrets the guest needs. Built at
     # build time into a temporary directory, never checked into the repo.
     config_dir: Path | None = None
+    # Branding shipped to the guest: the shell paints it itself, because
+    # without explorer.exe there is no desktop and therefore no wallpaper.
+    assets_dir: Path | None = None
 
 
 # Each entry: (subdirectory, glob, human description). viofs is deliberately
@@ -76,6 +79,8 @@ def plan_payload(sources: PayloadSources) -> list[tuple[Path, str]]:
                + _walk(sources.drivers_dir, "drivers"))
     if sources.config_dir is not None:
         entries += _walk(sources.config_dir, "config")
+    if sources.assets_dir is not None:
+        entries += _walk(sources.assets_dir, "assets")
     return entries
 
 
@@ -105,6 +110,8 @@ def stage_payload(dest_root: Path, sources: PayloadSources, marker: str) -> None
                  sources.drivers_dir.resolve()}
     if sources.config_dir is not None:
         src_paths.add(sources.config_dir.resolve())
+    if sources.assets_dir is not None:
+        src_paths.add(sources.assets_dir.resolve())
     if dest_resolved in src_paths:
         raise PayloadError(f"dest_root cannot be a source directory: {dest_root}")
     if dest_resolved.parent == dest_resolved or not dest_resolved.name:
@@ -139,6 +146,7 @@ def verify_staged(dest_root: Path) -> None:
         "provision/assets/maximize-steam.ps1",
         "provision/assets/apollo-junction.ps1",
         "provision/assets/steam-shell.ps1",
+        "assets/wallpaper.png",
         "probe/advanced-color.ps1",
         "config/sunshine.conf",
         "config/apps.json",
