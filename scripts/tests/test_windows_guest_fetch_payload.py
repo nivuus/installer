@@ -87,6 +87,62 @@ with tempfile.TemporaryDirectory() as tmp:
         if "collide" not in str(e):
             failures.append(f"flatten_extracted collision error is unclear: {e}")
 
+# --- Tache 4 (sous-projet C2) : les artefacts du retrogaming ne sont
+# telecharges que si l option est cochee. Une installation sans retrogaming
+# n a pas a payer un interpreteur, un extracteur et un magasin de roues.
+_plain = [d.name for d in fetch_payload.plan_downloads(pathlib.Path("/tmp/x"))]
+for name in ["7zr", "retro-python"]:
+    check(f"sans --retro, {name} n est pas telecharge", name in _plain, False)
+
+_retro = fetch_payload.plan_downloads(pathlib.Path("/tmp/x"), retro=True)
+_by_name = {d.name: d for d in _retro}
+check("sans --retro, rien d autre ne change",
+      [d.name for d in _retro][:len(_plain)], _plain)
+check("avec --retro, 7zr.exe est telecharge", "7zr" in _by_name, True)
+check("avec --retro, l installateur Python est telecharge",
+      "retro-python" in _by_name, True)
+check("les telechargements restent uniquement nommes",
+      len(_retro), len({d.name for d in _retro}))
+# Ils atterrissent dans drivers/retro/, la ou payload.RETRO_BINARIES les
+# cherche et d ou 32-retro.ps1 les lit sur l invite.
+check("7zr.exe atterrit dans drivers/retro/",
+      _by_name["7zr"].dest, pathlib.Path("/tmp/x/retro/7zr.exe"))
+check("l installateur Python atterrit dans drivers/retro/",
+      _by_name["retro-python"].dest.parent, pathlib.Path("/tmp/x/retro"))
+# 7zr.exe vient de l editeur de 7-Zip, pas d un miroir : c est un binaire
+# execute sur la console.
+check("7zr.exe vient bien de 7-zip.org",
+      _by_name["7zr"].url, "https://www.7-zip.org/a/7zr.exe")
+
+# La version de Python et le tag des roues ne peuvent pas diverger : les
+# dependances de py7zr sont COMPILEES, donc taguees pour une seule version
+# mineure. Un interpreteur 3.13 sur l invite et des roues cp312 ne se
+# rencontreraient qu au moment du pip install, hors ligne, sur une machine
+# sans ecran.
+check("le tag des roues derive de la version de l installateur Python",
+      fetch_payload.RETRO_PY_TAG,
+      "".join(fetch_payload.RETRO_PYTHON_VERSION.split(".")[:2]))
+check("l URL de l installateur porte cette meme version",
+      f"python-{fetch_payload.RETRO_PYTHON_VERSION}-amd64.exe"
+      in fetch_payload.RETRO_PYTHON_URL, True)
+check("le nom du fichier depose porte cette meme version",
+      _by_name["retro-python"].dest.name,
+      f"python-{fetch_payload.RETRO_PYTHON_VERSION}-amd64.exe")
+
+# Les roues sont construites depuis le depot voisin packages/retro, jamais
+# depuis PyPI : c est ce depot-ci qui decide quelle version part sur l invite.
+check("la source par defaut du paquet est le depot voisin packages/retro",
+      fetch_payload.RETRO_SRC.name, "retro")
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    try:
+        fetch_payload.build_retro_wheels(root / "pas-un-paquet", root / "drivers")
+        failures.append("build_retro_wheels: accepted a source with no pyproject.toml")
+    except fetch_payload.FetchError as e:
+        if "retro-src" not in str(e):
+            failures.append(f"build_retro_wheels error doesn't point at --retro-src: {e}")
+
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

@@ -39,6 +39,32 @@ STEAM_URL = "https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe"
 WINFSP_URL = ("https://github.com/winfsp/winfsp/releases/download/"
               "v2.0/winfsp-2.0.23075.msi")
 
+# Retrogaming (OPTIONAL, --retro). Three artefacts the guest cannot obtain on
+# its own, ~30 MB in total: a payload built WITHOUT retrogaming carries none
+# of them.
+#
+# 7zr.exe is a REQUIREMENT, not a convenience: RetroArch's archives - and
+# only those, among the manifest's - use the BCJ2 compression filter, which
+# py7zr marks "Unsupported" in its own code, and the vendor publishes no .zip
+# variant. Without it, the emulator covering most of the retro library does
+# not install at all.
+SEVENZR_URL = "https://www.7-zip.org/a/7zr.exe"
+# The guest ships no Python and the `retro` package is Python. This version
+# is load-bearing beyond the interpreter itself: py7zr's dependencies are
+# compiled wheels, tagged for one minor version, so the wheels downloaded
+# below and the interpreter installed on the guest must agree. RETRO_PY_TAG
+# is DERIVED from it rather than written twice - the two drifting apart would
+# produce wheels no guest Python can install, and pip would only say so at
+# provisioning time, offline, on a machine with no screen.
+RETRO_PYTHON_VERSION = "3.12.10"
+RETRO_PY_TAG = "".join(RETRO_PYTHON_VERSION.split(".")[:2])
+RETRO_PYTHON_URL = (f"https://www.python.org/ftp/python/{RETRO_PYTHON_VERSION}"
+                    f"/python-{RETRO_PYTHON_VERSION}-amd64.exe")
+RETRO_DIRNAME = "retro"
+RETRO_WHEELS_DIRNAME = "wheels"
+# packages/retro, the neighbouring repository this payload installs from.
+RETRO_SRC = Path(__file__).resolve().parents[2].parent / "retro"
+
 # Steam and the virtio-win ISO are deliberately unpinned moving pointers -
 # pinning their sha256 would break the build on every upstream refresh. What
 # is tracked instead is CHANGE, not a fixed value: the first digest seen for
@@ -53,15 +79,28 @@ MANIFEST_NAME = "payload-manifest.txt"
 BUILD_CACHE_DIRNAME = ".build-cache"
 
 
-def plan_downloads(drivers_dir: Path) -> list[Download]:
-    """Pure: what would be fetched, and where each file would land."""
-    return [
+def plan_downloads(drivers_dir: Path, retro: bool = False) -> list[Download]:
+    """Pure: what would be fetched, and where each file would land.
+
+    The retro artefacts are appended ONLY when the operator asked for
+    retrogaming: an installation without it has no reason to grow by an
+    interpreter, an extractor and a wheelhouse it will never open.
+    """
+    items = [
         Download("steam", STEAM_URL, drivers_dir / "steam" / "SteamSetup.exe"),
         Download("winfsp", WINFSP_URL,
                  drivers_dir / "winfsp" / "winfsp-2.0.23075.msi"),
         Download("virtio-iso", VIRTIO_ISO_URL,
                  drivers_dir / BUILD_CACHE_DIRNAME / "virtio-win.iso"),
     ]
+    if retro:
+        retro_dir = drivers_dir / RETRO_DIRNAME
+        items += [
+            Download("7zr", SEVENZR_URL, retro_dir / "7zr.exe"),
+            Download("retro-python", RETRO_PYTHON_URL,
+                     retro_dir / f"python-{RETRO_PYTHON_VERSION}-amd64.exe"),
+        ]
+    return items
 
 
 def load_manifest(drivers_dir: Path) -> dict[str, tuple[str, str]]:
@@ -186,17 +225,80 @@ def extract_virtio(iso: Path, drivers_dir: Path) -> None:
     print(f"extracted {', '.join(VIRTIO_MEMBERS)} from {iso.name}")
 
 
+def _pip(args: list[str], what: str) -> None:
+    """Run pip on THIS host, and fail loudly with its own diagnostic."""
+    proc = subprocess.run([sys.executable, "-m", "pip", *args],
+                          text=True, capture_output=True)
+    if proc.returncode != 0:
+        raise FetchError(f"{what} failed (pip exited {proc.returncode}):\n"
+                         f"{proc.stderr.strip()[-1200:]}")
+
+
+def build_retro_wheels(retro_src: Path, drivers_dir: Path) -> Path:
+    """Build the `retro` wheel and gather its WINDOWS dependencies.
+
+    The guest installs the package with `pip install --no-index`, so the
+    whole dependency closure has to be here: provisioning must not depend on
+    PyPI being reachable (the emulator downloads that follow are the one
+    deliberate exception, and they are hash-pinned).
+
+    --platform win_amd64 with --python-version is what makes this correct
+    from a Linux build host: py7zr's dependencies (pycryptodomex, pyzstd,
+    pybcj...) are COMPILED, and resolving them for the build host would
+    quietly stage Linux .so wheels that no guest can install.
+    """
+    if not (retro_src / "pyproject.toml").is_file():
+        raise FetchError(
+            f"no retro package at {retro_src}: pass --retro-src pointing at "
+            "the packages/retro checkout this payload should install")
+    wheels = drivers_dir / RETRO_DIRNAME / RETRO_WHEELS_DIRNAME
+    wheels.mkdir(parents=True, exist_ok=True)
+    # Drop any previously built retro wheel first: two versions side by side
+    # would leave "which one does the guest install?" to pip's ordering.
+    for stale in wheels.glob("retro-*.whl"):
+        stale.unlink()
+    _pip(["wheel", "--no-deps", "--wheel-dir", str(wheels), str(retro_src)],
+         f"building the retro wheel from {retro_src}")
+    built = list(wheels.glob("retro-*.whl"))
+    if len(built) != 1:
+        raise FetchError(f"expected exactly one retro wheel in {wheels}, "
+                         f"got {[w.name for w in built]}")
+    _pip(["download", "--only-binary=:all:", "--platform", "win_amd64",
+          "--python-version", RETRO_PY_TAG, "--dest", str(wheels),
+          str(built[0])],
+         f"downloading the retro dependencies for cp{RETRO_PY_TAG} win_amd64")
+    return wheels
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Fetch the B payload binaries")
     ap.add_argument("--drivers-dir", required=True)
+    # Same switch, same default and same reason as build.py --retro: nothing
+    # retro-related is fetched unless the operator asked for it.
+    ap.add_argument("--retro", action="store_true",
+                    help="also fetch what retrogaming needs (7zr.exe, the "
+                         "Python installer and the retro wheelhouse); off by "
+                         "default, and ~30 MB the payload otherwise avoids")
+    ap.add_argument("--retro-src", default=str(RETRO_SRC),
+                    help="checkout of the retro package to build the wheel "
+                         f"from (default: {RETRO_SRC})")
     args = ap.parse_args(argv)
     drivers = Path(args.drivers_dir)
     try:
-        for item in plan_downloads(drivers):
+        for item in plan_downloads(drivers, retro=args.retro):
             print(f"  {item.name} sha256 {fetch(item, drivers)}")
         extract_virtio(drivers / BUILD_CACHE_DIRNAME / "virtio-win.iso", drivers)
+        if args.retro:
+            wheels = build_retro_wheels(Path(args.retro_src), drivers)
+            names = sorted(w.name for w in wheels.glob("*.whl"))
+            print(f"  retro: {len(names)} wheels in {wheels}")
+            print("    " + ", ".join(names))
     except FetchError as exc:
         raise SystemExit(str(exc))
+    if not args.retro:
+        print("\nRetrogaming was not requested (--retro absent): 7zr.exe, the "
+              "Python installer and the retro wheels were NOT fetched, and "
+              "32-retro.ps1 will say on the guest that the option is off.")
     print("\nNot fetched, and never fetchable: agent/agent.exe must be "
           "extracted from the current Windows VM before it is wiped.")
     return 0

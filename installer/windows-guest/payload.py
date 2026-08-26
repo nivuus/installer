@@ -5,6 +5,7 @@ network at all. A missing binary fails the build, never the install.
 """
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,14 +49,68 @@ REQUIRED_BINARIES = [
 ]
 
 
-def missing_binaries(drivers_dir: Path) -> list[str]:
-    """Return a human-readable list of the offline binaries not provided."""
+# Retrogaming rides in drivers/retro/, fetched only by `fetch_payload.py
+# --retro`. The wheels are named one by one rather than checked as "the
+# directory is not empty": a `pip download` that silently resolved no
+# dependency would leave a wheels/ holding the retro wheel alone, and the
+# guest would then fail offline, deep inside provisioning, on an import.
+RETRO_BINARIES = [
+    ("retro", "7zr.exe",
+     "7zr.exe (RetroArch's archives use the BCJ2 filter, which py7zr cannot "
+     "read, and no .zip variant exists - without it no retro emulator installs)"),
+    ("retro", "python-*-amd64.exe",
+     "Python installer (LTSC ships none, and the retro package is Python)"),
+    ("retro/wheels", "retro-*.whl", "retro package wheel"),
+    ("retro/wheels", "py7zr-*.whl", "py7zr wheel (retro dependency)"),
+    ("retro/wheels", "vdf-*.whl", "vdf wheel (retro dependency)"),
+    ("retro/wheels", "requests-*.whl", "requests wheel (retro dependency)"),
+]
+
+
+def missing_binaries(drivers_dir: Path, retro: bool = False) -> list[str]:
+    """Return a human-readable list of the offline binaries not provided.
+
+    `retro` comes from the rendered toggle (see retro_enabled), never from
+    the directory's own presence: asking "is drivers/retro/ there?" would
+    read a fetch that failed halfway as "retrogaming was not wanted", the one
+    confusion this whole option is written to avoid.
+    """
     missing = []
-    for subdir, pattern, what in REQUIRED_BINARIES:
+    required = REQUIRED_BINARIES + (RETRO_BINARIES if retro else [])
+    for subdir, pattern, what in required:
         where = drivers_dir.joinpath(*subdir.split("/"))
         if not list(where.glob(pattern)):
             missing.append(f"{what} ({pattern}) in {where}")
     return missing
+
+
+def retro_enabled(config_dir: Path) -> bool:
+    """Read the retrogaming toggle this build rendered for the guest.
+
+    What the payload must CARRY follows the very file the guest will READ:
+    32-retro.ps1 decides what to install from config/retro.psd1, so the
+    build requires exactly what that same file promises. Threading a second
+    flag down from the command line would create two places to keep in sync,
+    and their divergence would only surface an hour into provisioning, on a
+    machine with no screen - a payload claiming Enabled = $true with no
+    drivers/retro/ in it.
+
+    A toggle that says neither is a hard error, never a silent "off": that
+    is the same confusion (absent vs. explicitly disabled) the file exists
+    to prevent.
+    """
+    path = config_dir / "retro.psd1"
+    if not path.is_file():
+        raise PayloadError(f"missing the retrogaming toggle: {path}")
+    text = path.read_text()
+    if re.search(r"Enabled\s*=\s*\$true", text):
+        return True
+    if re.search(r"Enabled\s*=\s*\$false", text):
+        return False
+    raise PayloadError(
+        f"{path} carries no 'Enabled = $true' nor 'Enabled = $false': the "
+        "retrogaming state cannot be guessed, and guessing 'off' would "
+        "silently drop the feature from a build that asked for it")
 
 
 def _walk(src_dir: Path, prefix: str) -> list[tuple[Path, str]]:
@@ -116,7 +171,12 @@ def stage_payload(dest_root: Path, sources: PayloadSources, marker: str) -> None
         raise PayloadError(f"dest_root cannot be a source directory: {dest_root}")
     if dest_resolved.parent == dest_resolved or not dest_resolved.name:
         raise PayloadError(f"dest_root cannot be filesystem root: {dest_root}")
-    missing = missing_binaries(sources.drivers_dir)
+    # The rendered toggle decides what this payload must contain (see
+    # retro_enabled). No config_dir at all is a caller that renders no
+    # configuration, therefore no retrogaming either.
+    retro = (retro_enabled(sources.config_dir)
+             if sources.config_dir is not None else False)
+    missing = missing_binaries(sources.drivers_dir, retro=retro)
     if missing:
         error_msg = ("offline payload incomplete, refusing to build:\n  - "
                      + "\n  - ".join(missing))
@@ -158,7 +218,10 @@ def verify_staged(dest_root: Path) -> None:
         path = dest_root / rel
         if not path.is_file() or path.stat().st_size == 0:
             raise PayloadError(f"staged payload is missing or empty: {rel}")
-    missing = missing_binaries(dest_root / "drivers")
+    # Required above, so it is there: the staged toggle is the same one the
+    # guest will read, and it alone says whether drivers/retro/ is required.
+    missing = missing_binaries(dest_root / "drivers",
+                               retro=retro_enabled(dest_root / "config"))
     if missing:
         raise PayloadError(
             "staged payload is incomplete:\n  - "

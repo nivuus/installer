@@ -15,7 +15,7 @@ PROVISION = GUEST / "provision"
 PROBE = GUEST / "probe"
 
 STAGES = ["00-bootstrap.ps1", "10-nvidia.ps1", "15-virtio.ps1", "20-disk.ps1",
-          "25-apollo.ps1", "30-steam.ps1", "35-shares.ps1",
+          "25-apollo.ps1", "30-steam.ps1", "32-retro.ps1", "35-shares.ps1",
           "40-agent.ps1", "45-debloat.ps1", "50-power.ps1",
           "55-updates.ps1", "99-marker.ps1"]
 
@@ -673,6 +673,144 @@ check("00-bootstrap.ps1 ne referme pas la regle WinRM",
       any("Disable-NetFirewallRule" in ln for ln in _code), False)
 check("00-bootstrap.ps1 relit la regle au lieu de croire Enable-PSRemoting",
       "stayed disabled" in _boot, True)
+
+# --- Tache 4 (sous-projet C2) : 32-retro.ps1, l etape de retrogaming.
+#
+# Tout ce qui suit lit le CODE SEUL (code_only) : le docstring de cette etape
+# explique deja 7zr, le BCJ2, les 1,5 Gio et l absence de « retro sync » en
+# toutes lettres, et un controle lu sur le texte brut resterait vert alors
+# meme que la mecanique aurait disparu - le motif attrape quatre fois sur ce
+# seul sous-projet.
+_retro = (PROVISION / "32-retro.ps1").read_text(encoding="utf-8")
+_retro_code = code_only(_retro)
+_retro_lines = [ln.strip() for ln in _retro_code.splitlines() if ln.strip()]
+
+# L etape reste dans la liste MEME quand l option n est pas cochee : une etape
+# absente ne laisse aucune trace. La position se lit sur le code de
+# run-all.ps1, pas sur son texte : le commentaire qui justifie l insertion
+# nomme lui aussi le fichier, et satisferait un find() sur le texte brut.
+_runall_code = code_only(runall)
+check("run-all lance 32-retro.ps1 (dans le code, pas seulement en commentaire)",
+      "'32-retro.ps1'" in _runall_code, True)
+check("32-retro.ps1 s insere entre Steam (30) et les partages (35)",
+      _runall_code.find("'30-steam.ps1'") < _runall_code.find("'32-retro.ps1'")
+      < _runall_code.find("'35-shares.ps1'"), True)
+
+
+def _first_line_with(needle, start=0):
+    for i in range(start, len(_retro_lines)):
+        if needle in _retro_lines[i]:
+            return i
+    return -1
+
+
+# 1. Le basculement. L etape lit config\retro.psd1, le fichier que build.py
+# rend DANS TOUS LES CAS - et son absence n est pas « desactive » mais « charge
+# utile anterieure a l option », deux etats qu elle ne doit pas confondre.
+check("32-retro.ps1 lit le basculement rendu par build.py",
+      "Import-PowerShellDataFile" in _retro_code
+      and "config\\retro.psd1" in _retro_code, True)
+check("un basculement absent leve, au lieu d etre lu comme un refus",
+      "$toggle est absent" in _retro_code, True)
+
+# 2. Option non cochee : l etape DIT pourquoi elle s arrete, puis sort en
+# succes. Mutations couvertes : retirer le return (l etape installerait tout
+# malgre le refus), et retirer le message (elle sortirait muette, ce que le
+# proprietaire ne pourrait pas distinguer d une etape jamais executee).
+_idx_guard = _first_line_with("if (-not $retro.Enabled) {")
+_idx_msg = _first_line_with("retrogaming desactive", _idx_guard if _idx_guard >= 0 else 0)
+_idx_return = _first_line_with("return", _idx_guard if _idx_guard >= 0 else 0)
+_actions = ["Start-Process", "pip install", "$retroExe install",
+            "Copy-Item", "New-Item -ItemType Directory"]
+_idx_actions = [_first_line_with(a) for a in _actions]
+check("la garde « option non cochee » est bien localisee", _idx_guard >= 0, True)
+check("toutes les actions d installation ont ete localisees",
+      all(i >= 0 for i in _idx_actions), True)
+check("la garde ecrit POURQUOI elle s arrete (dans le code, pas le docstring)",
+      _idx_msg > _idx_guard, True)
+check("la garde sort de l etape (return), au lieu de continuer",
+      _idx_return > _idx_guard, True)
+check("aucune installation n a lieu avant cette sortie",
+      all(i > _idx_return for i in _idx_actions), True)
+check("l etape sort en SUCCES quand l option n est pas cochee (return, pas throw)",
+      "throw" in "\n".join(_retro_lines[_idx_guard:_idx_return + 1]), False)
+
+# 3. Le volume persistant, VERIFIE et non suppose : c est le marqueur que
+# l etape 20 pose, pas la seule existence de la lettre D:.
+check("32-retro.ps1 verifie le volume prepare par l etape 20",
+      "D:\\state\\NIVUUS-DATA.id" in _retro_code, True)
+
+# 4. L espace temporaire. Prerequis MESURE : ~1,3 Gio transitent par %TEMP%,
+# sur la partition systeme qui n est pas celle des jeux. Mutations couvertes :
+# inverser la comparaison (-lt en -gt, soit refuser les machines qui ont la
+# place), et deplacer la verification apres les installations qu elle protege.
+check("32-retro.ps1 exige 1,5 Gio dans le dossier temporaire",
+      "$MinTempFreeGiB = 1.5" in _retro_code, True)
+check("l espace libre est LU sur le lecteur du dossier temporaire",
+      "[System.IO.Path]::GetTempPath()" in _retro_code
+      and "Get-PSDrive" in _retro_code, True)
+check("la garde exige un espace SUPERIEUR au minimum, jamais l inverse",
+      "if ($tempDrive.Free -lt ($MinTempFreeGiB * 1GB))" in _retro_code, True)
+check("le message nomme la partition systeme et le transit mesure",
+      "1,3 Gio" in _retro_code and "SYSTEME" in _retro_code
+      and "PAS le volume des jeux" in _retro_code, True)
+_idx_temp = _first_line_with("if ($tempDrive.Free -lt ($MinTempFreeGiB * 1GB))")
+check("l espace est verifie AVANT toute installation",
+      _idx_temp >= 0 and all(i > _idx_temp for i in _idx_actions), True)
+
+# 5. 7zr.exe : EXIGENCE, pas commodite. Sans lui, les archives BCJ2 de
+# RetroArch sont inextractibles et la console n a aucun emulateur retro. Le
+# paquet le cherche par shutil.which(), donc ce qui compte n est pas qu il
+# soit copie quelque part mais qu il se RESOLVE par le PATH - y compris pour
+# un « retro install » relance depuis l hote, dans une autre session.
+check("32-retro.ps1 depose 7zr.exe depuis la charge utile",
+      "$sevenZr = Join-Path $PayloadRetro '7zr.exe'" in _retro_code
+      and "Copy-Item -Path $sevenZr -Destination $RetroBinDir" in _retro_code, True)
+check("7zr.exe survit a la reconstruction de C: (il va sur le volume persistant)",
+      "$RetroBinDir = 'D:\\Emulation\\bin'" in _retro_code, True)
+check("son dossier entre dans le PATH machine, pas seulement dans ce processus",
+      "[Environment]::SetEnvironmentVariable('Path'" in _retro_code, True)
+check("le PATH machine est relu au lieu d etre cru",
+      "[Environment]::GetEnvironmentVariable('Path', 'Machine') -notlike"
+      in _retro_code, True)
+check("la resolution par le PATH est verifiee, pas supposee",
+      "Get-Command '7zr.exe'" in _retro_code, True)
+check("un 7zr.exe absent de la charge utile leve",
+      "sans 7zr.exe" in _retro_code, True)
+_idx_7zr = _first_line_with("Copy-Item -Path $sevenZr")
+_idx_install = _first_line_with("$retroExe install")
+check("7zr.exe est en place AVANT que les emulateurs s installent",
+      _idx_7zr >= 0 and _idx_install > _idx_7zr, True)
+
+# 6. Le paquet, hors ligne : les roues voyagent dans la charge utile, et le
+# provisionnement ne doit pas dependre de PyPI.
+check("le paquet retro s installe sans index, depuis les roues embarquees",
+      "--no-index" in _retro_code and "--find-links $wheels" in _retro_code, True)
+check("Python vient de la charge utile, jamais du reseau",
+      "python-*-amd64.exe" in _retro_code, True)
+
+# 7. « retro install », et surtout PAS « retro sync » : les partages ne sont
+# montes qu a l etape 35, donc G:\ROMs n existe pas encore et un scan
+# produirait une bibliotheque vide. Le controle porte sur les invocations
+# elles-memes, pas sur le mot « sync » - le dernier message de l etape parle
+# de synchronisation, a juste titre.
+check("32-retro.ps1 installe les emulateurs",
+      "& $retroExe install --emulation-root $EmulationRoot" in _retro_code, True)
+_invocations = [ln for ln in _retro_lines if "$retroExe " in ln]
+check("aucune invocation de retro autre qu install (jamais sync ici)",
+      [ln for ln in _invocations if " sync" in ln], [])
+check("l etape dit d ou viendra la premiere synchronisation",
+      "viendra de l hote" in _retro_code, True)
+# Un emulateur dont l URL est morte (code 1) ne doit pas emporter tout le
+# provisionnement d une console dont le streaming fonctionne - meme arbitrage
+# que ViGEmBus et que les partages non montes. Un manifeste illisible (code 2),
+# lui, ne laisse rien d installe et doit lever.
+check("un echec partiel avertit au lieu de bloquer la console",
+      "elseif ($installExit -eq 1)" in _retro_code
+      and "WARNING: au moins un emulateur" in _retro_code, True)
+check("un echec total leve",
+      "throw \"retro install a rendu $installExit" in _retro_code, True)
+
 
 if failures:
     print(f"FAIL ({len(failures)})")

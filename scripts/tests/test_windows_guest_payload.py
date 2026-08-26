@@ -343,6 +343,127 @@ with tempfile.TemporaryDirectory() as tmp:
     check("the staged payload carries the retro toggle",
           (dest / "config" / "retro.psd1").is_file(), True)
 
+# --- Tache 4 (sous-projet C2) : ce que la charge utile doit PORTER quand le
+# retrogaming est active, et surtout ne pas porter sinon.
+#
+# La source de verite est le basculement RENDU (config/retro.psd1), celui-la
+# meme que 32-retro.ps1 lira sur l invite : un second drapeau passe en
+# parallele serait un deuxieme endroit a tenir a jour, et leur divergence ne
+# se verrait qu une heure plus tard, sur une machine sans ecran.
+
+def _add_retro(drivers: pathlib.Path) -> None:
+    """Ce que `fetch_payload.py --retro` depose dans drivers/retro/."""
+    (drivers / "retro").mkdir(parents=True, exist_ok=True)
+    (drivers / "retro" / "7zr.exe").write_bytes(b"MZ")
+    (drivers / "retro" / "python-3.12.10-amd64.exe").write_bytes(b"MZ")
+    wheels = drivers / "retro" / "wheels"
+    wheels.mkdir(exist_ok=True)
+    for name in ["retro-0.1.0-py3-none-any.whl", "py7zr-1.1.3-py3-none-any.whl",
+                 "vdf-3.4-py2.py3-none-any.whl", "requests-2.34.2-py3-none-any.whl"]:
+        (wheels / name).write_bytes(b"PK\x03\x04")
+
+
+_ENABLED = "@{\n    Enabled = $true\n}\n"
+_DISABLED = "@{\n    Enabled = $false\n}\n"
+
+# Le drapeau seul, sur l inventaire des binaires : sans retrogaming, aucun
+# des artefacts retro n est reclame - une installation qui ne l a pas coche
+# n a pas a porter un interpreteur, un extracteur et des roues.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    _make_complete_payload(root)
+    check("sans retrogaming, la charge utile est complete sans drivers/retro",
+          payload.missing_binaries(root, retro=False), [])
+    _joined = "\n".join(payload.missing_binaries(root, retro=True))
+    for needle in ["7zr.exe", "python-*-amd64.exe", "retro-*.whl", "py7zr-*.whl",
+                   "vdf-*.whl", "requests-*.whl"]:
+        check(f"avec retrogaming, {needle} est reclame", needle in _joined, True)
+    # Le message doit dire POURQUOI 7zr est exige : c est le prerequis qu on
+    # prend pour une commodite, et sans lui aucun emulateur retro ne s installe.
+    check("le message explique pourquoi 7zr.exe est une exigence",
+          "BCJ2" in _joined, True)
+    _add_retro(root)
+    check("les artefacts deposes satisfont l exigence",
+          payload.missing_binaries(root, retro=True), [])
+
+# Le basculement pilote la construction : Enabled = $true sans drivers/retro
+# doit ECHOUER A LA CONSTRUCTION, pas une heure plus tard sur l invite.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    sources = make_tree(root / "src")
+    (sources.config_dir / "retro.psd1").write_text(_ENABLED)
+    try:
+        payload.stage_payload(root / "staging" / "nivuus", sources, "marker")
+        failures.append("stage_payload: accepted Enabled = $true with no drivers/retro")
+    except payload.PayloadError as e:
+        if "7zr.exe" not in str(e) or "retro-*.whl" not in str(e):
+            failures.append(f"stage_payload error doesn't name the retro artefacts: {e}")
+
+# Le meme arbre, avec les artefacts : la construction passe.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    sources = make_tree(root / "src")
+    (sources.config_dir / "retro.psd1").write_text(_ENABLED)
+    _add_retro(sources.drivers_dir)
+    dest = root / "staging" / "nivuus"
+    payload.stage_payload(dest, sources, payload.marker_text("Windows 11", "b1"))
+    payload.verify_staged(dest)
+    check("les roues du paquet voyagent jusqu a l invite",
+          (dest / "drivers" / "retro" / "wheels" / "retro-0.1.0-py3-none-any.whl").is_file(),
+          True)
+    check("7zr.exe voyage jusqu a l invite",
+          (dest / "drivers" / "retro" / "7zr.exe").is_file(), True)
+    # Detection d alteration APRES mise en place, comme pour agent.exe : une
+    # roue retiree de l arbre construit doit se voir ici, pas sur l invite.
+    (dest / "drivers" / "retro" / "wheels" / "py7zr-1.1.3-py3-none-any.whl").unlink()
+    try:
+        payload.verify_staged(dest)
+        failures.append("verify_staged: accepted a retro payload with no py7zr wheel")
+    except payload.PayloadError as e:
+        if "py7zr" not in str(e):
+            failures.append(f"verify_staged error doesn't name the py7zr wheel: {e}")
+
+# Sans retrogaming, la MEME construction passe sans le moindre artefact retro :
+# c est la propriete que l option existe pour tenir.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    sources = make_tree(root / "src")
+    (sources.config_dir / "retro.psd1").write_text(_DISABLED)
+    dest = root / "staging" / "nivuus"
+    payload.stage_payload(dest, sources, payload.marker_text("Windows 11", "b1"))
+    payload.verify_staged(dest)
+    check("sans retrogaming, rien de retro n est mis en place",
+          (dest / "drivers" / "retro").exists(), False)
+
+# Un basculement qui ne dit NI l un NI l autre est une erreur franche : le lire
+# comme « desactive » retirerait silencieusement la fonctionnalite d une
+# construction qui l avait demandee. C est la meme confusion (absent contre
+# explicitement desactive) que ce fichier existe pour empecher.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    sources = make_tree(root / "src")
+    (sources.config_dir / "retro.psd1").write_text("@{\n    Enabled = maybe\n}\n")
+    try:
+        payload.stage_payload(root / "staging" / "nivuus", sources, "marker")
+        failures.append("stage_payload: accepted a toggle saying neither true nor false")
+    except payload.PayloadError as e:
+        if "Enabled" not in str(e):
+            failures.append(f"the ambiguous-toggle error doesn't name Enabled: {e}")
+
+with tempfile.TemporaryDirectory() as tmp:
+    cfg = pathlib.Path(tmp)
+    (cfg / "retro.psd1").write_text(_ENABLED)
+    check("Enabled = $true est lu comme actif", payload.retro_enabled(cfg), True)
+    (cfg / "retro.psd1").write_text(_DISABLED)
+    check("Enabled = $false est lu comme inactif", payload.retro_enabled(cfg), False)
+    (cfg / "retro.psd1").unlink()
+    try:
+        payload.retro_enabled(cfg)
+        failures.append("retro_enabled: accepted a missing toggle as 'off'")
+    except payload.PayloadError:
+        pass
+
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
