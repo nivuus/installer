@@ -140,5 +140,12 @@ $marker = @(
 )
 Set-Content -Path (Join-Path $StateDir 'PROVISION.done') -Value $marker -Encoding ASCII
 
-Get-NetFirewallRule -Name 'WINRM-HTTP-In-TCP*' | Enable-NetFirewallRule
+# La regle est ouverte depuis 00-bootstrap.ps1 et le reste : ce n est plus ici
+# que 5985 s ouvre. On se contente de verifier qu elle l est toujours - une
+# strategie de groupe ou un durcissement applique en cours de provisionnement
+# aurait pu la refermer, et l appliance serait alors injoignable sans que rien
+# ne le dise.
+$shut = @(Get-NetFirewallRule -Name 'WINRM-HTTP-In-TCP*' |
+          Where-Object { -not $_.Enabled -or $_.Enabled -eq 'False' })
+if ($shut) { $shut | Enable-NetFirewallRule }
 Write-Host 'provisioning marker written, WinRM reachable'

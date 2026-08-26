@@ -28,6 +28,7 @@ import glob
 import os
 import socket
 import subprocess
+import payload
 import sys
 import time
 from pathlib import Path
@@ -176,26 +177,54 @@ def guest_ip(domain: str = DOMAIN_NAME) -> str | None:
 
 
 def wait_ready(domain: str = DOMAIN_NAME, timeout_s: int = 5400) -> str:
-    """Wait for provisioning to finish: 99-marker.ps1 opens 5985 last.
+    """Wait for provisioning to finish, by reading the MARKER.
 
-    A reachable 5985 IS the readiness signal - a successful TCP connect, and
-    nothing else. It does NOT read C:\\nivuus\\state\\PROVISION.done: that
-    marker is diagnostic only, read by hand over WinRM once this returns,
-    compared against payload.PROVISION_VERSION (Task 8 runbook).
+    A reachable 5985 used to be the signal, because 99-marker.ps1 opened the
+    firewall rule as its last gesture. That was a proxy for readiness and it
+    lied in the one case worth catching: when a stage throws, 99-marker is
+    never reached, the port never opens, and the wait burns its whole budget
+    before reporting "not ready" - saying nothing about WHY, and leaving no way
+    in, since the appliance has neither a Run box (no explorer) nor a usable
+    console (Apollo owns the display).
+
+    WinRM is now reachable from stage 00 onwards, so this reads
+    C:\\nivuus\\state\\PROVISION.done - which IS the truth about readiness.
+    A guest that answers but has no marker is a guest still working, or a guest
+    that failed; either way it can be asked.
     """
     deadline = time.time() + timeout_s
+    reachable = False
     while time.time() < deadline:
         ip = guest_ip(domain)
         if ip:
             with socket.socket() as sock:
                 sock.settimeout(2)
                 if sock.connect_ex((ip, WINRM_PORT)) == 0:
-                    return ip
+                    reachable = True
+                    if _marker_present(ip):
+                        return ip
         time.sleep(15)
-    raise DomainError(
-        f"{domain} did not open {WINRM_PORT} within {timeout_s}s; connect to "
-        "the VNC console and read C:\\nivuus\\provision.log"
+    hint = ("it answers on WinRM but never wrote the marker: read "
+            "C:\\nivuus\\provision.log over WinRM, the last line names the "
+            "stage that threw") if reachable else (
+            "it never answered on WinRM at all: check the domain started and "
+            "obtained an address")
+    raise DomainError(f"{domain} is not provisioned after {timeout_s}s - {hint}")
+
+
+def _marker_present(ip: str) -> bool:
+    """True when the guest carries a provisioning marker for THIS payload.
+
+    Version-checked on purpose: a rebuild boots a disk that already holds the
+    PREVIOUS run's marker, so its mere presence proves nothing.
+    """
+    script = str(HERE / "winrm_exec.py")
+    out = subprocess.run(
+        [sys.executable, script, "cmd", r"type C:\nivuus\state\PROVISION.done"],
+        capture_output=True, text=True,
+        env={**os.environ, "GUEST_IP": ip, "LC_ALL": "C"},
     )
+    return f"provision_version={payload.PROVISION_VERSION}" in out.stdout
 
 
 def teardown(domain: str = DOMAIN_NAME, disk_path: str = DISK_PATH) -> None:

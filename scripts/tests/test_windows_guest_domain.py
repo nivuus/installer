@@ -263,6 +263,15 @@ _td = _src.read_text(encoding="utf-8")
 check("eject-media retire aussi le lecteur, pas seulement le media",
       "detach-disk" in _td, True)
 
+# wait_ready doit lire le MARQUEUR, pas sonder un port : un port ouvert ne dit
+# pas « provisionne », il disait seulement « termine sans erreur ». Et le
+# marqueur doit etre VERSIONNE — une reconstruction demarre sur un disque qui
+# porte deja celui du cycle precedent, donc sa seule presence ne prouve rien.
+_tdsrc = _src.read_text(encoding="utf-8") if False else _td
+check("wait_ready lit le marqueur", "_marker_present" in _tdsrc, True)
+check("le marqueur est compare a la version de la charge utile",
+      "PROVISION_VERSION" in _tdsrc, True)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

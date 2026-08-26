@@ -92,9 +92,13 @@ check("run-all's catch block does not open 5985",
 
 boot = texts["00-bootstrap.ps1"]
 check("bootstrap enables PSRemoting", "Enable-PSRemoting" in boot, True)
-# WinRM is configured early for debugging but stays firewalled until the end,
-# so "5985 reachable" means "provisioning finished".
-check("bootstrap keeps 5985 closed", "Disable-NetFirewallRule" in boot, True)
+# WinRM stays REACHABLE from here on. It used to be firewalled until the end so
+# that "5985 reachable" meant "provisioning finished" - a proxy that failed in
+# the only case worth catching, since a stage that throws never reaches
+# 99-marker and the rule never opens. Readiness is the marker's job now.
+check("bootstrap leaves 5985 reachable",
+      any("Disable-NetFirewallRule" in ln for ln in boot.splitlines()
+          if not ln.lstrip().startswith("#")), False)
 check("bootstrap writes the resume script", "resume.cmd" in boot, True)
 check("bootstrap registers the resume entry", "CurrentVersion\\Run" in boot, True)
 check("resume script rescans drives", "%%d" in boot, True)
@@ -106,12 +110,17 @@ sys.path.insert(0, str(GUEST))
 import payload  # noqa: E402
 check("marker version matches payload.PROVISION_VERSION",
       f"provision_version={payload.PROVISION_VERSION}" in marker, True)
-check("marker opens 5985", "Enable-NetFirewallRule" in marker, True)
+# Le marqueur n OUVRE plus 5985 : la regle est ouverte depuis l etage 00 et le
+# reste. Il se contente de verifier qu elle l est toujours, au cas ou une
+# strategie de groupe ou un durcissement l aurait refermee en cours de route.
+check("marker re-verifies the WinRM rule", "Enable-NetFirewallRule" in marker, True)
 check("marker clears the resume entry", "Remove-ItemProperty" in marker, True)
 check("marker writes PROVISION.done", "PROVISION.done" in marker, True)
-# The marker is what makes "5985 reachable" mean "guest is provisioned", so it
-# must be written strictly before the firewall rule that opens 5985.
-check("marker writes PROVISION.done before opening 5985",
+# Le marqueur EST le signal de disponibilite - le port ne l a jamais ete, il
+# n en etait qu un proxy. Il doit donc etre ecrit avant le dernier controle de
+# la regle, pour qu un appelant qui voit la regle saine trouve aussi le
+# marqueur.
+check("marker writes PROVISION.done before its firewall re-check",
       marker.find("PROVISION.done") < marker.find("Enable-NetFirewallRule"), True)
 # 10-nvidia.ps1 may have deferred its device check to survive a driver reboot;
 # this is where that deferred verification must land, before port 5985 opens.
@@ -385,6 +394,21 @@ for _stage in ("45-debloat.ps1", "30-steam.ps1"):
             and "Test-Path" not in ln
             and "Test-Path" not in (_lines[n - 1] if n else "")]
     check(f"{_stage} ne force pas New-Item sur une cle de registre", _bad, [])
+
+# WinRM doit rester JOIGNABLE pendant tout le provisionnement. Il etait
+# coupe-feu jusqu au dernier geste de 99-marker, ce qui faisait de « 5985
+# joignable » un proxy de « invite pret » — un proxy qui mentait exactement la
+# ou ca comptait : quand un etage leve, 99-marker n est jamais atteint, la
+# regle reste fermee, et la seule porte d entree disparait au moment ou il faut
+# regarder. Trois cycles sont morts ainsi le 2026-08-26, l appliance n ayant ni
+# invite Executer (plus d explorer) ni console utilisable (Apollo prend
+# l affichage).
+_boot = (PROVISION / "00-bootstrap.ps1").read_text(encoding="utf-8")
+_code = [ln for ln in _boot.splitlines() if not ln.lstrip().startswith("#")]
+check("00-bootstrap.ps1 ne referme pas la regle WinRM",
+      any("Disable-NetFirewallRule" in ln for ln in _code), False)
+check("00-bootstrap.ps1 relit la regle au lieu de croire Enable-PSRemoting",
+      "stayed disabled" in _boot, True)
 
 if failures:
     print(f"FAIL ({len(failures)})")
