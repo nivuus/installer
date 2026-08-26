@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 """Build-time acquisition of the payload binaries that are not already local.
 
-Networking is allowed HERE and nowhere else: the guest provisions offline, so
-a URL that rots must break the build, never an install. Nothing in this module
-is imported by the guest-facing code paths.
+Networking is allowed HERE, and - with ONE named exception - nowhere else: the
+guest provisions offline, so a URL that rots must break the build, never an
+install. Nothing in this module is imported by the guest-facing code paths.
+
+The exception is retrogaming, and only when it is enabled: 32-retro.ps1 runs
+`retro install` on the guest, which downloads the emulators themselves. They
+weigh about a gigabyte, they move on their own schedule, and freezing them
+into the image would mean rebuilding it to refresh one - while that install is
+idempotent and replayable. So this module still fetches, offline-first,
+everything that install NEEDS (the interpreter, 7zr.exe, the whole wheel
+closure), and the emulator archives it does not carry are pinned by sha256 in
+the package's own manifest: a URL rotting there is a named failure on the
+guest, recorded on the persistent volume, never a silent substitution.
 
 Usage:
     sudo python3 fetch_payload.py --drivers-dir /media/data/nivuus-win-payload
@@ -52,12 +62,11 @@ SEVENZR_URL = "https://www.7-zip.org/a/7zr.exe"
 # The guest ships no Python and the `retro` package is Python. This version
 # is load-bearing beyond the interpreter itself: py7zr's dependencies are
 # compiled wheels, tagged for one minor version, so the wheels downloaded
-# below and the interpreter installed on the guest must agree. RETRO_PY_TAG
-# is DERIVED from it rather than written twice - the two drifting apart would
-# produce wheels no guest Python can install, and pip would only say so at
-# provisioning time, offline, on a machine with no screen.
+# below and the interpreter installed on the guest must agree. The wheel tag
+# is DERIVED from this string at each use (py_tag) rather than written twice -
+# the two drifting apart would produce wheels no guest Python can install, and
+# pip would only say so at provisioning time, offline, on a screenless box.
 RETRO_PYTHON_VERSION = "3.12.10"
-RETRO_PY_TAG = "".join(RETRO_PYTHON_VERSION.split(".")[:2])
 RETRO_PYTHON_URL = (f"https://www.python.org/ftp/python/{RETRO_PYTHON_VERSION}"
                     f"/python-{RETRO_PYTHON_VERSION}-amd64.exe")
 RETRO_DIRNAME = "retro"
@@ -77,6 +86,60 @@ MANIFEST_NAME = "payload-manifest.txt"
 # payload._walk (which skips dot-directories) never ships either of them to
 # the guest - ~700 MB of dead ISO otherwise rode along in every image.
 BUILD_CACHE_DIRNAME = ".build-cache"
+
+
+def py_tag(version: str = RETRO_PYTHON_VERSION) -> str:
+    """The cpXY tag matching an x.y.z Python version: 3.12.10 -> "312".
+
+    A function, called at each use, rather than a constant computed once at
+    import: a constant frozen to today's literal ("312") happens to equal the
+    derivation as long as the pinned version does not move, which is exactly
+    the case where nobody notices it stopped deriving anything.
+    """
+    return "".join(version.split(".")[:2])
+
+
+def prune_stale_retro(drivers_dir: Path) -> list[str]:
+    """Drop Python installers pinned to a version this build no longer uses.
+
+    drivers/ is a working tree that persists between builds, so a version
+    bump would otherwise leave the OLD installer beside the new one - and the
+    guest, taking the first by name, would install the OLD interpreter and
+    then the NEW version's wheels. That breaks on the guest, loudly but very
+    late. 32-retro.ps1 refuses the ambiguity; this removes it at the source.
+    """
+    retro_dir = drivers_dir / RETRO_DIRNAME
+    wanted = f"python-{RETRO_PYTHON_VERSION}-amd64.exe"
+    removed = []
+    for stale in sorted(retro_dir.glob("python-*-amd64.exe")):
+        if stale.name != wanted:
+            stale.unlink()
+            removed.append(stale.name)
+    return removed
+
+
+def resolve_retro(cli_value: bool | None, marker_path: str | None = None) -> bool:
+    """Decide whether this fetch includes retrogaming.
+
+    Same decision, same source and same precedence as build.py: an explicit
+    --retro/--no-retro wins, otherwise the wizard's marker on this host
+    decides. Fetching by a different rule than the build renders would be the
+    one divergence that only shows up an hour into provisioning - a payload
+    whose config/retro.psd1 says Enabled = $true with no drivers/retro/ in it.
+    """
+    if cli_value is not None:
+        return cli_value
+    # Local import on purpose: build.py pulls jinja2, and this fetcher must
+    # stay runnable with the standard library alone. Only the "no flag given"
+    # path needs it, and if it cannot be had, the remedy is named.
+    try:
+        import build
+    except ImportError as exc:
+        raise FetchError(
+            f"cannot read the retro marker recorded by the install wizard: "
+            f"importing build.py failed ({exc}). Pass --retro or --no-retro "
+            "explicitly to say what this payload must carry.") from exc
+    return build.read_retro_marker(marker_path or build.DEFAULT_RETRO_MARKER)
 
 
 def plan_downloads(drivers_dir: Path, retro: bool = False) -> list[Download]:
@@ -263,41 +326,56 @@ def build_retro_wheels(retro_src: Path, drivers_dir: Path) -> Path:
     if len(built) != 1:
         raise FetchError(f"expected exactly one retro wheel in {wheels}, "
                          f"got {[w.name for w in built]}")
+    # --platform/--python-version are load-bearing, not decoration: without
+    # them pip resolves for THIS host, and a Linux build machine would stage
+    # manylinux .so wheels that no guest can install.
+    tag = py_tag(RETRO_PYTHON_VERSION)
     _pip(["download", "--only-binary=:all:", "--platform", "win_amd64",
-          "--python-version", RETRO_PY_TAG, "--dest", str(wheels),
-          str(built[0])],
-         f"downloading the retro dependencies for cp{RETRO_PY_TAG} win_amd64")
+          "--python-version", tag, "--dest", str(wheels), str(built[0])],
+         f"downloading the retro dependencies for cp{tag} win_amd64")
     return wheels
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Fetch the B payload binaries")
     ap.add_argument("--drivers-dir", required=True)
-    # Same switch, same default and same reason as build.py --retro: nothing
-    # retro-related is fetched unless the operator asked for it.
-    ap.add_argument("--retro", action="store_true",
-                    help="also fetch what retrogaming needs (7zr.exe, the "
-                         "Python installer and the retro wheelhouse); off by "
-                         "default, and ~30 MB the payload otherwise avoids")
+    # Same switch, same default and same source as build.py --retro: None,
+    # not False, so that omitting it means "do what the wizard recorded on
+    # this host" and never "off" - fetching off a box whose owner DID check
+    # the option would fail the build later, at build.py, with the payload
+    # already claiming Enabled = $true.
+    ap.add_argument(
+        "--retro", action=argparse.BooleanOptionalAction, default=None,
+        help="force fetching what retrogaming needs (7zr.exe, the Python "
+             "installer and the retro wheelhouse, ~30 MB) on or off; without "
+             "this flag, defaults to whatever the install wizard recorded on "
+             "this host, exactly like build.py")
     ap.add_argument("--retro-src", default=str(RETRO_SRC),
                     help="checkout of the retro package to build the wheel "
                          f"from (default: {RETRO_SRC})")
     args = ap.parse_args(argv)
     drivers = Path(args.drivers_dir)
     try:
-        for item in plan_downloads(drivers, retro=args.retro):
+        retro = resolve_retro(args.retro)
+        print("retrogaming: " + ("enabled" if retro else "disabled") + (
+            " (--retro/--no-retro given explicitly)" if args.retro is not None
+            else " (from the install wizard's marker, no --retro/--no-retro "
+                 "given)"))
+        for item in plan_downloads(drivers, retro=retro):
             print(f"  {item.name} sha256 {fetch(item, drivers)}")
         extract_virtio(drivers / BUILD_CACHE_DIRNAME / "virtio-win.iso", drivers)
-        if args.retro:
+        if retro:
+            for gone in prune_stale_retro(drivers):
+                print(f"  retro: removed the stale {gone}")
             wheels = build_retro_wheels(Path(args.retro_src), drivers)
             names = sorted(w.name for w in wheels.glob("*.whl"))
             print(f"  retro: {len(names)} wheels in {wheels}")
             print("    " + ", ".join(names))
     except FetchError as exc:
         raise SystemExit(str(exc))
-    if not args.retro:
-        print("\nRetrogaming was not requested (--retro absent): 7zr.exe, the "
-              "Python installer and the retro wheels were NOT fetched, and "
+    if not retro:
+        print("\nRetrogaming is off for this payload: 7zr.exe, the Python "
+              "installer and the retro wheels were NOT fetched, and "
               "32-retro.ps1 will say on the guest that the option is off.")
     print("\nNot fetched, and never fetchable: agent/agent.exe must be "
           "extracted from the current Windows VM before it is wiped.")

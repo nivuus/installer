@@ -398,6 +398,12 @@ with tempfile.TemporaryDirectory() as tmp:
     except payload.PayloadError as e:
         if "7zr.exe" not in str(e) or "retro-*.whl" not in str(e):
             failures.append(f"stage_payload error doesn't name the retro artefacts: {e}")
+        # Tous les messages de l etape 32, cote invite, nomment la commande a
+        # relancer. Celui de la construction ne le faisait pas : le
+        # proprietaire lisait « 7zr.exe manque » sans savoir comment l obtenir.
+        if "fetch_payload.py" not in str(e) or "--retro" not in str(e):
+            failures.append(
+                f"the build failure doesn't name the command to re-run: {e}")
 
 # Le meme arbre, avec les artefacts : la construction passe.
 with tempfile.TemporaryDirectory() as tmp:
@@ -425,15 +431,28 @@ with tempfile.TemporaryDirectory() as tmp:
 
 # Sans retrogaming, la MEME construction passe sans le moindre artefact retro :
 # c est la propriete que l option existe pour tenir.
+#
+# _add_retro() est ICI ce que le controle a de mordant : le dossier des
+# pilotes est un arbre de travail qui PERSISTE entre deux constructions, donc
+# un « fetch_payload.py --retro » anterieur y laisse ses 30 Mo. Sans cette
+# ligne, le controle affirmait l absence d un dossier que la fixture n avait
+# jamais cree - vrai, et vide de sens.
 with tempfile.TemporaryDirectory() as tmp:
     root = pathlib.Path(tmp)
     sources = make_tree(root / "src")
     (sources.config_dir / "retro.psd1").write_text(_DISABLED)
+    _add_retro(sources.drivers_dir)
+    check("la fixture porte bien un drivers/retro laisse par une recuperation "
+          "anterieure", (sources.drivers_dir / "retro" / "7zr.exe").is_file(), True)
     dest = root / "staging" / "nivuus"
     payload.stage_payload(dest, sources, payload.marker_text("Windows 11", "b1"))
     payload.verify_staged(dest)
     check("sans retrogaming, rien de retro n est mis en place",
           (dest / "drivers" / "retro").exists(), False)
+    # Et l exclusion ne doit pas emporter le reste des pilotes avec elle.
+    check("les autres pilotes voyagent quand meme",
+          (dest / "drivers" / "steam" / "SteamSetup.exe").is_file()
+          and (dest / "drivers" / "agent" / "agent.exe").is_file(), True)
 
 # Un basculement qui ne dit NI l un NI l autre est une erreur franche : le lire
 # comme « desactive » retirerait silencieusement la fonctionnalite d une

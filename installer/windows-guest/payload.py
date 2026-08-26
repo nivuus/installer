@@ -1,7 +1,17 @@
 """Assembly and verification of the offline /nivuus payload.
 
-Everything the guest will ever need must be here: provisioning runs with no
-network at all. A missing binary fails the build, never the install.
+Everything the guest will ever need must be here: provisioning runs offline.
+A missing binary fails the build, never the install.
+
+ONE deliberate exception, and only when retrogaming is enabled: 32-retro.ps1
+runs `retro install`, which downloads the emulators from their vendors. They
+are gigabytes, they change on their own schedule, and freezing them into the
+image would mean rebuilding it to refresh one of them - while the install
+itself is idempotent and replayable. What still travels offline is everything
+that install NEEDS: the interpreter, 7zr.exe and the whole wheel closure. The
+emulator archives are pinned by sha256 in the package's manifest, so the worst
+case there is a named failure, never a silent substitution - and 32-retro.ps1
+records that failure on the persistent volume rather than only in the log.
 """
 from __future__ import annotations
 
@@ -49,21 +59,26 @@ REQUIRED_BINARIES = [
 ]
 
 
+# The one subdirectory of drivers/ that exists only for retrogaming. Named
+# once, because plan_payload() drops it BY THAT NAME when the option is off.
+RETRO_DIRNAME = "retro"
+_WHEELS = f"{RETRO_DIRNAME}/wheels"
+
 # Retrogaming rides in drivers/retro/, fetched only by `fetch_payload.py
 # --retro`. The wheels are named one by one rather than checked as "the
 # directory is not empty": a `pip download` that silently resolved no
 # dependency would leave a wheels/ holding the retro wheel alone, and the
 # guest would then fail offline, deep inside provisioning, on an import.
 RETRO_BINARIES = [
-    ("retro", "7zr.exe",
+    (RETRO_DIRNAME, "7zr.exe",
      "7zr.exe (RetroArch's archives use the BCJ2 filter, which py7zr cannot "
      "read, and no .zip variant exists - without it no retro emulator installs)"),
-    ("retro", "python-*-amd64.exe",
+    (RETRO_DIRNAME, "python-*-amd64.exe",
      "Python installer (LTSC ships none, and the retro package is Python)"),
-    ("retro/wheels", "retro-*.whl", "retro package wheel"),
-    ("retro/wheels", "py7zr-*.whl", "py7zr wheel (retro dependency)"),
-    ("retro/wheels", "vdf-*.whl", "vdf wheel (retro dependency)"),
-    ("retro/wheels", "requests-*.whl", "requests wheel (retro dependency)"),
+    (_WHEELS, "retro-*.whl", "retro package wheel"),
+    (_WHEELS, "py7zr-*.whl", "py7zr wheel (retro dependency)"),
+    (_WHEELS, "vdf-*.whl", "vdf wheel (retro dependency)"),
+    (_WHEELS, "requests-*.whl", "requests wheel (retro dependency)"),
 ]
 
 
@@ -128,10 +143,22 @@ def _walk(src_dir: Path, prefix: str) -> list[tuple[Path, str]]:
 
 
 def plan_payload(sources: PayloadSources) -> list[tuple[Path, str]]:
-    """Map each source file to its destination path relative to /nivuus."""
+    """Map each source file to its destination path relative to /nivuus.
+
+    drivers/retro/ is dropped when the toggle says retrogaming is off: the
+    drivers directory is a persistent working tree, so an earlier
+    `fetch_payload.py --retro` leaves ~30 MB behind that a later build with
+    the option unchecked would otherwise still ship - the very cost the
+    option exists to avoid, and a guest carrying an interpreter and a
+    wheelhouse it is told never to open.
+    """
+    retro = (retro_enabled(sources.config_dir)
+             if sources.config_dir is not None else False)
+    drivers = [(src, rel) for src, rel in _walk(sources.drivers_dir, "drivers")
+               if retro or not rel.startswith(f"drivers/{RETRO_DIRNAME}/")]
     entries = (_walk(sources.provision_dir, "provision")
                + _walk(sources.probe_dir, "probe")
-               + _walk(sources.drivers_dir, "drivers"))
+               + drivers)
     if sources.config_dir is not None:
         entries += _walk(sources.config_dir, "config")
     if sources.assets_dir is not None:
@@ -184,6 +211,17 @@ def stage_payload(dest_root: Path, sources: PayloadSources, marker: str) -> None
             error_msg += (
                 "\n\nagent.exe must be extracted from the current Windows VM "
                 "BEFORE it is wiped - no machine can rebuild it afterwards."
+            )
+        if retro:
+            # Name the command, the way every guest-side message here does: a
+            # build that stops at "7zr.exe is missing" without saying how to
+            # get it sends the owner reading source at the one moment they
+            # just wanted their image.
+            error_msg += (
+                "\n\nconfig/retro.psd1 says Enabled = $true, so the retro "
+                "artefacts above are required. Fetch them with:\n"
+                f"  python3 fetch_payload.py --drivers-dir {sources.drivers_dir}"
+                " --retro"
             )
         raise PayloadError(error_msg)
     if dest_root.exists():

@@ -15,6 +15,7 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "installer" / "windows-guest"))
 
 import fetch_payload  # noqa: E402
+import payload  # noqa: E402
 
 failures = []
 
@@ -119,9 +120,15 @@ check("7zr.exe vient bien de 7-zip.org",
 # mineure. Un interpreteur 3.13 sur l invite et des roues cp312 ne se
 # rencontreraient qu au moment du pip install, hors ligne, sur une machine
 # sans ecran.
-check("le tag des roues derive de la version de l installateur Python",
-      fetch_payload.RETRO_PY_TAG,
-      "".join(fetch_payload.RETRO_PYTHON_VERSION.split(".")[:2]))
+# Comparer le tag a sa propre re-derivation depuis la MEME version courante
+# ne prouve rien : « 312 » ecrit a la main y satisfait tant que la version
+# epinglee ne bouge pas, c est-a-dire exactement dans le cas ou la derivation
+# a cesse sans que personne ne le voie. Le controle porte donc sur une AUTRE
+# version que celle du jour.
+check("le tag des roues derive vraiment de la version passee",
+      fetch_payload.py_tag("3.13.2"), "313")
+check("le tag de la version epinglee reste celui attendu",
+      fetch_payload.py_tag(fetch_payload.RETRO_PYTHON_VERSION), "312")
 check("l URL de l installateur porte cette meme version",
       f"python-{fetch_payload.RETRO_PYTHON_VERSION}-amd64.exe"
       in fetch_payload.RETRO_PYTHON_URL, True)
@@ -141,6 +148,93 @@ with tempfile.TemporaryDirectory() as tmp:
     except fetch_payload.FetchError as e:
         if "retro-src" not in str(e):
             failures.append(f"build_retro_wheels error doesn't point at --retro-src: {e}")
+
+
+# --- Les arguments qui rendent le magasin de roues INSTALLABLE sur l invite.
+# Sans --platform/--python-version, pip resout pour l hote de construction :
+# un hote Linux poserait des roues manylinux qu aucun invite ne peut
+# installer. Aucun reseau ici - _pip est remplace, et la roue « construite »
+# est deposee a la main pour que la suite de la fonction se deroule.
+_pip_calls = []
+_real_pip = fetch_payload._pip
+_real_version = fetch_payload.RETRO_PYTHON_VERSION
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    src = root / "retro-src"
+    src.mkdir()
+    (src / "pyproject.toml").write_text("[project]\nname = 'retro'\n")
+    drivers = root / "drivers"
+
+    def _fake_pip(args, what):
+        _pip_calls.append(list(args))
+        if args[0] == "wheel":
+            dest = pathlib.Path(args[args.index("--wheel-dir") + 1])
+            (dest / "retro-9.9.9-py3-none-any.whl").write_bytes(b"PK\x03\x04")
+
+    fetch_payload._pip = _fake_pip
+    # Une version differente de celle du jour : un tag ecrit en dur ne suivrait
+    # pas, et c est precisement la mutation qui survivait au controle d avant.
+    fetch_payload.RETRO_PYTHON_VERSION = "3.13.2"
+    try:
+        fetch_payload.build_retro_wheels(src, drivers)
+    finally:
+        fetch_payload._pip = _real_pip
+        fetch_payload.RETRO_PYTHON_VERSION = _real_version
+
+_download = [c for c in _pip_calls if c and c[0] == "download"]
+check("les dependances sont bien telechargees", len(_download), 1)
+_args = _download[0] if _download else []
+check("les roues sont resolues pour Windows, pas pour l hote de construction",
+      "--platform" in _args and _args[_args.index("--platform") + 1], "win_amd64")
+check("... et pour la version de Python que l invite installera",
+      "--python-version" in _args and _args[_args.index("--python-version") + 1],
+      "313")
+check("aucune roue compilee pour une autre plateforme n est acceptee",
+      "--only-binary=:all:" in _args, True)
+
+# Un relevement de version laisserait l ANCIEN installateur a cote du nouveau
+# dans un dossier de pilotes qui persiste entre deux constructions ; l invite
+# prend le premier par ordre alphabetique - donc l ancien - avec les roues de
+# la nouvelle version. L echec arrive sur l invite, bruyamment mais tard.
+with tempfile.TemporaryDirectory() as tmp:
+    drivers = pathlib.Path(tmp)
+    retro_dir = drivers / fetch_payload.RETRO_DIRNAME
+    retro_dir.mkdir()
+    pinned = f"python-{fetch_payload.RETRO_PYTHON_VERSION}-amd64.exe"
+    (retro_dir / pinned).write_bytes(b"MZ")
+    (retro_dir / "python-3.11.9-amd64.exe").write_bytes(b"MZ")
+    (retro_dir / "7zr.exe").write_bytes(b"MZ")
+    removed = fetch_payload.prune_stale_retro(drivers)
+    check("l installateur perime est supprime", removed, ["python-3.11.9-amd64.exe"])
+    check("l installateur epingle reste", (retro_dir / pinned).is_file(), True)
+    check("le reste de drivers/retro n est pas touche",
+          (retro_dir / "7zr.exe").is_file(), True)
+    check("rejouer la suppression ne trouve plus rien",
+          fetch_payload.prune_stale_retro(drivers), [])
+
+# La recuperation suit le MEME marqueur que la construction. Un proprietaire
+# qui a coche la case verrait sinon build.py exiger drivers/retro/ que ce
+# programme-ci n aurait jamais recupere.
+with tempfile.TemporaryDirectory() as tmp:
+    marker = pathlib.Path(tmp) / "retro.json"
+    marker.write_text('{"enabled": true}')
+    check("sans drapeau, le marqueur de l assistant decide",
+          fetch_payload.resolve_retro(None, str(marker)), True)
+    check("--no-retro l emporte sur un marqueur qui dit oui",
+          fetch_payload.resolve_retro(False, str(marker)), False)
+    marker.write_text('{"enabled": false}')
+    check("un marqueur qui dit non est suivi aussi",
+          fetch_payload.resolve_retro(None, str(marker)), False)
+    check("--retro l emporte sur un marqueur qui dit non",
+          fetch_payload.resolve_retro(True, str(marker)), True)
+    marker.unlink()
+    check("un marqueur absent vaut « non »",
+          fetch_payload.resolve_retro(None, str(marker)), False)
+
+# Les deux modules nomment le meme dossier sous drivers/ : payload.py y
+# cherche les artefacts que celui-ci y depose.
+check("les deux modules nomment le meme dossier",
+      fetch_payload.RETRO_DIRNAME, payload.RETRO_DIRNAME)
 
 
 if failures:
