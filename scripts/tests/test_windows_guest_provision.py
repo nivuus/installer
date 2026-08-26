@@ -710,7 +710,19 @@ def _first_line_with(needle, start=0):
 check("32-retro.ps1 lit le basculement rendu par build.py",
       "Import-PowerShellDataFile" in _retro_code
       and "config\\retro.psd1" in _retro_code, True)
-check("un basculement absent leve, au lieu d etre lu comme un refus",
+_idx_absent = _first_line_with("if (-not (Test-Path $toggle))")
+_idx_read = _first_line_with("Import-PowerShellDataFile")
+_absent_block = _retro_lines[_idx_absent:_idx_read]
+check("la garde « basculement absent » est bien localisee",
+      _idx_absent >= 0 and _idx_read > _idx_absent, True)
+# Le message seul ne prouve rien : remplacer le throw par un Write-Host suivi
+# d un return laissait ce controle vert, alors que c est l UNIQUE invariant
+# pour lequel toute la distinction « absent != desactive » existe.
+check("un basculement absent LEVE (le throw, pas seulement son texte)",
+      any(ln.startswith("throw") for ln in _absent_block), True)
+check("... et ne sort jamais en succes a la place",
+      any("return" in ln or "Write-Host" in ln for ln in _absent_block), False)
+check("la levee dit pourquoi l absence n est pas un refus",
       "$toggle est absent" in _retro_code, True)
 
 # 2. Option non cochee : l etape DIT pourquoi elle s arrete, puis sort en
@@ -807,9 +819,60 @@ check("l etape dit d ou viendra la premiere synchronisation",
 # lui, ne laisse rien d installe et doit lever.
 check("un echec partiel avertit au lieu de bloquer la console",
       "elseif ($installExit -eq 1)" in _retro_code
-      and "WARNING: au moins un emulateur" in _retro_code, True)
+      and "warning: au moins un emulateur" in _retro_code, True)
+check("l avertissement s ecrit en minuscules, comme ailleurs dans le depot",
+      "WARNING" in _retro_code, False)
 check("un echec total leve",
       "throw \"retro install a rendu $installExit" in _retro_code, True)
+
+# 8. Le TEMOIN DURABLE. L arbitrage ci-dessus (avertir sans bloquer) laisse
+# declarer le provisionnement complet avec un dossier d emulation partiel : la
+# premiere synchronisation depuis l hote fabriquerait alors une bibliotheque
+# Steam d entrees qui ne demarrent pas, puisque le scan construit les chemins
+# depuis le manifeste sans verifier qu ils existent. L avertissement, lui, ne
+# vit que dans le journal de C:, efface a la reconstruction suivante. Le
+# temoin doit donc etre sur D:, comme le PROVISION.failed de run-all.ps1.
+check("le temoin est ecrit sur le volume PERSISTANT, pas dans le journal de C:",
+      "$RetroStatusFile = 'D:\\state\\retro.status'" in _retro_code, True)
+check("le temoin dit quand",
+      "when=$(Get-Date -Format o)" in _retro_code, True)
+check("le temoin porte le rapport, donc ce qui a reussi et ce qui a echoue",
+      "\"report:\") + $Report" in _retro_code, True)
+check("chaque issue de l etape laisse un temoin, l option decochee comprise",
+      sorted(re.findall(r"Write-RetroStatus '(\w+)'", _retro_code)),
+      ["disabled", "failed", "ok", "partial"])
+# Le rapport doit voyager jusqu au temoin : un temoin qui ne porte que
+# « status=partial » ne dit pas QUEL emulateur manque.
+check("le temoin d un echec partiel embarque le rapport de l installation",
+      "Write-RetroStatus 'partial' $installOutput" in _retro_code, True)
+_idx_status_partial = _first_line_with("Write-RetroStatus 'partial'")
+_idx_warn = _first_line_with("warning: au moins un emulateur")
+check("le temoin est ecrit dans la branche de l echec partiel",
+      _idx_status_partial >= 0 and abs(_idx_warn - _idx_status_partial) <= 2, True)
+
+# 9. Les flux d erreur des outils natifs. pip ecrit A COUP SUR sur stderr
+# l avertissement « installed in ... which is not on PATH » (le PATH machine a
+# change, pas celui de ce processus), et PowerShell 5.1 sous
+# $ErrorActionPreference = 'Stop' peut promouvoir ce flux en erreur
+# terminante : une installation REUSSIE echouerait sur un avertissement.
+for needle, what in [("-m pip install", "pip"), ("$retroExe install", "retro install")]:
+    _lines = [ln for ln in _retro_lines if needle in ln]
+    check(f"{what} redirige son flux d erreur (2>&1)",
+          bool(_lines) and all("2>&1" in ln for ln in _lines), True)
+
+# 10. Un seul installateur Python. Un relevement de version laisse l ANCIEN
+# dans le dossier des pilotes ; « le premier par ordre alphabetique » est
+# justement l ancien, et il s installerait avec les roues de la nouvelle
+# version - un echec sur l invite, bruyant mais tres tardif.
+_idx_multi = _first_line_with("if ($installers.Count -gt 1) {")
+_idx_pick = _first_line_with("$installer = $installers[0]")
+check("l ambiguite est refusee AVANT qu un installateur soit choisi",
+      _idx_multi >= 0 and _idx_pick > _idx_multi, True)
+check("plusieurs installateurs Python levent, jamais ne se departagent",
+      any(ln.startswith("throw")
+          for ln in _retro_lines[_idx_multi:_idx_pick]), True)
+check("aucun choix implicite du premier installateur venu",
+      "Select-Object -First 1" in _retro_code, False)
 
 
 if failures:

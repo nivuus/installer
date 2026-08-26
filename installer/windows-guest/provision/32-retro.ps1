@@ -1,70 +1,90 @@
 <#
     Etape 32 : le retrogaming, quand il a ete demande.
 
-    Cette etape s execute TOUJOURS, cochee ou non. Une etape absente ne laisse
-    aucune trace, et six mois plus tard personne ne sait si elle a echoue ou
-    n a jamais tourne : quand le retrogaming est desactive, elle ecrit
-    POURQUOI elle s arrete et sort en succes.
+    Cette etape s execute TOUJOURS, cochee ou non : une etape absente ne
+    laisse aucune trace, et six mois plus tard personne ne sait si elle a
+    echoue ou n a jamais tourne. Desactivee, elle dit POURQUOI et sort en
+    succes.
 
-    Elle n execute PAS « retro sync ». Les partages ne sont montes qu a
+    Elle n execute PAS « retro sync » : les partages ne sont montes qu a
     l etape 35, donc G:\ROMs n existe pas encore et un scan ne trouverait
-    aucune ROM. La premiere synchronisation de la bibliotheque vient de
-    l hote, apres le provisionnement. Meme raison pour le manifeste
-    UTILISATEUR (G:\retro\emulators.toml) : illisible ici, son absence est
-    normale et jamais une erreur.
+    aucune ROM. La premiere synchronisation vient de l hote. Meme raison pour
+    le manifeste UTILISATEUR (G:\retro\emulators.toml) : son absence est
+    normale ici, jamais une erreur.
 
     Deux prerequis mesures sont VERIFIES, jamais supposes :
       - 7zr.exe, sans lequel RetroArch — donc l essentiel de la bibliotheque
         retro — ne s installe pas du tout ;
       - 1,5 Gio libres dans le dossier temporaire, sur la partition SYSTEME.
+
+    Elle laisse enfin sur le volume persistant un TEMOIN DURABLE de ce qui
+    s est installe, de ce qui a echoue et de quand (Write-RetroStatus).
 #>
 param([Parameter(Mandatory = $true)][string]$PayloadRoot)
 
 $ErrorActionPreference = 'Stop'
 
 # 1,3 Gio mesure : RetroArch et ses cores transitent ENSEMBLE par le dossier
-# temporaire avant de basculer vers le volume d emulation. 1,5 Gio couvre ce
-# transit et la marge du reste.
+# temporaire avant de basculer vers D:. 1,5 Gio couvre ce transit et sa marge.
 $MinTempFreeGiB = 1.5
 $EmulationRoot = 'D:\Emulation'
 $RetroBinDir = 'D:\Emulation\bin'
 # Pas de numero de version dans le chemin : l installateur est choisi par
-# motif ci-dessous, et un chemin qui annonce une version que la charge utile
-# ne porte plus mentirait au premier bump.
+# motif ci-dessous, et un chemin qui l annoncerait mentirait au premier bump.
 $PythonRoot = 'C:\Python'
 $PayloadRetro = Join-Path $PayloadRoot 'drivers\retro'
+
+# Le temoin durable. Un « retro install » partiel n emporte pas le
+# provisionnement (voir plus bas) : la console est donc declaree prete et le
+# seul recit de l echec est un avertissement dans le journal, sur C:\nivuus,
+# que la reconstruction suivante efface. Il va donc AUSSI sur D:, le seul
+# volume qui traverse une reinstallation - exactement la raison que le bloc de
+# rattrapage de run-all.ps1 donne pour son PROVISION.failed.
+# Ce que l hote en fait : le lire AVANT de synchroniser. « retro scan »
+# fabrique les chemins d executables depuis le manifeste sans verifier qu ils
+# existent, donc une installation partielle peuplerait la bibliotheque Steam
+# d entrees qui ne demarrent pas.
+$RetroStatusFile = 'D:\state\retro.status'
+
+function Write-RetroStatus([string]$State, [string[]]$Report) {
+    $lines = @("status=$State", "when=$(Get-Date -Format o)",
+               "emulation_root=$EmulationRoot", "report:") + $Report
+    # UTF-8 (le rapport est accentue), et SANS le BOM que Set-Content poserait.
+    [System.IO.File]::WriteAllLines($RetroStatusFile, [string[]]$lines)
+}
 
 # --- La case a-t-elle ete cochee ?
 $toggle = Join-Path $PayloadRoot 'config\retro.psd1'
 if (-not (Test-Path $toggle)) {
     # build.py rend ce fichier DANS TOUS LES CAS (apollo.render_retro) et
-    # payload.verify_staged l exige : son absence ne signifie pas « le
-    # proprietaire n en veut pas », mais « cette charge utile est anterieure a
-    # l option ». Les deux ne se confondent pas, et seule la premiere autorise
-    # a ne rien faire en silence.
+    # payload.verify_staged l exige : son absence ne dit pas « le proprietaire
+    # n en veut pas » mais « charge utile anterieure a l option ». Seul le
+    # premier etat autorise a ne rien faire en silence, d ou le throw.
     throw "$toggle est absent : charge utile anterieure a l option retrogaming, son etat ne peut pas etre deduit"
 }
 $retro = Import-PowerShellDataFile -Path $toggle
 if (-not $retro.Enabled) {
     Write-Host "retrogaming desactive (config\retro.psd1 : Enabled = `$false) : ni Python, ni 7zr, ni emulateur ne sont installes. Cette etape a bien tourne et n avait rien a faire."
+    # Meme raison, pour l hote : sans temoin il confondrait « pas voulu » et
+    # « jamais arrive jusqu ici ». D: peut ne pas etre monte ici (verifie plus
+    # bas) : l option est off, il n y a rien a proteger, donc pas un echec.
+    if (Test-Path 'D:\state') { Write-RetroStatus 'disabled' @() }
     return
 }
 Write-Host 'retrogaming demande (config\retro.psd1 : Enabled = $true)'
 
 # --- Le volume persistant. Les emulateurs pesent des gigaoctets et vivent sur
-# D:, jamais sur C: qui est regeneree a chaque reconstruction. L etape 20 le
-# monte et le marque ; sans ce marqueur, rien ne prouve que D: est le bon
-# volume et il n y a nulle part ou installer.
+# D:, jamais sur C: regeneree a chaque reconstruction. L etape 20 le monte et
+# le marque ; sans ce marqueur, rien ne prouve que D: est le bon volume.
 if (-not (Test-Path 'D:\state\NIVUUS-DATA.id')) {
     throw 'le volume persistant prepare par l etape 20 est introuvable (D:\state\NIVUUS-DATA.id absent) : les emulateurs n ont nulle part ou aller'
 }
 
 # --- L espace temporaire. L installation extrait dans %TEMP% AVANT de
-# basculer vers le volume d emulation, pour qu une extraction interrompue ne
-# laisse pas une installation a moitie ecrasee. Le transit pese donc sur la
-# partition SYSTEME, qui n est pas celle des jeux : une VM au disque systeme
-# etroit echoue au milieu du provisionnement, et le message doit dire
-# exactement cela plutot que de laisser lire un manque d espace generique.
+# basculer vers D:, pour qu une extraction interrompue ne laisse pas une
+# installation a moitie ecrasee. Le transit pese donc sur la partition
+# SYSTEME, pas sur celle des jeux : une VM au disque systeme etroit echoue au
+# milieu du provisionnement, et le message doit dire exactement cela.
 $tempPath = [System.IO.Path]::GetTempPath()
 $tempDrive = Get-PSDrive -Name ([System.IO.Path]::GetPathRoot($tempPath)).Substring(0, 1)
 $tempFreeGiB = [math]::Round($tempDrive.Free / 1GB, 2)
@@ -78,15 +98,21 @@ New-Item -ItemType Directory -Force -Path $EmulationRoot | Out-Null
 
 # --- Python. Le paquet retro est du Python, et LTSC n en embarque aucun.
 # InstallAllUsers : le declenchement depuis l hote passe par WinRM, dans une
-# autre session que celle-ci — un Python installe « pour cet utilisateur »
-# lui serait invisible.
+# autre session — un Python « pour cet utilisateur » lui serait invisible.
 $python = Join-Path $PythonRoot 'python.exe'
 if (-not (Test-Path $python)) {
-    $installer = Get-ChildItem -Path $PayloadRetro -Filter 'python-*-amd64.exe' `
-                               -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $installer) {
+    $installers = @(Get-ChildItem -Path $PayloadRetro -Filter 'python-*-amd64.exe' `
+                                  -ErrorAction SilentlyContinue)
+    if ($installers.Count -eq 0) {
         throw "aucun installateur Python dans $PayloadRetro : la charge utile a ete construite sans --retro alors que la case est cochee (voir fetch_payload.py --retro)"
     }
+    if ($installers.Count -gt 1) {
+        # Un relevement de version qui laisse l ancien a cote du nouveau :
+        # « le premier » (ordre alphabetique) serait l ANCIEN, avec les roues
+        # de la NOUVELLE version, et l echec viendrait bien plus tard.
+        throw "plusieurs installateurs Python dans $PayloadRetro ($($installers.Name -join ', ')) : impossible de choisir, la charge utile en porte un perime - relancer fetch_payload.py --retro, qui supprime celui qui n est plus epingle"
+    }
+    $installer = $installers[0]
     $proc = Start-Process -FilePath $installer.FullName -Wait -PassThru -ArgumentList @(
         '/quiet', 'InstallAllUsers=1', "TargetDir=$PythonRoot", 'Include_pip=1',
         'Include_test=0', 'Include_doc=0', 'PrependPath=1', 'Shortcuts=0',
@@ -97,12 +123,10 @@ if (-not (Test-Path $python)) { throw "pas de python.exe sous $PythonRoot apres 
 Write-Host "Python installe : $PythonRoot"
 
 # --- 7zr.exe. EXIGENCE, PAS COMMODITE. Les archives de RetroArch — les
-# seules du manifeste — utilisent le filtre de compression BCJ2, que la
-# bibliotheque Python d extraction marque « Unsupported » dans son propre
-# code, et l editeur ne publie aucune variante .zip. Sans ce binaire,
-# l emulateur qui couvre l essentiel de la bibliotheque retro ne s installe
-# pas du tout.
-#
+# seules du manifeste — utilisent le filtre BCJ2, que la bibliotheque Python
+# d extraction marque « Unsupported » dans son propre code, et l editeur ne
+# publie aucune variante .zip : sans ce binaire, l emulateur qui couvre
+# l essentiel de la bibliotheque retro ne s installe pas du tout.
 # Il va sur D: pour survivre a la reconstruction de C:, et son dossier entre
 # dans le PATH MACHINE : le paquet cherche 7zr par shutil.which(), et
 # « retro install » relance depuis l hote tourne dans une autre session.
@@ -116,9 +140,8 @@ $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
 if ($machinePath -notlike "*$RetroBinDir*") {
     [Environment]::SetEnvironmentVariable('Path', "$machinePath;$RetroBinDir", 'Machine')
 }
-# Le PATH machine ne redescend pas dans un processus deja lance : il faut
-# aussi le poser ici, sans quoi le « retro install » de cette etape meme ne
-# trouverait pas le binaire qu elle vient de deposer.
+# Le PATH machine ne redescend pas dans un processus deja lance : sans cette
+# ligne, le « retro install » de cette etape meme ne le trouverait pas.
 $env:Path = "$env:Path;$RetroBinDir"
 # Relire au lieu de croire l ecriture, et verifier la PROPRIETE qui compte :
 # que 7zr.exe se resolve par le PATH, exactement comme le fera shutil.which().
@@ -131,35 +154,46 @@ if (-not (Get-Command '7zr.exe' -ErrorAction SilentlyContinue)) {
 Write-Host "7zr.exe depose dans $RetroBinDir et joignable par le PATH"
 
 # --- Le paquet retro, hors ligne. Les roues sont figees a la construction
-# (fetch_payload.py --retro) et posees sans index : le provisionnement ne doit
-# pas dependre de PyPI, seuls les emulateurs se telechargent.
+# (fetch_payload.py --retro) et posees sans index : seuls les emulateurs, plus
+# bas, se telechargent.
 $wheels = Join-Path $PayloadRetro 'wheels'
 if (-not (Test-Path $wheels)) {
     throw "$wheels est absent : la charge utile ne porte pas le paquet retro (fetch_payload.py --retro)"
 }
-& $python -m pip install --no-index --find-links $wheels --upgrade retro
+# 2>&1 n est pas cosmetique : pip ecrit A COUP SUR sur son flux d erreur
+# l avertissement « installed in ... which is not on PATH » (le PATH MACHINE a
+# change, pas celui de ce processus deja lance), et 5.1 sous
+# $ErrorActionPreference = 'Stop' promeut ce flux en erreur terminante - une
+# installation REUSSIE se solderait alors par un echec de provisionnement.
+& $python -m pip install --no-index --find-links $wheels --upgrade retro 2>&1 |
+    ForEach-Object { Write-Host "$_" }
 if ($LASTEXITCODE -ne 0) { throw "pip install retro a rendu $LASTEXITCODE" }
 $retroExe = Join-Path $PythonRoot 'Scripts\retro.exe'
 if (-not (Test-Path $retroExe)) { throw "pas de $retroExe apres l installation du paquet" }
 
 # --- Les emulateurs du manifeste noyau : telecharges, verifies par empreinte,
-# installes sous D:\Emulation. Idempotent (temoin .retro-version par
-# emulateur), donc rejouable a chaque reconstruction sans retelecharger.
-& $retroExe install --emulation-root $EmulationRoot
+# installes sous D:\Emulation. Idempotent (.retro-version par emulateur).
+# Meme redirection, meme raison qu au pip ; et le rapport doit arriver dans le
+# temoin, pas seulement dans la transcription.
+$installOutput = @(& $retroExe install --emulation-root $EmulationRoot 2>&1 |
+                   ForEach-Object { "$_" })
 $installExit = $LASTEXITCODE
+$installOutput | ForEach-Object { Write-Host $_ }
 if ($installExit -eq 0) {
+    Write-RetroStatus 'ok' $installOutput
     Write-Host "emulateurs installes dans $EmulationRoot"
 }
 elseif ($installExit -eq 1) {
     # Code 1 = au moins un emulateur manque, les autres sont installes et le
-    # rapport nomme lesquels. Une URL morte chez un editeur ne doit pas
-    # emporter le provisionnement d une console dont le streaming, lui,
-    # fonctionne : l operateur reste joignable et rejoue « retro install »
-    # depuis l hote sans reconstruire la VM. Meme arbitrage que ViGEmBus
-    # (etape 25) et que les partages non montes (etape 35).
-    Write-Host "WARNING: au moins un emulateur ne s est pas installe (rapport ci-dessus) ; rejouer 'retro install' depuis l hote une fois la cause levee"
+    # rapport nomme lesquels. Une URL morte ne doit pas emporter une console
+    # dont le streaming fonctionne : l operateur reste joignable et rejoue
+    # « retro install » depuis l hote. Meme arbitrage que ViGEmBus (25) et que
+    # les partages non montes (35) - mais le temoin, lui, doit survivre.
+    Write-RetroStatus 'partial' $installOutput
+    Write-Host "warning: au moins un emulateur ne s est pas installe (rapport ci-dessus) ; rejouer 'retro install' depuis l hote une fois la cause levee. $RetroStatusFile le dit a l hote, qui doit refuser de synchroniser une bibliotheque partielle."
 }
 else {
+    Write-RetroStatus 'failed' $installOutput
     throw "retro install a rendu $installExit : le manifeste n a pas pu etre lu, aucun emulateur n a ete installe"
 }
 
