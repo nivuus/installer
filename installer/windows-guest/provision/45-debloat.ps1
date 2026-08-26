@@ -21,9 +21,19 @@ $ErrorActionPreference = 'Stop'
 # time and can contend with the encoder - on a machine that exists to stream,
 # this is the first thing to switch off. HKCU alone is not enough: the policy
 # key under HKLM is what survives a user profile being recreated.
-New-Item -Path 'HKCU:\System\GameConfigStore' -Force | Out-Null
+# NE JAMAIS faire New-Item -Force sur une cle de registre qui EXISTE DEJA.
+# -Force ne veut pas dire « cree si absent » ici : il SUPPRIME l arbre puis le
+# recree, et echoue avec « Cannot delete a subkey tree because the subkey does
+# not exist » des qu une sous-cle lui resiste. Mesure du 2026-08-26 : l etage
+# est mort dessus apres avoir correctement desactive dix services, emportant
+# 50-power, 55-updates et le marqueur avec lui.
+if (-not (Test-Path 'HKCU:\System\GameConfigStore')) {
+    New-Item -Path 'HKCU:\System\GameConfigStore' -Force | Out-Null
+}
 Set-ItemProperty -Path 'HKCU:\System\GameConfigStore' -Name 'GameDVR_Enabled' -Value 0 -Type DWord
-New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR' -Force | Out-Null
+if (-not (Test-Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR')) {
+    New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR' -Force | Out-Null
+}
 Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR' `
                  -Name 'AllowGameDVR' -Value 0 -Type DWord
 $dvr = (Get-ItemProperty 'HKCU:\System\GameConfigStore').GameDVR_Enabled
@@ -59,7 +69,7 @@ foreach ($name in $useless.Keys) {
 # Toast notifications land IN THE MIDDLE of the streamed picture, where nobody
 # can dismiss them without a mouse on the guest.
 $push = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\PushNotifications'
-New-Item -Path $push -Force | Out-Null
+if (-not (Test-Path $push)) { New-Item -Path $push -Force | Out-Null }
 Set-ItemProperty -Path $push -Name 'ToastEnabled' -Value 0 -Type DWord
 Write-Host 'toast notifications disabled (they would appear inside the stream)'
 

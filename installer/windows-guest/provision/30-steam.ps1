@@ -83,7 +83,7 @@ Write-Host 'Steam is the session shell (no explorer, no taskbar, no desktop)'
 # l'agent continuent d'acceder normalement a C: par les API de fichiers, sans
 # quoi rien ne fonctionnerait. On empeche l'erreur, pas l'adversaire.
 $policies = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer'
-New-Item -Path $policies -Force | Out-Null
+if (-not (Test-Path $policies)) { New-Item -Path $policies -Force | Out-Null }
 $driveC = 4
 Set-ItemProperty -Path $policies -Name 'NoDrives' -Value $driveC -Type DWord
 Set-ItemProperty -Path $policies -Name 'NoViewOnDrive' -Value $driveC -Type DWord

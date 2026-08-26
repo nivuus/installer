@@ -370,6 +370,22 @@ check("le fond ne passe jamais devant un jeu",
 check("l habillage ne peut pas empecher Steam de demarrer",
       "wallpaper not shown" in _shell, True)
 
+# New-Item -Force sur une cle de registre EXISTANTE ne cree pas : il SUPPRIME
+# l arbre puis le recree, et echoue sur « Cannot delete a subkey tree ». Le
+# 2026-08-26 l etage d epuration est mort dessus apres avoir desactive dix
+# services, emportant tout ce qui suivait.
+for _stage in ("45-debloat.ps1", "30-steam.ps1"):
+    _body = (PROVISION / _stage).read_text(encoding="utf-8")
+    _lines = _body.splitlines()
+    # Le garde peut etre sur la ligne meme (forme courte) ou sur la precedente
+    # (forme en bloc) : les deux protegent, seule leur absence est un defaut.
+    _bad = [ln for n, ln in enumerate(_lines)
+            if "New-Item" in ln and "-Force" in ln and "HK" in ln
+            and not ln.lstrip().startswith("#")
+            and "Test-Path" not in ln
+            and "Test-Path" not in (_lines[n - 1] if n else "")]
+    check(f"{_stage} ne force pas New-Item sur une cle de registre", _bad, [])
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
