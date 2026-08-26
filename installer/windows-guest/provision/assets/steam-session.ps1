@@ -37,12 +37,17 @@ $ErrorActionPreference = 'Continue'
 # revenir avant de conclure que la session est finie.
 #
 # CE DELAI EST DIRECTEMENT CE QU ATTEND L UTILISATEUR APRES AVOIR QUITTE STEAM,
-# et 30 s se ressentaient comme une minute (mesure du 2026-08-26 : Steam quitte
-# vers 22:10:00, session fermee a 22:10:31). Steam qui se relance pour sa mise
-# a jour respawne en quelques secondes, jamais dix : la marge reste largement
-# suffisante, et se tromper coute une session a rouvrir, pas un travail perdu —
-# Steam etant detache, la mise a jour se poursuit de toute facon.
-$RestartGraceSeconds = 10
+# et il a ete resserre deux fois sur mesure : 30 s (ressenti « une minute »),
+# puis 10 s (mesure : 12 s de bout en bout), puis ici. Un Steam qui se relance
+# pour sa mise a jour respawne dans la foulee — il lance son successeur avant
+# de mourir — la ou un Steam quitte reste absent pour toujours ; trois secondes
+# separent deja les deux cas.
+#
+# LA MARGE EST DESORMAIS MINCE, ET C EST ASSUME. Se tromper de cote ne coute
+# qu une session a rouvrir : Steam etant lance detache, sa mise a jour se
+# poursuit sans le flux, et le lanceur retrouvera un Steam vivant a la
+# reconnexion suivante. Le defaut inverse — attendre — se paie a CHAQUE sortie.
+$RestartGraceSeconds = 3
 
 # Au TOUT PREMIER lancement, Steam telecharge sa propre mise a jour avant
 # d ouvrir la moindre fenetre — 242 Mo mesures le 2026-08-26. Attendre moins,
@@ -96,15 +101,16 @@ public static class NivuusWin {
 # --- 3. Tenir la session aussi longtemps que Steam vit ------------------------
 while ($true) {
     if (Test-SteamRunning) {
-        # Une seconde, pas trois : ce sondage s ajoute tel quel au delai
-        # ci-dessus, et son cout est nul face aux heures que dure une session.
-        Start-Sleep -Seconds 1
+        # Les deux sondages s ajoutent tels quels au delai de grace, et leur
+        # cout est nul face aux heures que dure une session : une interrogation
+        # de la table des processus, deux fois par seconde.
+        Start-Sleep -Milliseconds 500
         continue
     }
     $graceEnd = (Get-Date).AddSeconds($RestartGraceSeconds)
     $cameBack = $false
     while ((Get-Date) -lt $graceEnd) {
-        Start-Sleep -Seconds 2
+        Start-Sleep -Milliseconds 500
         if (Test-SteamRunning) { $cameBack = $true; break }
     }
     if (-not $cameBack) { break }
