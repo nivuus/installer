@@ -222,6 +222,13 @@ def eject_media(domain: str = DOMAIN_NAME) -> list[str]:
     for target in ("sdb", "sdc"):
         for scope in ("--live", "--config"):
             _virsh("change-media", domain, target, "--eject", scope)
+        # Ejecter ne suffit pas : le LECTEUR garde sa lettre meme vide, et ce
+        # sont precisement les lettres que 35-shares.ps1 veut pour E: et F:.
+        # Mesure du 2026-08-26 : apres ejection, E: et F: restaient occupes par
+        # deux volumes de 0 Go et les partages ne pouvaient pas monter. Le
+        # lecteur part donc avec son media - une appliance n'a rien a lire sur
+        # un CD, et le domaine de production n'en declare aucun.
+        _virsh("detach-disk", domain, target, "--config")
         ejected.append(target)
     return ejected
 

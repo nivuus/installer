@@ -255,6 +255,14 @@ check("l XML porte l uuid fourni",
 check("sans uuid, aucune balise vide n est emise",
       "<uuid>" in testdomain.domain_xml(windows_iso="/w.iso", unattend_iso="/u.iso"), False)
 
+# Ejecter le media ne suffit pas : le LECTEUR garde sa lettre meme vide, et ce
+# sont precisement celles que les partages veulent pour E: et F:. Mesure du
+# 2026-08-26 : apres ejection, deux volumes de 0 Go tenaient encore les lettres.
+_src = pathlib.Path(__file__).resolve().parents[2] / "installer" / "windows-guest" / "testdomain.py"
+_td = _src.read_text(encoding="utf-8")
+check("eject-media retire aussi le lecteur, pas seulement le media",
+      "detach-disk" in _td, True)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
