@@ -109,7 +109,7 @@ def render_secrets(admin_password: str, ui_username: str,
     return "@{\n" + body + "\n}\n"
 
 
-def render_retro(enabled: bool, steam_dir: str = STEAM_DIR) -> str:
+def render_retro(enabled: bool) -> str:
     """Render config/retro.psd1: the retrogaming toggle read by the guest.
 
     Retrogaming (RetroArch, via the `retro` package) is an OPTIONAL feature:
@@ -118,10 +118,10 @@ def render_retro(enabled: bool, steam_dir: str = STEAM_DIR) -> str:
     "this payload predates the retro option and never wrote the file at
     all". A file that says Enabled = $false cannot be confused with either.
 
-    steam_dir rides along because the guest-side step still needs to find
-    Steam's D:\\Steam\\userdata to write shortcuts into - retro does not
-    install Steam itself (30-steam.ps1 already does, unconditionally), it
-    only needs to know where it lives.
+    No path rides along here on purpose: Steam's directory is already
+    defined twice (STEAM_DIR above, the literal in 30-steam.ps1) and a
+    third copy in this file would just be one more place to keep in sync
+    for a value nothing reads through retro.psd1 yet.
     """
     flag = "$true" if enabled else "$false"
-    return "@{\n" f"    Enabled = {flag}\n" f"    SteamDir = '{steam_dir}'\n" "}\n"
+    return "@{\n" f"    Enabled = {flag}\n" "}\n"

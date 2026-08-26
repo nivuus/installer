@@ -52,8 +52,13 @@ def make_tree(root: pathlib.Path) -> "payload.PayloadSources":
     (drivers / "agent" / "agent.exe").write_bytes(b"MZ")
     config = root / "config"
     config.mkdir()
-    for name in ["sunshine.conf", "apps.json", "secrets.psd1", "retro.psd1"]:
+    for name in ["sunshine.conf", "apps.json", "secrets.psd1"]:
         (config / name).write_text(f"# {name}\n")
+    # retro.psd1 must carry real "Enabled = $true/$false" content:
+    # payload.retro_enabled() parses it and stage_payload() requires the
+    # promised binaries to actually be present, so a placeholder comment
+    # (unlike the other config/* stubs above) is refused, not ignored.
+    (config / "retro.psd1").write_text("@{\n    Enabled = $false\n}\n")
     return payload.PayloadSources(provision_dir=root / "provision",
                                   probe_dir=root / "probe",
                                   drivers_dir=drivers,
@@ -322,8 +327,9 @@ with tempfile.TemporaryDirectory() as tmp:
     _make_complete_payload(drivers)
     cfg = src / "config"
     cfg.mkdir()
-    for name in ["sunshine.conf", "apps.json", "secrets.psd1", "retro.psd1"]:
+    for name in ["sunshine.conf", "apps.json", "secrets.psd1"]:
         (cfg / name).write_text("x")
+    (cfg / "retro.psd1").write_text("@{\n    Enabled = $false\n}\n")
     sources = payload.PayloadSources(
         provision_dir=src / "provision", probe_dir=src / "probe",
         drivers_dir=drivers, config_dir=cfg, assets_dir=src / "assets")

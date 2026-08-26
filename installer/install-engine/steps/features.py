@@ -61,9 +61,8 @@ def apply_features(config: dict, target: str, nivuus_dir: str, hw: dict,
         _firewall(config, target, emit)
     if "docker" in features:
         _docker(target, emit)
-    # Unconditional, unlike the features above: the state must be recorded
-    # whether or not "retro" was picked (see _retro()'s docstring).
-    _retro(target, features, emit)
+    if "retro" in features:
+        _retro(target, features, emit)
     if features & {"home-assistant", "mqtt"}:
         _home_assistant_mqtt(target, nivuus_dir, features, emit)
 
@@ -192,39 +191,43 @@ def _docker(target, emit) -> None:
 
 # --------------------------------------------------------------------------- #
 def _retro(target, features, emit) -> None:
-    """Record the retrogaming toggle on the target filesystem.
+    """Record that retrogaming was requested, on the target filesystem.
 
     Retro (RetroArch, via the `retro` package) runs entirely on the Windows
     guest VM, built separately and later by windows-guest/build.py -
     possibly on this very host, but as a manual step the wizard cannot see
-    or trigger. This step's only job is to leave a durable, unambiguous
-    record of the operator's choice for that later step to read.
+    or trigger. build.py falls back to reading this file (RETRO_STATE_PATH)
+    when its own --retro flag is not given explicitly, so this marker is
+    the only durable trace of the operator's choice once the installer has
+    moved on.
 
-    Called unconditionally (contrast with every other feature above, which
-    only acts when selected): the file must exist and say EXPLICITLY
-    "disabled" when the box was not checked. An absent file cannot be told
-    apart from a target built by a version of this installer that predates
-    the retro option at all; a file that says "enabled": false can't be
-    confused with anything.
+    Called only when "retro" was selected (see apply_features), like every
+    other feature here: an unchecked install writes nothing, exactly as it
+    did before this option existed. That still agrees with build.py, which
+    treats an absent marker as "off" - the unchecked case needs no marker
+    of its own to say so.
 
-    retro depends on the Windows guest VM (the "kvm-vfio" feature): checking
-    it without also checking kvm-vfio cannot work, and the wizard already
-    refuses that combination at submit time (see webapp/models.py). This is
-    the same guard, defence in depth, so a config built some other way still
-    fails loudly here rather than leaving a VM built without KVM/VFIO to
-    silently ignore a retro toggle it can never honour.
+    retro depends on the Windows guest VM (the "kvm-vfio" feature); the
+    wizard already refuses that combination at submit time (see
+    webapp/models.py). By the time a config reaches this step, though,
+    partitioning, the base system and the bootloader are already done -
+    raising here would fail an otherwise-complete install over a file
+    nothing reads yet. Warn and record retro as disabled instead: the
+    wizard's own guard is what actually protects the common case.
     """
-    enabled = "retro" in features
-    if enabled and "kvm-vfio" not in features:
-        raise StepError(
-            "'retro' requires 'kvm-vfio' (the Windows guest VM); "
-            "retrogaming cannot run without the VM it depends on"
-        )
-    emit.info("features", 93,
-              f"Retrogaming (Windows guest VM): "
-              f"{'enabled' if enabled else 'disabled'}")
-    write_file(os.path.join(target, RETRO_STATE_PATH),
-              json.dumps({"enabled": enabled}, indent=2) + "\n")
+    if "kvm-vfio" not in features:
+        emit.warn(
+            "features", 93,
+            "'retro' was selected without 'kvm-vfio' (the Windows guest VM "
+            "it depends on); recording retrogaming as disabled rather than "
+            "failing an otherwise-complete install")
+        enabled = False
+    else:
+        emit.info("features", 93, "Retrogaming (Windows guest VM): enabled")
+        enabled = True
+    write_file(
+        os.path.join(target, RETRO_STATE_PATH),
+        json.dumps({"enabled": enabled}, indent=2) + "\n")
 
 
 # --------------------------------------------------------------------------- #

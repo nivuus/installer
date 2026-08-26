@@ -195,11 +195,6 @@ check("retro on flips the flag", "Enabled = $true" in _retro_on, True)
 check("retro on does not also claim disabled",
       "Enabled = $false" in _retro_on, False)
 
-# SteamDir defaults to the same D:\Steam every other guest step targets
-# (30-steam.ps1's $SteamDir literal, apollo.STEAM_DIR).
-check("retro.psd1 carries the Steam directory guest steps can read",
-      "SteamDir = 'D:\\Steam'" in _retro_on, True)
-
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

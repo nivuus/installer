@@ -147,12 +147,15 @@ function wireRetroDependency() {
   const vm = $('input[data-feature="kvm-vfio"]');
   const retro = $('input[data-feature="retro"]');
   if (!vm || !retro) return;
+  // The catalogue entry already carries the "on" description; no need for
+  // a second, hand-copied literal that could drift from it.
+  const defaultDesc = FEATURES.find(f => f.key === "retro").desc;
   const sync = () => {
     retro.disabled = !vm.checked;
     if (!vm.checked) retro.checked = false;
     const wrap = retro.closest(".feature");
     wrap.querySelector(".fdesc").textContent = vm.checked
-      ? "RetroArch + bibliothèque de jeux rétro dans Steam (nécessite KVM / VFIO)"
+      ? defaultDesc
       : "Nécessite la VM Windows (KVM / VFIO) : cochez-la d'abord.";
   };
   vm.addEventListener("change", sync);
