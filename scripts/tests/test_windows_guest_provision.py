@@ -336,8 +336,14 @@ check("maximize-steam.ps1 laisse a Steam le temps de sa premiere mise a jour",
 # exactement la ou les partages doivent aller : mesure le 2026-08-26, les deux
 # media d installation tenaient E: et F:. L etage doit les deplacer AVANT.
 _sh = (PROVISION / "35-shares.ps1").read_text(encoding="utf-8")
-check("35-shares.ps1 degage les lettres prises par les lecteurs optiques",
-      "CD-ROM" in _sh and "mountvol" in _sh, True)
+# L etape ne doit JAMAIS demonter un lecteur optique : $PayloadRoot est le media
+# de reponses, et run-all.ps1 y lit tous les etages suivants. Le 2026-08-26 elle
+# a demonte F: puis echoue sur « A drive with the name 'F' does not exist »,
+# arretant net le provisionnement.
+check("35-shares.ps1 ne demonte aucun lecteur optique", "mountvol" in _sh, False)
+# Et le binaire doit etre copie AVANT tout le reste, tant que le media est lisible.
+check("35-shares.ps1 copie virtiofs.exe avant de creer les services",
+      _sh.index("Copy-Item") < _sh.index("sc.exe create"), True)
 check("35-shares.ps1 cree un service par partage (VirtioFsSvc n en monte qu un)",
       "sc.exe create" in _sh, True)
 check("35-shares.ps1 relit le montage au lieu de croire le demarrage du service",

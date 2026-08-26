@@ -23,28 +23,26 @@ $Shares = @(
     @{ Tag = 'ConsoleSave'; Letter = 'H'; Label = 'Sauvegardes Console' }
 )
 
-# Optical drives grab the first free letters and would sit exactly where the
-# shares belong - measured on 2026-08-26, the two installation media held E: and
-# F:. Push them out of the way FIRST; 20-disk.ps1 fights the same battle for D:.
-$wanted = $Shares.Letter
-Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter } | ForEach-Object {
-    if ($wanted -contains [string]$_.DriveLetter) {
-        $free = 90..73 | ForEach-Object { [char]$_ } |
-                Where-Object { $_ -notin $wanted -and -not (Test-Path "${_}:") } |
-                Select-Object -First 1
-        if (-not $free) { throw "no free letter to move optical drive $($_.DriveLetter): out of the way" }
-        Get-Partition -DriveLetter $_.DriveLetter -ErrorAction SilentlyContinue |
-            Set-Partition -NewDriveLetter $free -ErrorAction SilentlyContinue
-        # A CD-ROM is not a partition; mountvol is what actually moves it.
-        mountvol "$($_.DriveLetter):" /D 2>&1 | Out-Null
-        Write-Host "optical drive $($_.DriveLetter): unmounted to free the letter"
-    }
-}
-
+# LE BINAIRE D ABORD, ET C EST UN ORDRE OBLIGATOIRE. $PayloadRoot designe le
+# media de reponses, donc un LECTEUR OPTIQUE, et les lettres que veulent les
+# partages sont precisement celles que ces lecteurs occupent. Toucher aux lecteurs
+# avant d avoir copie ce qu on lit dessus scie la branche : mesure du
+# 2026-08-26, l etape a demonte F: puis a echoue sur « A drive with the name
+# 'F' does not exist » — et run-all.ps1 lisant TOUS les etages suivants sur ce
+# meme lecteur, le provisionnement s est arrete net.
 $virtiofs = Join-Path $PayloadRoot 'drivers\virtio\viofs\virtiofs.exe'
 if (-not (Test-Path $virtiofs)) { throw "missing $virtiofs" }
 $installed = 'C:\nivuus\virtiofs.exe'
 Copy-Item -Path $virtiofs -Destination $installed -Force
+
+# On NE DEMONTE PAS les lecteurs optiques : le provisionnement en depend encore.
+# Les services sont crees en demarrage automatique et ne sont demarres
+# maintenant que si leur lettre est libre ; les autres monteront au demarrage
+# suivant, une fois les medias ejectes (testdomain.py eject-media). C est la
+# seule facon d avoir les deux : un payload lisible jusqu au bout, et les
+# partages sur les lettres voulues.
+$taken = @(Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter } |
+           ForEach-Object { [string]$_.DriveLetter })
 
 foreach ($s in $Shares) {
     $name = "NivuusShare_$($s.Tag)"
@@ -54,7 +52,11 @@ foreach ($s in $Shares) {
     $bin = "`"$installed`" -t $($s.Tag) -m $($s.Letter):"
     sc.exe create $name binPath= $bin start= auto DisplayName= "Nivuus share $($s.Tag)" 2>&1 | Out-Null
     sc.exe failure $name reset= 86400 actions= restart/5000/restart/10000/restart/30000 2>&1 | Out-Null
-    sc.exe start $name 2>&1 | Out-Null
+    if ($taken -contains $s.Letter) {
+        Write-Host "$($s.Tag): $($s.Letter): still held by an optical drive, will mount at next boot"
+    } else {
+        sc.exe start $name 2>&1 | Out-Null
+    }
 }
 
 # Read back: a service that started is not a share that mounted. virtiofs needs
@@ -70,8 +72,10 @@ foreach ($s in $Shares) {
     }
 }
 if ($missing) {
-    # Not fatal: a domain without these <filesystem> entries is a legitimate
-    # configuration (the A-era test domain has none), and refusing here would
-    # strand an otherwise healthy appliance over an optional convenience.
-    Write-Host "WARNING: shares not mounted: $($missing -join ', ') - check the domain XML carries a matching <filesystem> tag for each"
+    # Not fatal, and deliberately so. A domain without these <filesystem>
+    # entries is a legitimate configuration, and a letter still held by an
+    # optical drive resolves itself at the next boot. Refusing here would
+    # strand an otherwise healthy appliance over a convenience mount - the
+    # exact mistake this stage already made once by unmounting its own payload.
+    Write-Host "WARNING: shares not mounted yet: $($missing -join ', ') - optical drives still hold the letters, or the domain XML lacks a matching <filesystem> tag"
 }
