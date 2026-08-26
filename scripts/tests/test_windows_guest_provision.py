@@ -217,6 +217,33 @@ check("Apollo install location is read, not assumed",
 check("Apollo runs the bundled SudoVDA installer (certificate trust delegated to it)",
       "install.bat" in apollo_stage, True)
 
+# Task 1 (sub-project C2): 25-apollo.ps1 verified SudoVDA scrupulously by
+# hardware ID and said nothing about ViGEmBus, Apollo's virtual gamepad
+# driver. Its absence is silent by construction - image and sound work, the
+# pad just does nothing - and it is unconditional: it has nothing to do with
+# retrogaming, it is what makes ANY gamepad passed through Moonlight work at
+# all. The two device checks were split into their own helper (same 200-line
+# reason as the junction above) and are verified there.
+apollo_drivers = texts["apollo-drivers.ps1"]
+check("25-apollo.ps1 dot-sources the driver-verification helper",
+      "apollo-drivers.ps1" in apollo_stage, True)
+check("driver helper still checks SudoVDA by its precise hardware ID",
+      "Root\\SudoMaker\\SudoVDA" in apollo_drivers, True)
+check("driver helper still treats a missing SudoVDA as fatal",
+      "throw 'no working SudoVDA device" in apollo_drivers, True)
+check("driver helper checks ViGEmBus by its vendor hardware ID, not a service name",
+      "Root\\ViGEmBus" in apollo_drivers, True)
+check("driver helper names the consequence of a missing ViGEmBus",
+      "no gamepad will work over Moonlight" in apollo_drivers, True)
+# Deliberate asymmetry with SudoVDA: a missing display leaves nothing to
+# diagnose from, so that stays fatal. A missing ViGEmBus still leaves image,
+# sound and WinRM reachable, so the stage warns instead of throwing - see the
+# reasoning written into apollo-drivers.ps1 itself.
+check("a missing ViGEmBus warns instead of throwing",
+      "WARNING: no working ViGEmBus device" in apollo_drivers, True)
+check("a missing ViGEmBus does not abort the stage",
+      "throw" in apollo_drivers.rsplit("Root\\ViGEmBus", 1)[-1], False)
+
 # FIX 11 (final review): cross-check the literals that were only recoupled
 # by convention until now - the same guard the PROVISION_VERSION check above
 # already applies, extended to the other repeated constants. A future edit
