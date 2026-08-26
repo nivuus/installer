@@ -4,6 +4,20 @@
   <uuid>{{ uuid }}</uuid>
 {%- endif %}
   <memory unit='GiB'>{{ memory_gib }}</memory>
+  <memoryBacking>
+    <!-- LES TROIS BALISES VONT ENSEMBLE, en retirer une casse le demarrage.
+         virtiofs EXIGE access=shared : virtiofsd mappe la memoire de l invite
+         pour servir les partages. Mais shared seul change l allocation en une
+         forme que VFIO ne sait pas mapper, et le domaine meurt AVANT tout, sur
+         « vfio_container_dma_map = -14 (Bad address) » — pas sur une erreur de
+         partage. Mesure du 2026-08-26.
+         memfd donne un support partageable sans reserver de pool, contrairement
+         aux hugepages de la production : le banc partage l hote avec le reste.
+         locked epingle la memoire, ce dont VFIO a besoin pour son DMA. -->
+    <source type='memfd'/>
+    <access mode='shared'/>
+    <locked/>
+  </memoryBacking>
   <vcpu placement='static'>{{ vcpus }}</vcpu>
   <os>
     <type arch='x86_64' machine='pc-q35-9.2'>hvm</type>

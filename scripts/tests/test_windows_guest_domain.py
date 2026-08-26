@@ -114,7 +114,24 @@ check("gpu and its audio function are passed", slots,
 check("nvme is never passed", "0x03" in [a.get("bus") for a in addrs], False)
 
 check("an emulated console exists", root.find("devices/graphics") is not None, True)
-check("hugepages are not claimed", root.find("memoryBacking"), None)
+# virtiofs EXIGE access=shared : sans lui virtiofsd refuse de demarrer et c est
+# le domaine ENTIER qui echoue au lancement, pas seulement les partages. Les
+# hugepages, elles, restent a la production : le banc partage l hote.
+# LES TROIS VONT ENSEMBLE. virtiofs exige access=shared, mais shared SEUL change
+# l allocation en une forme que VFIO ne sait pas mapper : le domaine meurt avant
+# tout sur « vfio_container_dma_map = -14 (Bad address) », une erreur qui ne
+# nomme jamais le partage. memfd donne un support partageable sans reserver de
+# pool, locked epingle la memoire pour le DMA de VFIO. Mesure du 2026-08-26.
+check("memoire partagee pour virtiofs",
+      root.find("memoryBacking/access").get("mode"), "shared")
+check("support memfd, sans reserver de pool",
+      root.find("memoryBacking/source").get("type"), "memfd")
+check("memoire epinglee, sans quoi VFIO echoue au demarrage",
+      root.find("memoryBacking/locked") is not None, True)
+check("le banc ne reserve pas de hugepages",
+      root.find("memoryBacking/hugepages"), None)
+check("les quatre partages sont declares",
+      len(root.findall("devices/filesystem")), 4)
 
 # Test assert_gpu_free() guard with monkeypatched _virsh.
 class MockProc:
