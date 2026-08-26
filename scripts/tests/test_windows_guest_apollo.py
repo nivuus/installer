@@ -76,11 +76,12 @@ desktop = next(a for a in apps["apps"] if a["name"] == "Desktop")
 # 🔴 It is the app's virtual-display flag - NOT isolated_virtual_display_option
 # - that makes the SudoVDA display appear (trap paid on 2026-07-23).
 check("Desktop asks for a virtual display", desktop.get("virtual-display"), True)
-# Desktop ne lance plus rien : depuis que Steam est le shell de la session
-# (30-steam.ps1), il tourne deja quand le client se connecte, et un detached
-# ouvrirait une seconde instance sur un Steam vivant. Le lancement de Steam
-# depuis D: est desormais couvert par assets/steam-shell.ps1.
-check("Desktop ne relance pas Steam", desktop.get("detached"), None)
+# Desktop relance Steam MEME s il est le shell de la session : le shell kiosque
+# ne prend effet qu a l ouverture de session suivante, et le provisionnement se
+# termine sans redemarrer. Entre les deux, rien ne lance Steam et un client voit
+# un bureau vide. Steam gere la double invocation en remontant la fenetre de
+# l instance existante, donc le filet est gratuit.
+check("Desktop lance Steam depuis D:", desktop.get("detached"), ["D:\\Steam\\steam.exe"])
 bp = next(a for a in apps["apps"] if a["name"] == "Steam Big Picture")
 check("Big Picture asks for a virtual display", bp.get("virtual-display"), True)
 

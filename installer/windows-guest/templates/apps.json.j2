@@ -7,6 +7,15 @@
   ni NVENC — et Moonlight affiche le numero d exception 403 comme s il s agissait
   d un code HTTP. Mesure sur l invite le 2026-08-25.
 
+  « Desktop » relance Steam bien qu il soit deja le shell de la session, et ce
+  n est pas redondant : le shell kiosque ne prend effet qu a l OUVERTURE DE
+  SESSION SUIVANTE, or le provisionnement se termine sans redemarrer. Entre les
+  deux, explorer.exe tourne encore et RIEN ne lance Steam — un client qui se
+  connecte alors voit un bureau vide. Piege paye le 2026-08-26. Steam gere
+  lui-meme la double invocation : une seconde instance remonte la fenetre de la
+  premiere au lieu d en ouvrir une autre, donc le filet ne coute rien quand le
+  shell tourne deja.
+
   Les uuid sont DETERMINISTES et ne doivent jamais changer : un client Moonlight
   identifie ses raccourcis par uuid. Derivation :
   uuid5(uuid5(NAMESPACE_URL, 'https://nivuus.local/apollo/apps'), <nom>).
@@ -24,6 +33,7 @@
       "uuid": "59a5f434-e7d4-5124-b98c-eef9441c650c",
       "image-path": "desktop.png",
       "virtual-display": true,
+      "detached": ["{{ steam_exe }}"],
       "prep-cmd": [
         {
           "do": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\nivuus\\apollo\\maximize-steam.ps1",
