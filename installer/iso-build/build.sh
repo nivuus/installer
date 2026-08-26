@@ -7,7 +7,11 @@ set -euo pipefail
 
 ISO_BUILD_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALLER_DIR="$(dirname "$ISO_BUILD_DIR")"          # installer/
-REPO_DIR="$(dirname "$INSTALLER_DIR")"               # repo root (Nivuus/)
+REPO_DIR="$(dirname "$INSTALLER_DIR")"               # repo root (packages/installer/)
+# The MQTT agent lives in its own repository since 2026-08-26. In the standard
+# working layout it sits beside this one, as packages/mqtt. Override with
+# MQTT_REPO_DIR if it is checked out elsewhere.
+MQTT_REPO_DIR="${MQTT_REPO_DIR:-$(dirname "$REPO_DIR")/mqtt}"
 INCLUDES="${ISO_BUILD_DIR}/config/includes.chroot"
 PAYLOAD_INSTALLER="${INCLUDES}/opt/nivuus-installer"
 PAYLOAD_SRC="${INCLUDES}/opt/nivuus-src"
@@ -54,11 +58,19 @@ else
 fi
 
 # Optional: build the MQTT agent .deb so the engine can install it offline.
-if [ "${BUILD_MQTT_DEB:-0}" = "1" ] && [ -f "${REPO_DIR}/mqtt/package.json" ]; then
-    echo "==> Building MQTT agent .deb"
-    ( cd "${REPO_DIR}/mqtt" && npm install && npm run package:deb ) || \
-        echo "W: MQTT .deb build failed; continuing without it"
-    cp "${REPO_DIR}"/mqtt/*.deb "${PAYLOAD_SRC}/mqtt/" 2>/dev/null || true
+# The agent is a sibling repository (nivuus/mqtt), not part of this one.
+if [ "${BUILD_MQTT_DEB:-0}" = "1" ]; then
+    if [ -f "${MQTT_REPO_DIR}/package.json" ]; then
+        echo "==> Building MQTT agent .deb from ${MQTT_REPO_DIR}"
+        ( cd "${MQTT_REPO_DIR}" && npm install && npm run package:deb ) || \
+            echo "W: MQTT .deb build failed; continuing without it"
+        mkdir -p "${PAYLOAD_SRC}/mqtt"
+        cp "${MQTT_REPO_DIR}"/*.deb "${PAYLOAD_SRC}/mqtt/" 2>/dev/null || true
+    else
+        # Never fail silently here: BUILD_MQTT_DEB=1 is an explicit request.
+        echo "W: BUILD_MQTT_DEB=1 but no MQTT repo at ${MQTT_REPO_DIR}" >&2
+        echo "W: clone https://github.com/nivuus/mqtt or set MQTT_REPO_DIR" >&2
+    fi
 fi
 
 echo "==> Configuring live-build"

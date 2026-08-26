@@ -182,8 +182,9 @@ def _docker(target, emit) -> None:
 # --------------------------------------------------------------------------- #
 def _home_assistant_mqtt(target, nivuus_dir, features, emit) -> None:
     emit.info("features", 95, "Deploying Home Assistant / MQTT layer…")
-    # The MQTT agent ships a .deb (built upstream by the ISO build). If present
-    # in the payload, install it; otherwise leave the source for manual build.
+    # The MQTT agent lives in its own repository (nivuus/mqtt) and ships a .deb
+    # built upstream by the ISO build when BUILD_MQTT_DEB=1. If present in the
+    # payload, install it; otherwise skip - the source is NOT in this payload.
     deb_dir = os.path.join(target, nivuus_dir.lstrip("/"), "mqtt")
     if os.path.isdir(deb_dir):
         for fname in os.listdir(deb_dir):
