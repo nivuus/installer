@@ -550,7 +550,19 @@ virsh change-media Windows-LTSC-test sdc /media/data/iso/nivuus-unattend-rebuild
 virsh domblklist Windows-LTSC-test | grep rebuild || {
     echo "REFUS : le media de reconstruction n'est pas attache" >&2; exit 1; }
 
+# 🔴 LES FRAPPES DOIVENT SUIVRE LE DEMARRAGE DANS LE MEME BLOC. L'invite
+# « Press any key to boot from CD » dure environ cinq secondes apres le POST.
+# Les envoyer depuis une commande separee, meme trente secondes plus tard,
+# arrive trop tard : le firmware amorce alors le DISQUE, l'invite redemarre sur
+# son installation precedente, et rien ne le signale — domstate dit `running`,
+# 5985 s'ouvre, le marqueur est la. Il porte simplement la date de la
+# reconstruction PRECEDENTE. Piege paye le 2026-08-26 ; le seul controle qui
+# l'attrape est de comparer `completed=` du marqueur a l'heure courante.
 virsh start Windows-LTSC-test
+for i in $(seq 1 14); do
+  virsh send-key Windows-LTSC-test --codeset linux KEY_ENTER >/dev/null 2>&1
+  sleep 0.7
+done
 ```
 
 Nouvelle attente au clavier (même média), puis nouvelle attente du marqueur —
