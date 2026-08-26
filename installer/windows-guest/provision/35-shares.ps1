@@ -52,6 +52,16 @@ foreach ($s in $Shares) {
     $bin = "`"$installed`" -t $($s.Tag) -m $($s.Letter):"
     sc.exe create $name binPath= $bin start= auto DisplayName= "Nivuus share $($s.Tag)" 2>&1 | Out-Null
     sc.exe failure $name reset= 86400 actions= restart/5000/restart/10000/restart/30000 2>&1 | Out-Null
+    # SANS CE DRAPEAU, LES ACTIONS DE REPRISE CI-DESSUS NE SERVENT A RIEN DANS
+    # NOTRE CAS. Par defaut le SCM ne les declenche que si le service meurt sans
+    # avoir annonce SERVICE_STOPPED — un plantage. virtiofs.exe, lui, SORT
+    # proprement avec un code d erreur quand il ne peut pas monter : cote hote
+    # virtiofsd pas encore pret, tag absent du XML du domaine, lettre encore
+    # tenue par un lecteur optique au demarrage suivant. Le SCM voyait un arret
+    # normal, ne reessayait jamais, et le partage restait absent jusqu au
+    # prochain provisionnement. failureflag= 1 etend la reprise aux sorties en
+    # erreur, ce qui est exactement le mode d echec qu on observe ici.
+    sc.exe failureflag $name 1 2>&1 | Out-Null
     if ($taken -contains $s.Letter) {
         Write-Host "$($s.Tag): $($s.Letter): still held by an optical drive, will mount at next boot"
     } else {
@@ -71,6 +81,22 @@ foreach ($s in $Shares) {
         $missing += "$($s.Tag) -> $($s.Letter):"
     }
 }
+# Relire la configuration de reprise. Une action de reprise mal posee ne se voit
+# jamais : elle ne manque qu au moment ou elle aurait du servir, c est-a-dire
+# quand plus personne ne regarde.
+$noRetry = @()
+foreach ($s in $Shares) {
+    $name = "NivuusShare_$($s.Tag)"
+    $flag = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$name" `
+             -Name 'FailureActionsOnNonCrashFailures' -ErrorAction SilentlyContinue).FailureActionsOnNonCrashFailures
+    $actions = (sc.exe qfailure $name) -join ' '
+    if ($flag -ne 1 -or $actions -notmatch 'RESTART') { $noRetry += $s.Tag }
+}
+if ($noRetry) {
+    throw "recovery actions did not take on: $($noRetry -join ', ') - a share that fails to mount would stay unmounted forever"
+}
+Write-Host 'shares retry on their own after a failed mount (failureflag + restart actions)'
+
 if ($missing) {
     # Not fatal, and deliberately so. A domain without these <filesystem>
     # entries is a legitimate configuration, and a letter still held by an
