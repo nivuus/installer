@@ -224,6 +224,20 @@ finally:
     testdomain.os.readlink = original_readlink
     testdomain.glob.glob = original_glob
 
+# Sans UUID, `testdomain.py xml | virsh define` echoue avec « le domaine existe
+# deja avec l uuid ... » : libvirt en forge un neuf pour un XML qui n en porte
+# pas et refuse de l attacher a un nom existant. L echec est SILENCIEUX dans un
+# pipeline — define ecrit sur stderr, le domaine garde son ANCIENNE definition,
+# et le `virsh start` suivant redemarre sur le PRECEDENT media de reponses.
+# C est ainsi qu une reconstruction a rejoue l ISO wipe le 2026-08-25 et efface
+# la partition de jeux qu elle devait preserver.
+_with = testdomain.domain_xml(windows_iso="/w.iso", unattend_iso="/u.iso",
+                              uuid="0ddb560a-afdc-4df6-a23c-06d5a9fffdd7")
+check("l XML porte l uuid fourni",
+      "<uuid>0ddb560a-afdc-4df6-a23c-06d5a9fffdd7</uuid>" in _with, True)
+check("sans uuid, aucune balise vide n est emise",
+      "<uuid>" in testdomain.domain_xml(windows_iso="/w.iso", unattend_iso="/u.iso"), False)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

@@ -534,8 +534,22 @@ intact :
 
 ```bash
 virsh destroy Windows-LTSC-test
-python3 testdomain.py xml --unattend-iso /media/data/iso/nivuus-unattend-rebuild.iso > /tmp/rebuild-domain.xml
-virsh define /tmp/rebuild-domain.xml
+
+# Echanger le MEDIA, sans redefinir le domaine : le disque, l'UUID et tout le
+# reste sont intouches. `testdomain.py xml | virsh define` marche aussi
+# desormais (le XML reprend l'UUID existant), mais change-media a moins de
+# surface d'erreur.
+virsh change-media Windows-LTSC-test sdc --eject --config
+virsh change-media Windows-LTSC-test sdc /media/data/iso/nivuus-unattend-rebuild.iso --insert --config
+
+# 🔴 VERIFIER AVANT DE DEMARRER. Un `virsh define` refuse est SILENCIEUX dans un
+# pipeline : il ecrit sur stderr, le domaine garde son ANCIENNE definition, et
+# le demarrage suivant rejoue le PRECEDENT media — donc l'ISO wipe, qui efface
+# la partition de jeux que ce test existe pour proteger. Piege paye DEUX FOIS le
+# 2026-08-25, la seconde apres avoir diagnostique a tort Windows Setup.
+virsh domblklist Windows-LTSC-test | grep rebuild || {
+    echo "REFUS : le media de reconstruction n'est pas attache" >&2; exit 1; }
+
 virsh start Windows-LTSC-test
 ```
 
@@ -761,7 +775,30 @@ reconstruction. À rendre silencieux quand `D:` vient d'être initialisé.
 
 ---
 
-## Test 3 — ÉCHEC : `D:` n'est pas préservé (2026-08-25)
+## Test 3 — RÉSULTAT INVALIDE, à refaire (2026-08-25)
+
+> 🔴 **Le compte rendu ci-dessous est ERRONÉ et conservé pour mémoire.** La
+> partition de données a bien été effacée, mais pas pour la raison qui y est
+> écrite : `virsh define` a été refusé sans que personne ne le voie, le domaine
+> a redémarré sur son ANCIENNE définition, et Windows Setup a donc rejoué l'ISO
+> **wipe** — qui efface tout par conception. La preuve est dans l'invité :
+> `C:\Windows\Panther\unattend.xml`, le fichier de réponses que Setup archive
+> après usage, porte `WillWipeDisk: true`, quatre `CreatePartition` et les
+> labels `Data,System,Windows` — la signature du mode wipe, pas du rebuild.
+>
+> La cause du refus : `testdomain.py xml` n'émettait pas d'`<uuid>`, libvirt en
+> forgeait un neuf, et `define` refusait de l'attacher à un nom déjà pris. Dans
+> un pipeline, l'erreur part sur stderr et le reste de la procédure continue
+> comme si de rien n'était.
+>
+> **Le mode rebuild n'a donc jamais été mis à l'épreuve, ni le 2026-08-25 au
+> soir ni à la seconde tentative.** Ce qui suit ne dit rien de sa validité.
+>
+> Corrigé depuis : le XML reprend l'UUID existant, la recette échange le média
+> plutôt que de redéfinir, et un contrôle `virsh domblklist` refuse de démarrer
+> tant que le média de reconstruction n'est pas attaché.
+
+### Compte rendu erroné du 2026-08-25 (conservé pour mémoire)
 
 Exécuté avec toute la matière que le test exige : une connexion Steam réelle
 (`loginusers.vdf`, 224 octets), un vrai jeu installé (Don't Starve Together,

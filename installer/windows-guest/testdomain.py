@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import glob
 import os
 import socket
@@ -63,11 +64,30 @@ def _virsh(*args: str) -> subprocess.CompletedProcess:
                           env={**os.environ, "LC_ALL": "C"})
 
 
+def existing_uuid(name: str = DOMAIN_NAME) -> str | None:
+    """UUID of the domain if it is already defined, else None.
+
+    Without it, `testdomain.py xml | virsh define` fails with "domain already
+    exists with uuid ..." - libvirt mints a fresh UUID for a UUID-less XML and
+    refuses to attach it to an existing name. The failure is quiet in a
+    pipeline (define prints to stderr, the domain simply keeps its OLD
+    definition) and the next `virsh start` then boots the PREVIOUS answer
+    medium. That is how a rebuild ran the wipe ISO twice on 2026-08-25 and
+    erased the games partition it was meant to preserve.
+    """
+    out = _virsh("dumpxml", "--inactive", name)
+    if out.returncode != 0:
+        return None
+    match = re.search(r"<uuid>([0-9a-fA-F-]{36})</uuid>", out.stdout)
+    return match.group(1) if match else None
+
+
 def domain_xml(*, disk_path: str = DISK_PATH, windows_iso: str,
                unattend_iso: str, name: str = DOMAIN_NAME,
                nvram_path: str = NVRAM_PATH, bridge: str = BRIDGE,
                mac: str = MAC, memory_gib: int = 16, vcpus: int = 8,
-               nic_model: str = NIC_MODEL) -> str:
+               nic_model: str = NIC_MODEL,
+               uuid: str | None = None) -> str:
     env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)),
                       autoescape=select_autoescape(enabled_extensions=("j2",),
                                                    default=True),
@@ -76,6 +96,7 @@ def domain_xml(*, disk_path: str = DISK_PATH, windows_iso: str,
         name=name, disk_path=disk_path, windows_iso=windows_iso,
         unattend_iso=unattend_iso, nvram_path=nvram_path, bridge=bridge,
         mac=mac, memory_gib=memory_gib, vcpus=vcpus, nic_model=nic_model,
+        uuid=uuid,
     )
 
 
@@ -189,7 +210,8 @@ def main(argv=None) -> int:
     if args.action == "xml":
         print(domain_xml(windows_iso=args.windows_iso,
                          unattend_iso=args.unattend_iso,
-                         nic_model=args.nic_model))
+                         nic_model=args.nic_model,
+                         uuid=existing_uuid()))
         return 0
     if args.action == "define":
         assert_gpu_free()

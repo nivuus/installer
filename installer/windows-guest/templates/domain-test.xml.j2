@@ -1,5 +1,8 @@
 <domain type='kvm'>
   <name>{{ name }}</name>
+{%- if uuid %}
+  <uuid>{{ uuid }}</uuid>
+{%- endif %}
   <memory unit='GiB'>{{ memory_gib }}</memory>
   <vcpu placement='static'>{{ vcpus }}</vcpu>
   <os>
