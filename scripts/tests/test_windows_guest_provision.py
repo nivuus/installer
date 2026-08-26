@@ -51,7 +51,7 @@ if failures:
         print("  -", f)
     sys.exit(1)
 
-# Recursive: provision/assets/*.ps1 (run-agent.ps1, maximize-steam.ps1) are
+# Recursive: provision/assets/*.ps1 (run-agent.ps1, steam-session.ps1) are
 # shipped and executed inside the guest just like the numbered stages, and
 # must not escape the 200-line, hardcoded-drive-letter and session-0 guards
 # below just because they live one directory deeper.
@@ -156,7 +156,7 @@ check("target device name info type is 2 (GET_TARGET_NAME)",
 
 # --- Sub-project B.
 # R1: the version lives in two languages and must move in one step.
-check("provision version is B1", payload.PROVISION_VERSION, "B1")
+check("provision version is B2", payload.PROVISION_VERSION, "B2")
 check("the standalone SudoVDA stage is gone",
       (PROVISION / "20-sudovda.ps1").exists(), False)
 
@@ -302,13 +302,20 @@ check("30-steam.ps1 installe Steam comme shell de session",
 check("30-steam.ps1 arme le filet AutoRestartShell",
       "AutoRestartShell" in _steam, True)
 _shell = (PROVISION / "assets" / "steam-shell.ps1").read_text(encoding="utf-8")
-# -Wait mentirait : Steam quitte son lanceur et continue dans un enfant, donc
-# une deuxieme instance serait lancee sur un Steam bien vivant.
 _shell_code = [ln for ln in _shell.splitlines()
                if ln.strip() and not ln.lstrip().startswith(("#", "<#", "»"))]
-check("le lanceur interroge la table des processus, pas -Wait",
-      "Get-Process" in _shell and
-      not any("-Wait" in ln for ln in _shell_code), True)
+# LE SHELL NE DOIT PLUS LANCER STEAM. Il s execute a l ouverture de session,
+# avant qu un client soit connecte et donc avant que SudoVDA ait cree l ecran
+# virtuel : le Chromium de Steam, qui choisit son moteur de rendu une seule fois
+# au demarrage, retombait alors sur le rasteriseur LOGICIEL SwiftShader pour
+# toute la duree du processus (webhelper_gpu.txt : gpu_compositing =
+# disabled_software), ce qui rendait Big Picture inutilisable. La boucle de
+# relance empechait de surcroit « quitter Steam » de fermer la session.
+check("le shell de session ne lance pas Steam",
+      any("steam.exe" in ln.lower() or "Start-Process" in ln
+          for ln in _shell_code), False)
+check("le shell reste vivant pour que Winlogon ne perde pas la session",
+      "while ($true)" in _shell, True)
 
 # USO laisse NetKVM emettre des super-datagrammes UDP que le conntrack de
 # l'hote classe « invalid » et que firewalld jette sans journaliser : Apollo
@@ -335,11 +342,46 @@ check("30-steam.ps1 masque C: dans les boites de dialogue",
       "NoDrives" in _steam and "NoViewOnDrive" in _steam, True)
 check("30-steam.ps1 relit les valeurs posees", "did not take" in _steam, True)
 
+# steam-session.ps1 est la commande SUIVIE par Apollo : sa sortie ferme la
+# session Moonlight, donc quitter Steam ferme le flux. Elle ne lance rien —
+# c est l entree « detached » d apps.json qui demarre Steam, hors du groupe de
+# processus qu Apollo tue a la deconnexion, faute de quoi une deconnexion
+# emporterait le jeu en cours.
+_sess = (PROVISION / "assets" / "steam-session.ps1").read_text(encoding="utf-8")
+_sess_code = [ln for ln in _sess.splitlines()
+              if ln.strip() and not ln.lstrip().startswith(("#", "<#", "»"))]
+check("steam-session.ps1 ne demarre pas Steam lui-meme",
+      any("Start-Process" in ln for ln in _sess_code), False)
+check("steam-session.ps1 rend la main quand Steam a disparu pour de bon",
+      "RestartGraceSeconds" in _sess, True)
 # Au premier lancement Steam telecharge sa mise a jour avant d ouvrir une
-# fenetre ; trente secondes n y suffisent pas et le client voit un bureau vide.
-_max = (PROVISION / "assets" / "maximize-steam.ps1").read_text(encoding="utf-8")
-check("maximize-steam.ps1 laisse a Steam le temps de sa premiere mise a jour",
-      "AddSeconds(180)" in _max, True)
+# fenetre ; trente secondes n y suffisent pas et la session se fermerait pendant
+# que Steam demarre encore.
+check("steam-session.ps1 laisse a Steam le temps de sa premiere mise a jour",
+      "AppearDeadlineSeconds = 300" in _sess, True)
+# La maximisation vivait dans un prep-cmd, qu Apollo attend AVANT de lancer
+# l application, et sa boucle ne sortait jamais avant son delai : 182 secondes
+# de retard mesurees a chaque session le 2026-08-26. Elle doit sortir des que la
+# fenetre est trouvee.
+check("la boucle de maximisation sort des qu elle a trouve la fenetre",
+      "break" in _sess, True)
+check("maximize-steam.ps1 ne subsiste pas en doublon",
+      (PROVISION / "assets" / "maximize-steam.ps1").exists(), False)
+
+# steam-launch.ps1 est l entree « detached » : elle demarre Steam, mais SEULEMENT
+# une fois qu Apollo a pose un affichage. Hors session la RTX 4070 ne pilote
+# aucun ecran — mesure du 2026-08-26, le bureau vit sur la VGA emulee en
+# 1280x800 a 1 Hz — et le Chromium de Steam, qui choisit son moteur de rendu une
+# seule fois au demarrage, retomberait sur le rasteriseur logiciel SwiftShader.
+_launch = (PROVISION / "assets" / "steam-launch.ps1").read_text(encoding="utf-8")
+check("steam-launch.ps1 attend un affichage avant de demarrer Steam",
+      "WmiMonitorBasicDisplayParams" in _launch, True)
+check("steam-launch.ps1 demarre bien Steam",
+      "Start-Process" in _launch, True)
+# L attente doit rester BORNEE : un prep-cmd qui ne sortait jamais avant son
+# delai retardait chaque session de 182 s. Un Steam en rendu logiciel vaut mieux
+# qu un ecran vide, donc on lance quand meme passe le delai.
+check("l attente est bornee", "WaitSeconds = 45" in _launch, True)
 
 # Les lecteurs optiques s emparent des premieres lettres libres et se posent
 # exactement la ou les partages doivent aller : mesure le 2026-08-26, les deux

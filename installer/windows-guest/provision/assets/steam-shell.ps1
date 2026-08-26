@@ -1,30 +1,42 @@
 <#
-    Windows shell for the appliance session: Steam, and nothing else.
+    Le shell Windows de la session de l appliance : le fond d ecran, et rien
+    d autre.
 
-    Replacing explorer.exe removes the taskbar, the wallpaper and the desktop
-    icons outright, rather than hiding them - this machine has no physical
-    screen and no use for a Windows desktop, so the shell that draws one is
-    pure surface.
+    Remplacer explorer.exe supprime la barre des taches, le fond d ecran et les
+    icones du bureau au lieu de les cacher — cette machine n a pas d ecran
+    physique et aucun usage d un bureau Windows.
 
-    The loop is the whole point. Without a shell process alive the session
-    shows a black screen and a streaming client sees nothing, so Steam closing
-    for any reason - an update restart, a crash, the owner quitting it - must
-    not be able to strand the appliance.
+    CE SHELL NE LANCE PLUS STEAM, et c est la correction du 2026-08-26. Il le
+    faisait, en boucle, et cela cassait deux choses a la fois :
+
+    1. L interface de Steam est du Chromium (CEF), et CEF choisit son moteur de
+       rendu UNE FOIS, au demarrage, parmi les adaptateurs qui portent un ecran.
+       Ce script s execute a l ouverture de session — donc avant qu un client
+       soit connecte, donc avant que SudoVDA ait cree l ecran virtuel. Le Steam
+       lance ici ne trouvait aucun ecran sur la RTX 4070 et retombait sur
+       SwiftShader, un rasteriseur LOGICIEL, pour toute la duree du processus
+       (D:\Steam\logs\webhelper_gpu.txt : gpu_compositing = disabled_software).
+       La petite fenetre du bureau y survivait, Big Picture non.
+    2. La boucle relançait Steam dans les trois secondes, donc quitter Steam ne
+       fermait pas la session Moonlight : elle rouvrait Steam.
+
+    Steam est desormais lance par Apollo (entree « detached » de apps.json), une
+    fois l ecran virtuel present, et surveille par steam-session.ps1 dont la
+    sortie ferme la session. Ce script garde le seul role qui reste : etre un
+    shell vivant. Sans shell, Winlogon considere la session comme perdue, et
+    l ecran noir se voit vraiment sur une machine sans moniteur.
 #>
 $ErrorActionPreference = 'Continue'
-$SteamExe = 'D:\Steam\steam.exe'
 $Wallpaper = 'C:\nivuus\wallpaper.png'
 
 # Le fond est dessine PAR CE SCRIPT, pas par Windows. Sans explorer.exe il n y a
 # pas de bureau, donc pas de papier peint : une image posee dans le registre ne
-# s afficherait nulle part. Or l ecran noir se voit vraiment — entre l ouverture
-# de session et l apparition de Steam, jusqu a trois minutes au tout premier
-# lancement, le temps qu il telecharge sa mise a jour.
+# s afficherait nulle part.
 #
 # La fenetre reste DERRIERE tout le reste (pas de TopMost) : elle habille le
 # vide, elle ne doit jamais passer devant un jeu. Et tout l habillage est dans un
-# try : un fond qui echoue ne doit pas empecher la console de demarrer, ce qui
-# serait echanger un ecran noir contre un ecran noir sans Steam.
+# try : un fond qui echoue ne doit pas empecher le shell de vivre, ce qui serait
+# echanger un ecran noir contre une session sans shell.
 try {
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing
     if (Test-Path $Wallpaper) {
@@ -45,16 +57,7 @@ catch {
     Write-Warning "wallpaper not shown: $_"
 }
 
-# Steam routinely exits its launcher process and continues in a child, so
-# -Wait on the process we spawn would report "closed" while Steam is very much
-# running and would spawn a second instance. Ask the process table instead: no
-# steam process at all is the only honest definition of "closed".
 while ($true) {
-    if (-not (Get-Process -Name 'steam' -ErrorAction SilentlyContinue)) {
-        if (Test-Path $SteamExe) {
-            Start-Process -FilePath $SteamExe
-        }
-    }
     # DoEvents garde la fenetre de fond vivante : une form jamais pompee cesse
     # de se redessiner et Windows la marque « ne repond pas ».
     try { [System.Windows.Forms.Application]::DoEvents() } catch { }

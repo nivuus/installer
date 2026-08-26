@@ -41,8 +41,15 @@ if (Test-Path $login) { Write-Host 'existing Steam session preserved' }
 # AutoRestartShell is Winlogon's own safety net (it relaunches the shell when
 # it exits); it defaults to 1 but is set explicitly here, because a session
 # with no live shell shows a streaming client a black screen and there is no
-# monitor to notice it on. The launcher loops on top of that, since Steam
-# closing is not the shell closing.
+# monitor to notice it on.
+#
+# Le shell ne lance PAS Steam, et cette separation est deliberee (2026-08-26).
+# Il s'execute a l'ouverture de session, avant qu'un client soit connecte et
+# donc avant que SudoVDA ait cree l'ecran virtuel ; le Chromium de Steam, qui
+# choisit son moteur de rendu une seule fois au demarrage, retombait alors sur
+# le rasteriseur LOGICIEL SwiftShader pour toute la duree du processus. Steam
+# est lance par Apollo, apres l'ecran virtuel, et surveille par
+# steam-session.ps1 dont la sortie ferme la session Moonlight.
 #
 # The agent is unaffected: 40-agent.ps1 runs it from an AtLogOn scheduled task,
 # which is independent of the shell.

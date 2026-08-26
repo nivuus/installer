@@ -76,14 +76,39 @@ desktop = next(a for a in apps["apps"] if a["name"] == "Desktop")
 # 🔴 It is the app's virtual-display flag - NOT isolated_virtual_display_option
 # - that makes the SudoVDA display appear (trap paid on 2026-07-23).
 check("Desktop asks for a virtual display", desktop.get("virtual-display"), True)
-# Desktop relance Steam MEME s il est le shell de la session : le shell kiosque
-# ne prend effet qu a l ouverture de session suivante, et le provisionnement se
-# termine sans redemarrer. Entre les deux, rien ne lance Steam et un client voit
-# un bureau vide. Steam gere la double invocation en remontant la fenetre de
-# l instance existante, donc le filet est gratuit.
-check("Desktop lance Steam depuis D:", desktop.get("detached"), ["D:\\Steam\\steam.exe"])
+# Steam est lance par « detached », JAMAIS par la commande suivie : Apollo tue le
+# groupe de processus de la commande suivie a la deconnexion du client, et un
+# jeu lance depuis Steam serait dans ce groupe. Detache, Steam survit a la
+# deconnexion et la partie continue jusqu a l hibernation sur inactivite.
+#
+# Et le lancement passe par steam-launch.ps1, qui ATTEND qu Apollo ait pose un
+# affichage : hors session la RTX 4070 ne pilote aucun ecran (mesure du
+# 2026-08-26 : le bureau vit sur la VGA emulee en 1280x800 a 1 Hz), et le
+# Chromium de Steam, qui choisit son moteur de rendu une seule fois au
+# demarrage, retomberait sur le rasteriseur logiciel SwiftShader.
+for _app in apps["apps"]:
+    check(f"{_app['name']} lance Steam par le lanceur temporise",
+          all("steam-launch.ps1" in d for d in _app.get("detached", []))
+          and len(_app.get("detached", [])) == 1, True)
 bp = next(a for a in apps["apps"] if a["name"] == "Steam Big Picture")
 check("Big Picture asks for a virtual display", bp.get("virtual-display"), True)
+
+# Chaque application porte une commande SUIVIE : Apollo termine la session quand
+# elle rend la main, donc quitter Steam ferme le flux Moonlight. Sans elle — le
+# cas jusqu au 2026-08-26, ou les applications ne declaraient que « detached » —
+# Apollo n avait aucun processus a surveiller et la session survivait a Steam.
+for _app in apps["apps"]:
+    check(f"{_app['name']} declare une commande suivie",
+          "steam-session.ps1" in _app.get("cmd", ""), True)
+check("le mode est passe a la commande suivie",
+      [a["cmd"].split("-Mode ")[-1] for a in apps["apps"]],
+      ["Desktop", "BigPicture"])
+# AUCUN prep-cmd : Apollo attend la fin d un prep-cmd AVANT de lancer
+# l application. La maximisation vivait la et ne sortait jamais avant son delai,
+# soit 182 s de retard a chaque session (journal Apollo, 2026-08-26 :
+# 21:16:04 « Executing Do Cmd » -> 21:19:06 « Spawning steam.exe »).
+check("aucune application ne bloque le demarrage avec un prep-cmd",
+      any("prep-cmd" in a for a in apps["apps"]), False)
 
 secrets = apollo.render_secrets("adminpass", "nivuus", "p4ssw0rd")
 check("secrets file is a PowerShell data file", secrets.lstrip().startswith("@{"), True)

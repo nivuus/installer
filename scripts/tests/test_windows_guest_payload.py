@@ -29,7 +29,8 @@ def make_tree(root: pathlib.Path) -> "payload.PayloadSources":
     (root / "provision" / "99-marker.ps1").write_text("# marker\n")
     (root / "provision" / "assets").mkdir()
     (root / "provision" / "assets" / "run-agent.ps1").write_text("# run-agent\n")
-    (root / "provision" / "assets" / "maximize-steam.ps1").write_text("# maximize\n")
+    (root / "provision" / "assets" / "steam-session.ps1").write_text("# steam-session\n")
+    (root / "provision" / "assets" / "steam-launch.ps1").write_text("# steam-launch\n")
     (root / "provision" / "assets" / "apollo-junction.ps1").write_text("# junction\n")
     (root / "provision" / "assets" / "steam-shell.ps1").write_text("# steam-shell\n")
     (root / "assets").mkdir(exist_ok=True)
@@ -169,7 +170,8 @@ with tempfile.TemporaryDirectory() as tmp:
 # apollo-junction.ps1), and must be declared in verify_staged's required
 # list just like any other stage script - a rename would otherwise fail
 # deep inside the offline guest instead of at build time.
-for asset in ["run-agent.ps1", "maximize-steam.ps1", "apollo-junction.ps1"]:
+for asset in ["run-agent.ps1", "steam-session.ps1", "steam-launch.ps1",
+              "apollo-junction.ps1"]:
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
         sources = make_tree(root / "src")
@@ -289,7 +291,8 @@ with tempfile.TemporaryDirectory() as tmp:
     (src / "provision" / "99-marker.ps1").write_text("x")
     (src / "provision" / "assets").mkdir()
     (src / "provision" / "assets" / "run-agent.ps1").write_text("x")
-    (src / "provision" / "assets" / "maximize-steam.ps1").write_text("x")
+    (src / "provision" / "assets" / "steam-session.ps1").write_text("x")
+    (src / "provision" / "assets" / "steam-launch.ps1").write_text("x")
     (src / "provision" / "assets" / "apollo-junction.ps1").write_text("x")
     (src / "provision" / "assets" / "steam-shell.ps1").write_text("x")
     (src / "assets").mkdir(exist_ok=True)

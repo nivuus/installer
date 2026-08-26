@@ -137,8 +137,11 @@ $conf += "adapter_name = $gpuName"
 Set-Content -Path $confPath -Value $conf
 Write-Host "capture adapter pinned to $gpuName"
 New-Item -ItemType Directory -Force -Path 'C:\nivuus\apollo' | Out-Null
-Copy-Item -Path (Join-Path $PayloadRoot 'provision\assets\maximize-steam.ps1') `
-          -Destination 'C:\nivuus\apollo\maximize-steam.ps1' -Force
+# Les deux moities de chaque application d'apps.json ; elles remplacent le
+# prep-cmd maximize-steam.ps1. Le pourquoi est dans leurs propres en-tetes.
+'steam-session.ps1', 'steam-launch.ps1' | ForEach-Object {
+    Copy-Item (Join-Path $PayloadRoot "provision\assets\$_") "C:\nivuus\apollo\$_" -Force }
+Remove-Item 'C:\nivuus\apollo\maximize-steam.ps1' -Force -EA SilentlyContinue
 
 # --- Web-manager credentials: seeded only once, so a rebuild keeps whatever
 # the owner set. The presence check is our own marker, not an Apollo-internal

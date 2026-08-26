@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MARKER_NAME = "PAYLOAD.id"
-PROVISION_VERSION = "B1"
+PROVISION_VERSION = "B2"
 TARGET_BUILD = "26100"
 
 
@@ -143,7 +143,8 @@ def verify_staged(dest_root: Path) -> None:
         "provision/00-bootstrap.ps1",
         "provision/99-marker.ps1",
         "provision/assets/run-agent.ps1",
-        "provision/assets/maximize-steam.ps1",
+        "provision/assets/steam-session.ps1",
+        "provision/assets/steam-launch.ps1",
         "provision/assets/apollo-junction.ps1",
         "provision/assets/steam-shell.ps1",
         "assets/wallpaper.png",
