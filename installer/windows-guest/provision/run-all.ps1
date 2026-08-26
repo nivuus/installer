@@ -18,6 +18,7 @@ Start-Transcript -Path 'C:\nivuus\provision.log' -Append | Out-Null
 try {
     $stages = @('00-bootstrap.ps1', '10-nvidia.ps1', '15-virtio.ps1',
                 '20-disk.ps1', '25-apollo.ps1', '30-steam.ps1',
+                '35-shares.ps1',
                 '40-agent.ps1', '50-power.ps1', '55-updates.ps1',
                 '99-marker.ps1')
     foreach ($stage in $stages) {

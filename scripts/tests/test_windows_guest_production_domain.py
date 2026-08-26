@@ -139,7 +139,11 @@ check("shared access", root.find("memoryBacking/access").get("mode"), "shared")
 check("emulated video present", root.find("devices/video/model").get("type"), "vga")
 check("vnc listens locally", root.find("devices/graphics").get("listen"), "127.0.0.1")
 
-check("virtiofs target", root.find("devices/filesystem/target").get("dir"), "Data")
+# Le partage unique « Data » exposait /media/data EN ENTIER : quatre partages
+# cibles l ont remplace le 2026-08-26.
+check("les tags de partage",
+      [t.get("dir") for t in root.findall("devices/filesystem/target")],
+      ["Downloads", "Games", "Console", "ConsoleSave"])
 
 # Everything the spec forbids must be absent, checked individually so a
 # failure names the offender.
@@ -200,6 +204,18 @@ for tune in root.findall("cputune"):
                     pinned.add(int(part))
 
 check("hook sees every pinned CPU", pinned, set(range(16)))
+
+# Quatre partages CIBLES, jamais la racine : virtiofsd tourne en root et le mode
+# passthrough ne porte aucun filet de permissions, donc ce qui est expose l est
+# sans filtre. Exposer /media/data en entier mettait 17 To a portee d un incident
+# dans un invite ouvert au streaming.
+import re as _re
+_srcs = _re.findall(r"<source dir='([^']+)'/>", xml_text)
+check("quatre partages", len(_srcs), 4)
+check("aucun partage n expose une racine",
+      any(s in ("/media/data", "/media/backup") for s in _srcs), False)
+check("tous les partages sont des sous-dossiers",
+      all(s.count("/") >= 3 for s in _srcs), True)
 
 if failures:
     print(f"FAIL ({len(failures)})")

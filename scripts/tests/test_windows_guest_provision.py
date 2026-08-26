@@ -15,7 +15,8 @@ PROVISION = GUEST / "provision"
 PROBE = GUEST / "probe"
 
 STAGES = ["00-bootstrap.ps1", "10-nvidia.ps1", "15-virtio.ps1", "20-disk.ps1",
-          "25-apollo.ps1", "30-steam.ps1", "40-agent.ps1", "50-power.ps1",
+          "25-apollo.ps1", "30-steam.ps1", "35-shares.ps1",
+          "40-agent.ps1", "50-power.ps1",
           "55-updates.ps1", "99-marker.ps1"]
 
 failures = []
@@ -330,6 +331,17 @@ check("30-steam.ps1 relit les valeurs posees", "did not take" in _steam, True)
 _max = (PROVISION / "assets" / "maximize-steam.ps1").read_text(encoding="utf-8")
 check("maximize-steam.ps1 laisse a Steam le temps de sa premiere mise a jour",
       "AddSeconds(180)" in _max, True)
+
+# Les lecteurs optiques s emparent des premieres lettres libres et se posent
+# exactement la ou les partages doivent aller : mesure le 2026-08-26, les deux
+# media d installation tenaient E: et F:. L etage doit les deplacer AVANT.
+_sh = (PROVISION / "35-shares.ps1").read_text(encoding="utf-8")
+check("35-shares.ps1 degage les lettres prises par les lecteurs optiques",
+      "CD-ROM" in _sh and "mountvol" in _sh, True)
+check("35-shares.ps1 cree un service par partage (VirtioFsSvc n en monte qu un)",
+      "sc.exe create" in _sh, True)
+check("35-shares.ps1 relit le montage au lieu de croire le demarrage du service",
+      "Test-Path" in _sh and "not mounted" in _sh, True)
 
 if failures:
     print(f"FAIL ({len(failures)})")

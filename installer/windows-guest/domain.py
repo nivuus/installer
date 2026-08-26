@@ -29,8 +29,27 @@ DOMAIN_NAME = "Windows"
 MAC = "52:54:00:48:e0:3e"
 BRIDGE = "internalBridge"
 NVRAM_PATH = "/var/lib/libvirt/qemu/nvram/Windows_VARS.fd"
-VIRTIOFS_SOURCE = "/media/data"
-VIRTIOFS_TAG = "Data"
+# Quatre partages CIBLES, jamais la racine. La production exposait
+# /media/data en entier en lecture/ecriture : un incident dans un invite ouvert
+# au streaming atteignait 17 To - Movies, TV Shows, Projects, Seed compris - et
+# virtiofsd tourne en root, donc sans le moindre filet de permissions. Restreindre
+# a des sous-dossiers supprime cette surface sans rien retirer d utile.
+#
+# « Console » est le vocabulaire de cette machine : il decrit ce qu elle est pour
+# celui qui l utilise, pas ce qui tourne dedans. Il reste juste si l invite change
+# d OS, et ne se confond pas avec l hote, qui s appelle Nivuus.
+#
+# Les lettres commencent a E: - C: est le systeme jetable, D: la partition de jeux.
+SHARES = (
+    {"source": "/media/data/Downloads", "tag": "Downloads",
+     "letter": "E", "label": "Telechargements"},
+    {"source": "/media/data/Games", "tag": "Games",
+     "letter": "F", "label": "Jeux"},
+    {"source": "/media/data/Console", "tag": "Console",
+     "letter": "G", "label": "Console"},
+    {"source": "/media/backup/Console", "tag": "ConsoleSave",
+     "letter": "H", "label": "Sauvegardes Console"},
+)
 # NOT detected: hardcoded to 16 GiB (16777216 KiB), matching the static
 # `vm.nr_hugepages = 8448` pool in /etc/sysctl.d/50-virsh.conf on this host.
 # Hugepage sizing is deferred -- see the spec's detection table.
@@ -88,8 +107,7 @@ def domain_xml(*, gpu_functions: list[dict], nvme: dict, plan: dict,
                memory_kib: int = MEMORY_KIB, name: str = DOMAIN_NAME,
                mac: str = MAC, bridge: str = BRIDGE,
                nvram_path: str = NVRAM_PATH,
-               virtiofs_source: str = VIRTIOFS_SOURCE,
-               virtiofs_tag: str = VIRTIOFS_TAG) -> str:
+               shares: tuple = SHARES) -> str:
     """Render the production domain XML."""
     if len(gpu_functions) < 1:
         raise DomainError("no GPU function to pass through")
@@ -101,7 +119,7 @@ def domain_xml(*, gpu_functions: list[dict], nvme: dict, plan: dict,
     return env.get_template("domain.xml.j2").render(
         name=name, memory_kib=memory_kib, plan=plan, mac=mac, bridge=bridge,
         nvram_path=nvram_path, gpu_functions=gpu_functions, nvme=nvme,
-        virtiofs_source=virtiofs_source, virtiofs_tag=virtiofs_tag,
+        shares=shares,
     )
 
 

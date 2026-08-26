@@ -61,6 +61,14 @@
       <mac address='{{ mac }}'/>
       <model type='{{ nic_model }}'/>
     </interface>
+{%- for s in shares %}
+    <filesystem type='mount' accessmode='passthrough'>
+      <driver type='virtiofs' queue='1024'/>
+      <binary path='/usr/libexec/virtiofsd'/>
+      <source dir='{{ s.source }}'/>
+      <target dir='{{ s.tag }}'/>
+    </filesystem>
+{%- endfor %}
     <tpm model='tpm-crb'>
       <backend type='emulator' version='2.0'/>
     </tpm>

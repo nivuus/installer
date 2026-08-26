@@ -74,12 +74,14 @@
     <emulator>/usr/bin/qemu-system-x86_64</emulator>
     <controller type='usb' index='0' model='qemu-xhci'/>
     <controller type='sata' index='0'/>
+{%- for s in shares %}
     <filesystem type='mount' accessmode='passthrough'>
       <driver type='virtiofs' queue='1024'/>
       <binary path='/usr/libexec/virtiofsd'/>
-      <source dir='{{ virtiofs_source }}'/>
-      <target dir='{{ virtiofs_tag }}'/>
+      <source dir='{{ s.source }}'/>
+      <target dir='{{ s.tag }}'/>
     </filesystem>
+{%- endfor %}
     <interface type='bridge'>
       <mac address='{{ mac }}'/>
       <source bridge='{{ bridge }}'/>

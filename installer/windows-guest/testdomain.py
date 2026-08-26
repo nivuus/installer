@@ -51,6 +51,14 @@ MAC = "52:54:00:4c:54:53"
 # visible symptoms are a black screen (the NVIDIA driver took the display) and
 # an empty DHCP lease file. Pass --nic-model e1000e for such a medium.
 NIC_MODEL = "virtio"
+# Les memes partages que la production (domain.py SHARES), pour que le banc
+# exerce 35-shares.ps1 au lieu de le decouvrir a la bascule.
+SHARES = (
+    {"source": "/media/data/Downloads", "tag": "Downloads"},
+    {"source": "/media/data/Games", "tag": "Games"},
+    {"source": "/media/data/Console", "tag": "Console"},
+    {"source": "/media/backup/Console", "tag": "ConsoleSave"},
+)
 WINRM_PORT = 5985
 
 
@@ -87,7 +95,8 @@ def domain_xml(*, disk_path: str = DISK_PATH, windows_iso: str,
                nvram_path: str = NVRAM_PATH, bridge: str = BRIDGE,
                mac: str = MAC, memory_gib: int = 16, vcpus: int = 8,
                nic_model: str = NIC_MODEL,
-               uuid: str | None = None) -> str:
+               uuid: str | None = None,
+               shares: tuple = SHARES) -> str:
     env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)),
                       autoescape=select_autoescape(enabled_extensions=("j2",),
                                                    default=True),
@@ -96,7 +105,7 @@ def domain_xml(*, disk_path: str = DISK_PATH, windows_iso: str,
         name=name, disk_path=disk_path, windows_iso=windows_iso,
         unattend_iso=unattend_iso, nvram_path=nvram_path, bridge=bridge,
         mac=mac, memory_gib=memory_gib, vcpus=vcpus, nic_model=nic_model,
-        uuid=uuid,
+        uuid=uuid, shares=shares,
     )
 
 
@@ -195,9 +204,32 @@ def teardown(domain: str = DOMAIN_NAME, disk_path: str = DISK_PATH) -> None:
     Path(disk_path).unlink(missing_ok=True)
 
 
+def eject_media(domain: str = DOMAIN_NAME) -> list[str]:
+    """Detach both optical media once provisioning is done.
+
+    This is not tidying. The answer ISO carries the product key, the
+    administrator password and the Apollo web password IN CLEARTEXT - that is
+    the whole reason build.py writes it mode 0600 - and while it stays attached
+    anything running in the guest can read them straight off the drive.
+    Measured on 2026-08-26: `findstr Key F:\autounattend.xml` from inside the
+    guest returns the product key.
+
+    The Windows medium goes too: it has served its purpose, and leaving a
+    bootable installer attached to an appliance is one stray boot order away
+    from reinstalling it.
+    """
+    ejected = []
+    for target in ("sdb", "sdc"):
+        for scope in ("--live", "--config"):
+            _virsh("change-media", domain, target, "--eject", scope)
+        ejected.append(target)
+    return ejected
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Throwaway LTSC test domain")
-    ap.add_argument("action", choices=["xml", "define", "wait-ready", "teardown"])
+    ap.add_argument("action",
+                    choices=["xml", "define", "wait-ready", "eject-media", "teardown"])
     ap.add_argument("--windows-iso", default="/media/backup/en-us_windows_11_iot_enterprise_ltsc_2024_x64_dvd_f6b14814.iso")
     ap.add_argument("--unattend-iso", default="/media/data/iso/nivuus-unattend.iso")
     ap.add_argument("--disk-size", type=int, default=120)
@@ -225,6 +257,12 @@ def main(argv=None) -> int:
         ip = wait_ready()
         print(f"guest ready at {ip}", file=sys.stderr)
         print(ip)
+        return 0
+    if args.action == "eject-media":
+        for t in eject_media():
+            print(f"ejected {t}")
+        print("the answer ISO carried three cleartext secrets; the guest can no "
+              "longer read them")
         return 0
     teardown()
     print(f"{DOMAIN_NAME} removed")
