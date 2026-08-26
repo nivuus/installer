@@ -22,6 +22,34 @@ dd_hdr_option = auto
 # Apollo restores the display layout this long after a client disconnects.
 dd_config_revert_delay = 3000
 
+# Un ecran, en permanence, sur la carte que la capture vise.
+#
+# Cette machine n'a aucun ecran physique, et l'ecran virtuel de SudoVDA
+# n'existait que pendant une session. Au repos, la RTX 4070 ne pilotait donc
+# rien du tout (mesure du 2026-08-26 : VideoModeDescription vide sur la 4070,
+# le bureau vivant sur la VGA emulee en 1280x800 a 1 Hz). Or adapter_name
+# epingle la capture sur la 4070 : la sonde d'encodeurs du demarrage ne trouvait
+# aucun peripherique de sortie, echouait sur les quatre encodeurs — y compris
+# le LOGICIEL, ce qui prouve que le GPU n'y etait pour rien — et Apollo
+# affichait « Fatal: Unable to find display or encoder during startup » dans son
+# interface, en recommandant de ne pas streamer. L'alarme etait fausse : les
+# encodeurs sont re-enumeres des qu'un ecran parait, et NVENC etait bien
+# utilise. Mais une alarme fausse marquee « Fatal » apprend a ignorer les vraies.
+#
+# headless_mode fait tenir un ecran virtuel en permanence. Effet de bord
+# heureux : un Steam demarre a n'importe quel moment trouve desormais un ecran
+# porte par la 4070, ce qui met une seconde barriere devant le repli SwiftShader
+# que corrigent steam-launch.ps1 et le shell de session.
+#
+# RESIDUEL ASSUME : au demarrage A FROID, Apollo sonde avant que son propre
+# ecran headless soit pret et perd la course de 1,6 seconde — abandon a
+# 22:22:46,2 le 2026-08-26, ecran disponible a 22:22:47,8. Le message
+# reapparait donc apres un redemarrage de l'invite, et disparait au redemarrage
+# suivant du service. Le seul remede serait de retarder le service, ce qui
+# echangerait une banniere cosmetique contre vingt secondes d'indisponibilite
+# au moment precis ou un client attend.
+headless_mode = true
+
 min_log_level = info
 
 # Le nom que les clients Moonlight affichent. Sans lui, Apollo annonce le nom

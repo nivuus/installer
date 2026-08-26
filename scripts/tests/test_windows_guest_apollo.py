@@ -62,6 +62,14 @@ check("HDR follows the client", conf_map.get("dd_hdr_option"), "auto")
 # The dummy plug is gone: pinning an output name would pin a display that no
 # longer exists.
 check("no output is pinned", "output_name" in conf_map, False)
+# Sans ecran permanent, la sonde d encodeurs du demarrage ne trouve aucun
+# peripherique de sortie sur la carte epinglee par adapter_name : les quatre
+# encodeurs echouent — le logiciel compris, ce qui prouve que le GPU n y est
+# pour rien — et Apollo affiche « Fatal: Unable to find display or encoder
+# during startup » en recommandant de ne pas streamer. Fausse alarme, mais une
+# fausse alarme marquee « Fatal » apprend a ignorer les vraies.
+check("un ecran virtuel est tenu en permanence",
+      conf_map.get("headless_mode"), "true")
 check("credentials are not in sunshine.conf",
       any("p4ssw0rd" in v for v in conf_map.values()), False)
 
