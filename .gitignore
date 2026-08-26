@@ -24,11 +24,6 @@ installer/iso-build/local/
 installer/iso-build/config/includes.chroot/opt/nivuus-installer/
 installer/iso-build/config/includes.chroot/opt/nivuus-src/
 
-# ── Node / TypeScript ──────────────────────────────────────────────────────
-node_modules/
-dist/
-*.deb
-
 # ── Python ─────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc

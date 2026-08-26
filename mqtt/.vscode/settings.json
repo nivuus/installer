@@ -1,7 +1,0 @@
-{
-    "terminal.integrated.cursorBlinking": false,
-    "terminal.integrated.enableImages": true,
-    "terminal.integrated.fontLigatures.enabled": true,
-    "terminal.integrated.smoothScrolling": true,
-    "python.terminal.shellIntegration.enabled": true,
-}

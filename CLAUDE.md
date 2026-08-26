@@ -15,67 +15,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Nivuus** is a cloud gaming server infrastructure with comprehensive system monitoring integration. The project consists of:
 
-1. **MQTT System Agent** (`mqtt/`): TypeScript-based monitoring agent that publishes system metrics to Home Assistant via MQTT
-2. **Infrastructure Configuration**: Scripts and configs for thermal optimization, VM management, networking, and firewall
-3. **Home Assistant Integration**: Full domotics control of the gaming server
-4. **Installer** (`installer/`): Bootable ISO that installs Nivuus via a web wizard served over a WiFi setup hotspot
-5. **Docker Marketplace** (`marketplace/`): HA custom integration (`docker_marketplace`) + YAML app catalog (`marketplace/catalog/apps/`) that deploys self-hostable apps via compose
-6. **Home Agent** (`home_agent/`): autonomous AI agent as an HA custom integration (Gemini + ChromaDB RAG)
+1. **Installer** (`installer/`): Bootable ISO that installs Nivuus via a web wizard served over a WiFi setup hotspot, plus `windows-guest/` (unattended Windows LTSC guest build for GPU passthrough)
+2. **Infrastructure Configuration** (`scripts/`, `configs/`): thermal/RAPL policy, VM CPU partitioning, GPU passthrough hooks, PCIe guard, disk maintenance, VM wake-on-demand
+3. **Host documentation** (`docs/`): system audit, VM configuration, thermal campaign, and the superpowers specs/plans
 
-## MQTT System Agent Architecture
+### Sibling repositories (split out of this one on 2026-08-26)
 
-### Core Design Patterns
+The suite lives under the `nivuus` GitHub organisation; the local working tree mirrors it
+as `~/Projects/Nivuus/packages/<name>`.
 
-The MQTT agent uses a **feature-based architecture** with class inheritance:
+| Repository | What it is |
+|---|---|
+| `nivuus/mqtt` | TypeScript agent publishing host metrics to Home Assistant via MQTT Discovery |
+| `nivuus/marketplace` | HA integration `docker_marketplace` + YAML app catalog |
+| `nivuus/desk` | Browser-based remote desktop (Node.js + Rust) |
+| `nivuus/home-stock` | Garde-manger — household stock as an HA integration |
+| `nivuus/shell` | ZSH environment |
+| `nivuus/design` | Brand identity, mockups and design tokens |
+| `nivuus/home-agent` | **archived** — autonomous AI agent (Gemini + ChromaDB) |
+| `nivuus/voice-agent` | **archived** — OpenAI-compatible shim adding HA tool-calling to ollama |
 
-- **BaseFeature** (`mqtt/src/core/BaseFeature.ts`): Abstract base class that all monitoring features inherit from
-- Each feature is self-contained with its own data collection, MQTT publishing, and Home Assistant discovery
-- Features are registered in `mqtt/src/core/Agent.ts` and enabled/disabled via `mqtt/config/agent.yaml`
-
-### Key Components
-
-1. **Configuration System** (`mqtt/src/config.ts`):
-   - Singleton ConfigManager loads `config/agent.yaml`
-   - Provides fallback configuration if loading fails
-   - **IMPORTANT**: Error fallback uses same `device_info.identifiers` and `base_topic` as normal config to maintain Home Assistant entity consistency
-
-2. **MQTT Client** (`mqtt/src/mqtt/MqttClient.ts`):
-   - Wrapper around `mqtt` npm package
-   - Handles connection, reconnection, LWT (Last Will Testament)
-   - All features use this wrapper, not the raw MQTT client
-
-3. **Agent** (`mqtt/src/core/Agent.ts`):
-   - Main orchestrator that initializes MQTT client and all enabled features
-   - Publishes inline Home Assistant discovery for alerts and events
-   - Maps feature names to their classes in `availableFeatures`
-
-4. **Features** (`mqtt/src/features/`):
-   - Each subdirectory represents a category (cpu, memory, disk, network, etc.)
-   - Features must extend BaseFeature and implement abstract methods
-   - Features self-register their Home Assistant entities via MQTT discovery
-
-### MQTT Topic Structure
-
-```
-system_agent/                           # base_topic from config
-├── {device_id}/                        # device_info.identifiers[0]
-│   ├── status                          # Availability topic (online/offline)
-│   ├── {feature_name}/                 # e.g., cpu_temperature
-│   │   ├── {entity_id}/state           # Entity state
-│   │   └── {entity_id}/attributes      # Entity attributes (JSON)
-│   └── alert                           # Alert sensor
-│   └── event                           # Event sensor
-
-homeassistant/                          # HA Discovery prefix
-└── {component}/{device_id}/{unique_id}/config
-```
-
-### Adding a New Feature
-
-1. Create class extending BaseFeature in appropriate `src/features/` subdirectory
-2. Implement required methods: `setupDiscovery()`, `update()`, `setupCommandHandlers()`
-3. Add to `availableFeatures` map in `src/core/Agent.ts`
-4. Add configuration to `config/agent.yaml`
+**Knowledge that moved with the code**: the MQTT agent's architecture, entity-naming rules
+and per-feature notes (`HostapdManager`, `PppoeCredentials`, `FirewallManager`) now live in
+`nivuus/mqtt`'s own CLAUDE.md, which carries a *Host Context* section repeating the minimum
+host facts its code depends on. Everything about the host itself stayed here.
 
 ## Installer Architecture (`installer/`)
 
@@ -121,28 +84,26 @@ debootstrap path uses standard tooling.
 
 ## Development Commands
 
-**Location**: All commands run from `mqtt/` directory
-
 ```bash
-# Build TypeScript to JavaScript
-npm run build
+# ── Installer ISO ──────────────────────────────────────────────────────────
+cd installer && sudo make build-iso     # full live-build ISO (needs live-build)
+make test-portal                        # wizard on :8080, no install
+make test-vm                            # QEMU UEFI boot; portal via Ethernet fallback
+                                        # (WiFi AP is not emulable in QEMU)
 
-# Start the agent (requires build first)
-npm start
+# install engine, staged — stops before the destructive steps
+sudo python3 installer/install-engine/run.py --stop-after partition
 
-# Run tests
-npm test
+# ── Windows guest ──────────────────────────────────────────────────────────
+python3 installer/windows-guest/build.py    # unattended LTSC ISO
+python3 installer/windows-guest/domain.py   # define + start the libvirt domain
 
-# Package as executable (Linux x64)
-npm run package:executable
-
-# Package as Debian package
-npm run package:deb
-
-# Development utilities
-./list-entities.sh              # List Home Assistant entities
-./clean-entities.sh             # Clean MQTT retained messages
-./clean-restart.sh              # Clean restart with entity cleanup
+# ── Host scripts ───────────────────────────────────────────────────────────
+scripts/tests/test_pcie_wifi_link_guard.sh  # 16 assertions on a fake sysfs tree
+scripts/tests/test_hw_blackbox.sh           # 26 assertions
+scripts/tests/test_vm_wake_gate.py
+scripts/tests/test_handle_vm_start.sh       # 10 assertions on a fake virsh
+scripts/disk-maintenance.sh --dry-run       # ALWAYS this first when / fills up
 ```
 
 **IMPORTANT**: The project is in development mode - do NOT install packages unless explicitly required.
@@ -246,46 +207,6 @@ ha dashboard delete <url_path> [-y]    # Delete (-y skips confirmation)
 - Blueprints default to `automation` domain; pass `script` as second arg for script blueprints
 - `blueprint import` fetches + auto-saves via `blueprint/save` WebSocket call
 
-## Deployment Workflow
-
-**When a feature is complete**, follow this workflow to deploy:
-
-```bash
-cd mqtt/
-
-# 1. Build the Debian package
-npm run package:deb
-
-# 2. Install the package
-sudo dpkg -i mqtt-system-agent_1.0.0_amd64.deb
-
-# 3. Restart the service to apply changes
-sudo systemctl restart mqtt-system-agent.service
-
-# 4. Check service status and logs
-sudo systemctl status mqtt-system-agent.service
-sudo journalctl -u mqtt-system-agent.service -f
-```
-
-## Configuration
-
-### Main Config File
-
-`mqtt/config/agent.yaml` contains:
-- MQTT broker connection (host: 192.168.0.1, port: 1883)
-- Device info (identifiers, name, model) - **must match error fallback in config.ts**
-- Feature enable/disable flags and update intervals
-
-### MQTT Connection for Testing
-
-```bash
-# Subscribe to all Home Assistant discovery messages
-mosquitto_sub -h 192.168.0.1 -t "homeassistant/#" -v -u mqtt -P CHANGE_ME_MQTT_PASSWORD
-
-# Subscribe to all agent state topics
-mosquitto_sub -h 192.168.0.1 -t "system_agent/#" -v -u mqtt -P CHANGE_ME_MQTT_PASSWORD
-```
-
 ## Code Style Guidelines
 
 From `.github/copilot-instructions.md`:
@@ -298,19 +219,6 @@ From `.github/copilot-instructions.md`:
 - **Workflow**: Build → Start → Check logs → Fix → Repeat
 - **Autonomy**: Be proactive - execute commands without asking for approval
 - **System Adaptation**: Understand and adapt to the actual machine configuration
-
-## Home Assistant Integration
-
-The agent creates these entities in Home Assistant:
-
-- **Sensors**: CPU temp per core, CPU load, memory usage, disk usage, network stats
-- **Switches/Buttons**: VM control, firewall management, WiFi AP control
-- **Diagnostic**: System updates, SMART disk status, connected devices, PPPoE credentials
-
-All entities are linked to a single device in HA with:
-- Device ID: `nivuus`
-- Name: `Nivuus`
-- Model: `System Agent v1.0`
 
 ## Infrastructure Context
 
@@ -362,7 +270,7 @@ The bookworm→trixie dist-upgrade broke several things; all fixed, documented h
 - **VM vCPU topology fixed to 7 cores × 2 threads** (was 14×1 — Windows didn't know about HT siblings, scheduled two heavy threads on one physical core). Applied via `virsh define`; **takes effect at next VM restart**. Backup: `/media/backup/Windows.xml.pre-topology-*`.
 - **VM auto-hibernate when idle**: `vm-idle-shutdown.timer` (10 min) → `/usr/local/sbin/vm-idle-shutdown.sh`: no Sunshine/RDP conntrack flows AND VM CPU <50% of one core for 3 consecutive checks → **hibernate** via `winvm "shutdown /h /f"` (session/games preserved; WinRM call times out while guest sleeps — exit code is meaningless, the script watches domstate; ACPI-shutdown fallback), then re-arms both wake sockets (also self-heals them whenever VM is off). VM `autostart` was **disabled** (wake-on-demand starts it). NB `virsh` output is localized — scripts must use `LC_ALL=C`.
 - **VM hibernation (S4) enabled 2026-07-17**: `<suspend-to-disk enabled='yes'/>` + **firmware auto-selection removed** (`<os firmware='efi'>` → explicit `<loader>/<nvram>` config) because Debian's OVMF firmware descriptors (`/usr/share/qemu/firmware/*.json`) only declare `acpi-s3`, so libvirt refuses S4 with auto-selection ("Unable to find 'efi' firmware") even though OVMF handles S4 fine. `powercfg /hibernate on` done in guest. Measured: hibernate 5-6 s; resume 5-45 s with session intact and GPU driver re-initialized OK. **Lock screen at resume fixed** via policy reg `HKLM\SOFTWARE\Policies\Microsoft\Power\PowerSettings\0e796bdb-100d-47d6-a2d5-f7d2daa51f51` (AC+DC SettingIndex=0, "require password on wake" off) + `NoLockScreen=1` (Personalization policy) — the powercfg `CONSOLELOCK` alias does not exist on Server 2022. **UX contract: Moonlight open on the host grid = its status polls keep waking the VM** (that's the wanted open-app-wakes-VM feature) — close Moonlight and the VM hibernates 30 min later. **SudoMaker Virtual Display Adapter (SudoVDA) — RE-ENABLED 2026-07-23 to fix ultrawide streaming.** It was disabled 2026-07-17 (ProblemCode 22 = `CM_PROB_DISABLED`, *not* a broken driver) and streaming fell back to the physical HDMI dummy plug. See "Cloud-gaming host = Apollo + SudoVDA" below. Sunshine/Apollo struggles to capture the secure desktop (lock screen) and drops the stream after ~10 s — moot now that resumes land on an unlocked desktop.
-- **MQTT agent syslog feedback flood (major)**: Windows guest polls RAPL MSRs → with `kvm.ignore_msrs=1` the kernel logged each ignored rdmsr (0x601/0x615/0x64b) → EventMonitor amplified ~125 err/min into **~480 MQTT msg/s** (republish loop) → HA recorder at 95% CPU, RSS ballooned to 12 GB in 3 h, DB 9.1 GB. Fixes: `kvm.report_ignored_msrs=0` (runtime + `/etc/modprobe.d/kvm-quiet.conf`), agent+HA restarted. **EventMonitor's ×240 amplification bug is NOT yet fixed in code** (`mqtt/src/features/events/EventMonitor.ts` — likely re-reads journal without cursor). Also: 30 GB stale recorder DB backup at `/opt/nivuus/HomeAssistant/config/home-assistant_v2.db.backup-20251003-*`, and the flooding entity name has a double prefix (`linux_system_agent_linux_system_agent_…` — naming bug).
+- **MQTT agent syslog feedback flood (major)**: Windows guest polls RAPL MSRs → with `kvm.ignore_msrs=1` the kernel logged each ignored rdmsr (0x601/0x615/0x64b) → EventMonitor amplified ~125 err/min into **~480 MQTT msg/s** (republish loop) → HA recorder at 95% CPU, RSS ballooned to 12 GB in 3 h, DB 9.1 GB. Fixes: `kvm.report_ignored_msrs=0` (runtime + `/etc/modprobe.d/kvm-quiet.conf`), agent+HA restarted. **EventMonitor's ×240 amplification bug is NOT yet fixed in code** (`nivuus/mqtt:src/features/events/EventMonitor.ts` — likely re-reads journal without cursor). Also: 30 GB stale recorder DB backup at `/opt/nivuus/HomeAssistant/config/home-assistant_v2.db.backup-20251003-*`, and the flooding entity name has a double prefix (`linux_system_agent_linux_system_agent_…` — naming bug).
 - Windows power plan switched Économie d'énergie → **Performances élevées** (gaming VM).
 
 ### Disk space: audit + permanent bounds (2026-07-27)
@@ -392,11 +300,15 @@ The bookworm→trixie dist-upgrade broke several things; all fixed, documented h
 - **tlog tmpfiles bug: the package is NOT at fault, do not report upstream.** The packaged `/usr/lib/tmpfiles.d/tlog.conf` is correct (`d /run/tlog 0755 _tlog _tlog`, and both the `_tlog` user uid 118 and group gid 129 exist). The failure came from three **local, package-less** artifacts: `/etc/tmpfiles.d/tlog.conf` (which *shadows* the packaged file — same basename, `/etc` wins — and requested mode **0777** with group `tlog`, hence `Failed to resolve group 'tlog': No such process` at boot), `/etc/init.d/create-tlog-dir` (SysV, `chmod 777 /run/tlog`, spamming `systemd-sysv-generator` warnings on every daemon-reload), and the `zz-tlog-fix.conf` workaround. **All three removed 2026-08-05** (backup `/media/backup/tlog-cleanup-20260805/`); `/run/tlog` is now `_tlog:_tlog 0755` and `systemd-tmpfiles --create` is clean. `tlog` was **wired into nothing** — no sshd `ForceCommand`, no PAM (a `grep tlog /etc/pam.d/` match is the false positive `pam_las**tlog**.so`), no unit, no shell in `/etc/passwd` — so `tlog`+`libtlog0` were **purged**, along with the residual `_tlog` user/group and a stray **self-bind-mount of `/run/tlog` onto itself** (another `tlfix` leftover, holding a `state` file; `rmdir` fails with EBUSY until it is `umount`ed). ⚠️ The purge armed a latent SSH landmine — see the `ReadWritePaths` entry below.
 - **Purging a package can arm a `ReadWritePaths` landmine in an unrelated unit — check before removing anything (2026-08-05).** `/etc/systemd/system/sshd.service.d/harden.conf` (hand-made local file, 29 mars 2025, **owned by no package and not generated by `install.sh`/the installer**) carried `ReadWritePaths=/var/run/tlog /var/spool/exim4 /var/run/utmp`. A **missing** `ReadWritePaths` entry is fatal: sshd dies at `Failed to set up mount namespacing: /./run/tlog: No such file or directory` → `226/NAMESPACE`, which is exactly how ssh failed at the 07:45 boot. Purging tlog therefore re-armed the original bug **permanently** — the running sshd only survived because it predated the removal, and the next `restart`/reboot would have killed SSH for good. Two traps compound it: the drop-in lives in **`sshd.service.d/`** while the Debian unit is **`ssh.service`** (systemd applies it via the `Alias=sshd.service`, so it is easy to miss with `ls /etc/systemd/system/ssh.service.d/`), and `systemctl` is unusable from a Claude session, so the effective value must be read over D-Bus: `Properties.Get org.freedesktop.systemd1.Service ReadWritePaths` on the object from `GetUnit string:"ssh.service"`. Fixed by dropping `/var/run/tlog` from the line (the other two paths were verified to exist first). **Rule: before `apt purge`, grep `/etc/systemd/system/*/*.conf` for the paths the package owns; and prefix optional paths with `-` (`-/var/run/tlog`) so a missing dir degrades instead of killing the unit.**
 - **Host-root surface: the socket-proxy is not the weak link — the HA container itself is.** `homeassistant` runs `privileged: true` + `network_mode: host` + `user: "0:0"` + `/dev:/dev`, which is already unrestricted host root by construction; hardening the Docker API changes nothing while that holds. The `docker-socket-proxy` (`tecnativa`, bound `127.0.0.1:2375` only) is in fact reasonably tight: `EXEC=0 BUILD=0 SECRETS=0 CONFIGS=0 SWARM=0 SYSTEM=0 AUTH=0` and `ALLOW_START=0 ALLOW_STOP=0 ALLOW_RESTARTS=0`, though `POST=1 CONTAINERS=1 IMAGES=1` still permits `POST /containers/create` (a privileged container can be *created*, just not started through the proxy). `docker_marketplace` correctly targets `tcp://127.0.0.1:2375`, not the raw socket.
-- **The repo IS the deployed integration**: `docker-compose.yml` bind-mounts `marketplace/custom_components/docker_marketplace` (and `home_agent/`, `marketplace/catalog/`) straight into `/config/custom_components/`. The same-named directory under `/opt/nivuus/HomeAssistant/config/custom_components/` is a **stale June copy shadowed by the mount** — editing it does nothing. Edits to the repo need only an HA restart (module re-import), not a copy step.
+- **The HA integrations are bind-mounted, not copied**: the HA stack's `docker-compose.yml` mounts the integration source straight into `/config/custom_components/`. Those sources now live in `nivuus/marketplace` (and, archived, `nivuus/home-agent`) — update the compose mount paths to `packages/marketplace/...` when reworking the stack. A same-named directory under `/opt/nivuus/HomeAssistant/config/custom_components/` is a stale copy shadowed by the mount; editing it does nothing.
 
-### HA service registration trap — `lambda` silently swallows the coroutine (fixed 2026-08-05)
+### HA service registration trap — moved with `nivuus/marketplace`
 
-`hass.services.async_register(DOMAIN, name, lambda call: async_handler(hass, coordinator, call))` **registers a service that does nothing.** HA classifies the handler in `get_hassjob_callable_job_type()` (`homeassistant/core.py`): it unwraps `functools.partial`, then tests `inspect.iscoroutinefunction` → `is_callback` → else **`HassJobType.Executor`**. A plain lambda is neither, so HA runs it in an executor thread; the coroutine it returns is discarded (`RuntimeWarning: coroutine ... was never awaited`) and the handler body never executes. All six `docker_marketplace` services (`install_app`, `remove_app`, `update_app`, `start_app`, `stop_app`, `restart_app`) were affected. **Fix: `partial(handler, hass, coordinator)`** — explicitly unwrapped by that same function, so the job is typed `Coroutinefunction` and awaited on the event loop. Registration is now table-driven in `_async_register_services()`, with `vol.Schema` per service (they had none, so a call missing `app_id` raised `KeyError` inside the handler instead of being rejected), plus `_async_unregister_services()` called from `async_unload_entry` once `hass.config_entries.async_loaded_entries(DOMAIN)` is empty (services are domain-wide, not per-entry). Verified against the installed HA 2026.7.4.
+The `lambda`-swallows-the-coroutine trap in `hass.services.async_register()` was
+found on `docker_marketplace` and is documented in **`nivuus/marketplace`**'s own
+CLAUDE.md. It is a general Home Assistant lesson, worth reading before registering
+a service from any integration: a plain lambda is typed `HassJobType.Executor`, so
+HA discards the coroutine and the handler never runs. Use `functools.partial`.
 
 ### Cloud-gaming host = Apollo (Sunshine fork) + SudoVDA virtual display (2026-07-23)
 
@@ -478,7 +390,7 @@ Everything above the hardware is eliminated for the 07/08 freeze: no AER, ASPM a
 **Instrumentation deployed 2026-08-16** so the next freeze is not blind:
 - `scripts/hw-blackbox.py` → `/usr/local/sbin/nivuus-hw-blackbox.py`, unit `nivuus-hw-blackbox.service`. Samples every rail, PECI/PCH/NVMe temps, fans, RAPL watts, load and the MCE/THR counters **once per second and `fsync`s each line**, so the last line on disk is the last moment the machine was alive. `/var/log/nivuus-blackbox.csv` (+ 2 rotations, ~20 h each). 26 tests in `scripts/tests/test_hw_blackbox.sh`.
 - **nct6798 rails have no labels**; the canonical nct679x mapping (+12V = `in1`×12, +5V = `in4`×5) yields 11.90 V / 5.00 V here, which corroborates it but does not prove it. So **alerting is mapping-agnostic**: each rail learns its own median + p1/p99 range over an hour (`/var/lib/nivuus/blackbox-baseline.json`) and only excursions *outside that range* count. **The range is not optional** — Vcore legitimately swings 0.62-0.87 V with load, so a symmetric band or raw deviation pegs the metric at ~35 % and buries a real 2 % sag on a fixed rail.
-- MQTT agent feature `hardware_health` (`mqtt/src/features/health/`) surfaces it in HA: `sensor.nivuus_power_psu_12v_rail_sensor`, `..._psu_5v_...`, `..._cpu_vcore_...`, `..._max_rail_drift_...`, `..._cpu_machine_check_errors_...`, `..._cpu_thermal_throttle_events_...`, `..._memory_errors_...` (deliberately `unavailable`, with an attribute saying why — a silent 0 would read as "no memory errors" when the truth is "memory errors cannot be seen"), `..._disk_hardware_errors_...` (11 = 4 NVMe media errors + 4 log entries + 3 SATA CRC).
+- MQTT agent feature `hardware_health` (`nivuus/mqtt:src/features/health/`) surfaces it in HA: `sensor.nivuus_power_psu_12v_rail_sensor`, `..._psu_5v_...`, `..._cpu_vcore_...`, `..._max_rail_drift_...`, `..._cpu_machine_check_errors_...`, `..._cpu_thermal_throttle_events_...`, `..._memory_errors_...` (deliberately `unavailable`, with an attribute saying why — a silent 0 would read as "no memory errors" when the truth is "memory errors cannot be seen"), `..._disk_hardware_errors_...` (11 = 4 NVMe media errors + 4 log entries + 3 SATA CRC).
 - Tdarr throttled 4→2 CPUs per node in `/opt/nivuus/MediaManager/docker-compose.yml` (backup in `/media/backup/`). Load reduction during observation, **not** a fix — Tdarr was transcoding at all four freezes, but it transcodes nearly always, so the correlation is weak.
 - **Crash forensics are perishable**: `/var/log/journal` lost every archived boot (only rsyslog's `kern.log`/`syslog` survived, so use those), and the recorder DB (`purge_keep_days: 5`) only still held the crash windows because the box was down. The 2 h before each freeze are preserved in `/media/backup/crash-forensics-20260816/`.
 
@@ -540,141 +452,13 @@ The WAN is a PPPoE session over VLAN 835. **The physical WAN port is now `enp5s0
 
 **Recovery if internet is down at boot:** `sudo nmcli connection up pppoe-enp6s0.835` (after a ~5 min wait if Orange is in cooldown). Last-resort fallback: `sudo systemctl start pppoe-dsl.service` (disable NM autoconnect first to avoid a fight: `nmcli con modify pppoe-enp6s0.835 connection.autoconnect no`). The bridges/WiFi (localBridge/publicBridge/internalBridge) are NM-managed and rebuild cleanly on a full reboot — a NM *restart* (not reboot) can orphan localBridge's members (hostapd wlp10s0/wlp11s0 + enp14s0), breaking home WiFi; a reboot fixes it.
 
-## File Structure Key Points
-
-```
-mqtt/
-├── src/
-│   ├── core/              # Agent, BaseFeature, types
-│   ├── features/          # All monitoring features (cpu, memory, disk, etc.)
-│   ├── mqtt/              # MQTT client wrapper
-│   ├── utils/             # Utilities (logger, exec, MAC vendor lookup)
-│   ├── homeassistant/     # HA discovery services
-│   ├── cli/               # CLI tools for sending alerts/events
-│   └── config.ts          # Configuration manager (CRITICAL: maintains entity consistency)
-├── config/
-│   └── agent.yaml         # Main configuration file
-├── dist/                  # Compiled JavaScript output
-└── bin/                   # Executable wrapper
-```
-
-## Critical Implementation Notes
-
-1. **Entity Consistency**: The `device_info.identifiers` must remain consistent between normal and error configurations to prevent duplicate Home Assistant entities
-
-2. **Feature Registration**: Features must be added to `availableFeatures` map in `Agent.ts` to be discoverable
-
-3. **Topic Prefixing**: BaseFeature automatically prefixes topics with `{base_topic}/{device_id}/` - don't manually add this prefix in features
-
-4. **Discovery Publishing**: Features publish discovery messages to `homeassistant/{component}/{device_id}/{unique_id}/config` with retain flag
-
-5. **State vs Attributes**: Use separate topics for state (single value) and attributes (JSON object with additional data)
-
-6. **Entity Naming Convention (CRITICAL)**:
-   - **NEVER** include `${this.deviceInfo.name}` or `${baseName}` with device name in entity `name` field
-   - Home Assistant automatically prepends the device name from `device.name` when generating `entity_id`
-   - Adding device name manually creates duplicate prefixes like `sensor.nivuus_nivuus_cpu_temperature`
-   - **Correct format**: `{Category} {Name} {Type}` (e.g., `"CPU Temperature"`, `"Network localBridge Device Count"`)
-   - **Wrong format**: `${this.deviceInfo.name} {Category} {Name}` (creates "Nivuus Nivuus CPU Temperature")
-   - Category prefixes to use: "CPU", "Memory", "Disk", "Network", "VM", "System", "Security", "Motherboard"
-   - Always include descriptive type suffix: "Sensor", "Button", "Switch", etc.
-
-7. **Glances Conflict (RESOLVED)**: There was previously an external Glances process publishing to MQTT that created 162 duplicate entities (sensor.glances_nivuus_*). This process has been stopped and entities removed. The mqtt-system-agent now handles all monitoring.
-
-8. **MQTT Retained Message Cleanup**: When changing entity naming, use `clean_mqtt_retained.py` to clear all old discovery messages before restarting the service to avoid entity duplication in Home Assistant
-
-## Feature-Specific Implementation Details
-
-### WiFi/Hostapd Management (`mqtt/src/features/wifi/HostapdManager.ts`)
-
-**Key Features:**
-- **Per-network configuration**: Each WiFi network (SSID) gets its own set of 6 entities:
-  - Text inputs for SSID name and password (mode: text for visibility)
-  - Select dropdown for security type (WPA2-PSK, WPA3-SAE, WPA2/WPA3-Mixed, Open)
-  - Apply and Delete buttons
-  - Status sensor showing active bands (2.4GHz, 5GHz, or both)
-- **Numeric network IDs**: Uses `network_1`, `network_2`, etc. instead of sanitized SSID names to avoid special character issues
-- **Dual-band merging**: Networks with same SSID in both 2.4GHz and 5GHz configs are merged into single entity set
-- **Config file preservation**: All hostapd parameters (bridge, interface, access_network_type) are preserved when updating networks
-- **Security type mapping**: Complete mapping from HA select options to hostapd config parameters (wpa, wpa_key_mgmt, rsn_pairwise, etc.)
-
-**Critical Implementation Points:**
-- Password inputs use `mode: 'text'` not `mode: 'password'` for editability
-- Entity IDs use numeric counter (1, 2, 3...) to avoid special characters in SSID names
-- Changes are applied atomically: backup → temp file → atomic move → reload hostapd
-- Config paths: `/etc/hostapd/2.4Ghz.conf` and `/etc/hostapd/5Ghz.conf`
-
-### PPPoE Credentials Management (`mqtt/src/features/network/PppoeCredentials.ts`)
-
-**Key Features:**
-- **NetworkManager integration**: Reads and writes credentials directly to `/etc/NetworkManager/system-connections/pppoe-enp6s0.835.nmconnection`
-- **Real credential display**: Username and password are read from nmconnection file and displayed in Home Assistant
-- **Connection restart**: Automatically reloads and restarts PPPoE connection after credential changes
-- **No server field**: Previous "server" input was removed as it's not needed for PPPoE configuration
-
-**Critical Implementation Points:**
-- Password input uses `mode: 'text'` not `mode: 'password'` for editability
-- Credentials are read with sudo due to nmconnection file permissions (600)
-- INI-style parser for `[pppoe]` section: `username=` and `password=` lines
-- After saving: `nmcli connection reload` + `nmcli connection down/up pppoe-enp6s0.835`
-- Backup created before any modification: `{path}.backup`
-
-**Legacy files not used:**
-- `/etc/ppp/chap-secrets` and `/etc/ppp/pap-secrets` - monitored but not modified
-- NetworkManager is the single source of truth for active PPPoE configuration
-
-### Firewall Management (`mqtt/src/features/firewall/FirewallManager.ts`)
-
-**Key Features:**
-- **Per-interface zone selection**: Each network interface (including bridges) gets a dropdown to change its firewall zone
-- **Port forward management**: Full CRUD interface for port forwarding rules with 5 inputs:
-  - Source port, destination IP, destination port, protocol (tcp/udp), zone
-  - Add and Remove buttons execute firewall-cmd commands
-- **Zone detail sensors**: For each active zone, displays:
-  - Port forwards count + detailed list (port→toaddr:toport)
-  - Services count + list
-  - Open ports count + list
-  - Masquerading status (binary sensor ON/OFF)
-- **All interfaces included**: Pattern `relevantInterfacePatterns` OR `iface.includes('Bridge')` captures:
-  - Standard interfaces: enp6s0.835, ppp0, enp15s0, enp14s0
-  - Bridges: localBridge, internalBridge, publicBridge
-
-**Critical Implementation Points:**
-- Interface zone changes are atomic: remove from old zone → add to new zone → reload
-- All changes use `--permanent` flag + `firewall-cmd --reload`
-- Port forward format: `port=X:proto=Y:toport=Z:toaddr=A`
-- Zone details updated every 5 minutes in `update()` cycle
-- Empty string states published for all inputs to avoid "unknown" values
-- Bridge detection: `iface.includes('Bridge')` catches localBridge, internalBridge, publicBridge
-
-**Active Zones (Current Configuration):**
-- **docker**: 5 interfaces, masquerade enabled, 7 port forwards to 192.168.3.2
-- **external**: enp6s0.835 + ppp0, masquerade enabled, target REJECT, exposed services
-- **home**: localBridge, target ACCEPT, 26 services, no masquerade
-- **internal**: enp15s0 + internalBridge + vnet17 + enp14s0, 11 services
-- **public**: publicBridge, masquerade enabled, target REJECT
-
-### Common Patterns Across Features
-
-**Input entity initialization:**
-- Always publish empty string `''` states for text inputs to avoid "unknown" in Home Assistant
-- Publish states AFTER publishing discovery entities
-- Use `mode: 'text'` for password fields when editability is required
-
-**MQTT message handling:**
-- Store pending changes in memory until "Apply" button is pressed
-- Echo back state changes immediately for UI responsiveness
-- Use atomic file operations: backup → temp → move → reload service
-
-**Error handling:**
-- Publish error messages to `{feature_name}/last_action/state` sensor
-- Log errors with logger.error() for debugging
-- Validate inputs before executing system commands
-
 ## Related Documentation
 
 - **Main README**: `/README.md` - Project overview and installation
+- **Installer**: `/installer/README.md` - ISO build, portal, install engine
 - **System Audit**: `/docs/system-audit.md` - Complete infrastructure documentation
 - **Network Config**: `/configs/network/` - NetworkManager and hostapd setup
 - **Firewall Config**: `/configs/firewall/` - firewalld and nftables rules
 - **VM Config**: `/docs/vm-configuration.md` - QEMU/KVM setup with GPU passthrough
+- **Specs & plans**: `/docs/superpowers/` - design documents and implementation plans
+- **MQTT agent**: now `nivuus/mqtt` - its CLAUDE.md holds the agent-side documentation

@@ -135,13 +135,27 @@ installer/
 │   ├── install-engine/ scripted debootstrap install pipeline
 │   ├── ap/             Wi‑Fi hotspot bring-up
 │   ├── iso-build/      live-build config (the ISO recipe)
+│   ├── windows-guest/  unattended Windows LTSC guest for GPU passthrough
 │   └── common/         generic hardware detection + progress protocol
-├── mqtt/             Home Assistant system-monitoring agent (TypeScript)
 ├── configs/          reference network / firewall / VM configs
-├── scripts/          thermal tuning, validation, HA CLI helpers
-├── docs/             deep-dive documentation
+├── scripts/          thermal tuning, VM/GPU hooks, validation, HA CLI helpers
+├── docs/             deep-dive documentation + design specs
 └── install.sh        the post-install tuner (run standalone too)
 ```
+
+### Sibling repositories
+
+The Nivuus suite is split across the [`nivuus`](https://github.com/nivuus) organisation:
+
+| Repository | What it is |
+|---|---|
+| [`installer`](https://github.com/nivuus/installer) | this one — bootable installer + host infrastructure |
+| [`mqtt`](https://github.com/nivuus/mqtt) | Home Assistant system-monitoring agent (TypeScript) |
+| [`marketplace`](https://github.com/nivuus/marketplace) | Docker app marketplace for Home Assistant |
+| [`desk`](https://github.com/nivuus/desk) | browser-based remote desktop |
+| [`home-stock`](https://github.com/nivuus/home-stock) | household stock tracking for Home Assistant |
+| [`shell`](https://github.com/nivuus/shell) | ZSH environment |
+| [`design`](https://github.com/nivuus/design) | brand identity and design tokens |
 
 ---
 
