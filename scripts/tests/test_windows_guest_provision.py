@@ -27,6 +27,21 @@ def check(label, got, want):
         failures.append(f"{label}: got {got!r}, want {want!r}")
 
 
+def code_only(text):
+    """Strip PowerShell comments, block ones included.
+
+    _shell_code (below, pre-existing) only drops lines that START with '#'
+    or '<#', which leaves every interior line of a <# ... #> block comment
+    counted as "code" - a docstring paragraph can therefore satisfy a check
+    meant to verify actual behaviour. This strips the whole <# ... #> span
+    first (DOTALL, non-greedy: this repo never nests block comments), then
+    drops single-line '#' comments the same way.
+    """
+    without_blocks = re.sub(r"<#.*?#>", "", text, flags=re.S)
+    return "\n".join(ln for ln in without_blocks.splitlines()
+                      if ln.strip() and not ln.lstrip().startswith("#"))
+
+
 for name in STAGES + ["run-all.ps1"]:
     check(f"{name} exists", (PROVISION / name).is_file(), True)
 for name in ["AdvancedColor.cs", "advanced-color.ps1"]:
@@ -455,27 +470,102 @@ check("l attente est bornee", "WaitSeconds = 45" in _launch, True)
 # empecher. La reintroduire dans le shell rouvrirait exactement les deux bugs
 # que son en-tete documente (rendu logiciel avant l ecran virtuel, et Steam
 # qui se relance quand on le quitte).
+#
+# Tout ce qui suit lit le code, jamais le docstring (code_only, defini plus
+# haut) : le docstring de ce fichier parle deja de steam.hold, LastWriteTime
+# et 300 en toutes lettres pour expliquer le pourquoi, et un check qui lirait
+# le texte brut resterait vert meme si le comportement decrit disparaissait du
+# code.
+_launch_code = code_only(_launch)
 check("steam-launch.ps1 connait le sentinel steam.hold",
-      "steam.hold" in _launch, True)
+      "steam.hold" in _launch_code, True)
+check("steam-launch.ps1 definit Test-SteamHold plutot que de disperser le controle",
+      "function Test-SteamHold" in _launch_code, True)
+# TOCTOU (revue) : Test-Path puis Get-Item laisse une fenetre ou l hote peut
+# retirer le sentinel entre les deux. Get-Item seul, avec -ErrorAction
+# SilentlyContinue, rend le meme $null que le fichier soit absent ou parti
+# entre-temps - une seule question, jamais un horodatage lu sur du vide.
+check("steam-launch.ps1 lit le sentinel par un Get-Item unique (pas de Test-Path puis Get-Item)",
+      "Get-Item -Path $HoldFile -ErrorAction SilentlyContinue" in _launch_code, True)
+check("steam-launch.ps1 ne teste plus l existence separement avant de lire l horodatage",
+      "Test-Path $HoldFile" in _launch_code, False)
 # L age doit venir de l horodatage du FICHIER, jamais d une variable interne :
 # ce script est un nouveau processus a chaque invocation, sans etat persistant
 # entre deux sessions - une minuterie en memoire repartirait de zero a chaque
 # lancement, ne garantissant jamais l expiration.
 check("steam-launch.ps1 lit l age du sentinel sur son horodatage de fichier",
-      "LastWriteTime" in _launch, True)
+      "LastWriteTime" in _launch_code, True)
 check("steam-launch.ps1 fait expirer le sentinel au bout de cinq minutes",
-      "$HoldMaxAgeSeconds = 300" in _launch, True)
+      "$HoldMaxAgeSeconds = 300" in _launch_code, True)
+
+# La fonction elle-meme, isolee du reste du fichier (entre sa signature et
+# l appel qui la termine) : c est ici, et non a l echelle du fichier entier,
+# qu il faut verifier l assemblage - une lecture a l echelle du fichier
+# laisserait passer un retour $true retire (revue, CRITIQUE 1) ou un -lt
+# invertit en -gt (revue, CRITIQUE 2), les deux rendant la garde decorative
+# tout en laissant chaque "piece" (steam.hold, LastWriteTime, 300) presente.
+_fn_start = _launch_code.find("function Test-SteamHold")
+_fn_end = _launch_code.find('Write-Log "--- lancement demande')
+check("la fonction Test-SteamHold est bien localisee dans le fichier",
+      -1 not in (_fn_start, _fn_end) and _fn_start < _fn_end, True)
+_fn_body = _launch_code[_fn_start:_fn_end]
+# Mutation testee (CRITIQUE 2) : inverser -lt en -gt. Le texte exact
+# "-lt $HoldMaxAgeSeconds" disparait alors du corps de la fonction, et ce
+# check a lui seul le detecte deja.
+check("la retenue exige un age INFERIEUR au maximum, jamais l inverse (-lt, pas -gt)",
+      "-lt $HoldMaxAgeSeconds" in _fn_body, True)
+_after_lt = _fn_body[_fn_body.find("-lt $HoldMaxAgeSeconds"):] if "-lt $HoldMaxAgeSeconds" in _fn_body else ""
+# Mutation testee (CRITIQUE 1) : retirer "return $true" de la branche active
+# (la fonction retomberait alors systematiquement sur "return $false" plus
+# bas, et Test-SteamHold ne dirait plus jamais vrai - garde purement
+# decorative a chacun de ses trois points d appel).
+check("le sentinel frais (age < maximum) fait retourner $true depuis Test-SteamHold",
+      "return $true" in _after_lt, True)
+# Et ce $true doit preceder le $false de la branche perimee, pas l inverse -
+# sinon rien ne garantit qu il s agit bien de LA branche active.
+check("le $true de la branche active precede le $false de la branche perimee",
+      "return $true" in _after_lt and "return $false" in _after_lt and
+      _after_lt.find("return $true") < _after_lt.find("return $false"), True)
+
 # La propriete qui compte le plus : la garde ne doit RIEN casser du
 # comportement normal. En l absence de sentinel (ou perime), Steam doit
 # toujours etre lance - sans quoi la garde aurait cache un vrai defaut derriere
 # un defaut different.
 check("steam-launch.ps1 demarre toujours Steam quand le sentinel est absent ou perime",
-      "Start-Process -FilePath $SteamExe" in _launch, True)
-check("le controle du sentinel precede la tentative de lancement, jamais l inverse",
-      _launch.find("HoldFile") < _launch.find("Start-Process -FilePath $SteamExe"), True)
-check("le sentinel actif fait sortir le script avant tout lancement",
-      "return" in _launch[_launch.find("HoldFile"):_launch.find("Start-Process -FilePath $SteamExe")],
-      True)
+      "Start-Process -FilePath $SteamExe" in _launch_code, True)
+
+# IMPORTANT 3 (revue) : un controle unique tout en haut laisse une fenetre de
+# $WaitSeconds (45 s) entre "sentinel absent" et le lancement reel - l hote
+# peut poser le sentinel pendant cette attente, et Steam demarrerait quand
+# meme, en plein milieu de l ecriture. Le controle doit donc etre repete a
+# CHACUN des trois points ou ce script peut faire demarrer ou reagir avec
+# Steam, pas seulement au tout debut.
+_launch_lines = [ln.strip() for ln in _launch_code.splitlines() if ln.strip()]
+
+
+def line_index(lines, needle, start=0):
+    for i in range(start, len(lines)):
+        if needle in lines[i]:
+            return i
+    return -1
+
+
+_idx_wait = line_index(_launch_lines, "$deadline = (Get-Date).AddSeconds($WaitSeconds)")
+_idx_bigpicture_uri = line_index(_launch_lines, "Start-Process 'steam://open/bigpicture'")
+_idx_final_bigpicture = line_index(_launch_lines, "Start-Process -FilePath $SteamExe -ArgumentList")
+_idx_final_default = line_index(_launch_lines, "else { Start-Process -FilePath $SteamExe }")
+_guard = "if (Test-SteamHold) { return }"
+check("tous les anchors necessaires a ces controles ont ete localises",
+      -1 not in (_idx_wait, _idx_bigpicture_uri, _idx_final_bigpicture, _idx_final_default), True)
+_idx_first_guard = line_index(_launch_lines, _guard)
+check("un premier controle precede l attente d affichage (evite d attendre 45 s pour rien)",
+      _idx_first_guard != -1 and _idx_wait != -1 and _idx_first_guard < _idx_wait, True)
+check("un controle protege directement l envoi de steam://open/bigpicture a un Steam deja vivant",
+      _idx_bigpicture_uri > 0 and _launch_lines[_idx_bigpicture_uri - 1] == _guard, True)
+check("un dernier controle precede immediatement le lancement final de Steam (mode Big Picture)",
+      _idx_final_bigpicture > 0 and _launch_lines[_idx_final_bigpicture - 1] == _guard, True)
+check("ce meme dernier controle couvre aussi la branche par defaut (Desktop)",
+      _idx_final_default == _idx_final_bigpicture + 1, True)
 
 # Les lecteurs optiques s emparent des premieres lettres libres et se posent
 # exactement la ou les partages doivent aller : mesure le 2026-08-26, les deux
@@ -521,19 +611,37 @@ check("l habillage ne peut pas empecher Steam de demarrer",
 # la bibliotheque se met a jour, faute de quoi un ecran fige sans Steam se lit
 # comme une panne et quelqu un finit par redemarrer la machine en plein milieu
 # d une ecriture.
+#
+# code_only (pas _shell brut, pas meme _shell_code du check plus haut, qui ne
+# retire que les lignes DEBUTANT par # ou <# et laisse donc passer tout le
+# corps du docstring) : le docstring de ce fichier decrit deja steam.hold,
+# son expiration a cinq minutes et parle de "bibliotheque" en toutes lettres
+# (revue, IMPORTANT 4) - un check lu sur le texte brut resterait vert meme si
+# le label et son affectation disparaissaient entierement du code.
+_shell_code2 = code_only(_shell)
 check("le shell lit le meme sentinel steam.hold que steam-launch.ps1",
-      "steam.hold" in _shell, True)
+      "steam.hold" in _shell_code2, True)
+check("le shell definit lui aussi Test-SteamHold (meme protection TOCTOU que steam-launch.ps1)",
+      "function Test-SteamHold" in _shell_code2, True)
+check("le shell lit le sentinel par un Get-Item unique (pas de Test-Path puis Get-Item)",
+      "Get-Item -Path $HoldFile -ErrorAction SilentlyContinue" in _shell_code2, True)
 # Meme regle d expiration que steam-launch.ps1, sur le meme horodatage de
 # fichier - jamais une minuterie a lui, puisque AutoRestartShell peut relancer
 # ce script pendant la retenue elle-meme.
 check("le shell fait aussi expirer le sentinel au bout de cinq minutes, sur l horodatage du fichier",
-      "LastWriteTime" in _shell and "$HoldMaxAgeSeconds = 300" in _shell, True)
-check("le shell affiche un message pendant la retenue",
-      "bibliotheque" in _shell.lower(), True)
-# Le message doit rester l EXCEPTION : invisible par defaut, il ne doit
-# s afficher que lorsque le sentinel est effectivement pose et frais.
+      "LastWriteTime" in _shell_code2 and "$HoldMaxAgeSeconds = 300" in _shell_code2, True)
+check("le shell affiche un message pendant la retenue (dans le CODE, pas seulement le docstring)",
+      "bibliotheque" in _shell_code2.lower(), True)
+# Le message doit rester l EXCEPTION : invisible par defaut...
 check("le message de retenue reste cache hors retenue",
-      "$holdLabel.Visible = $false" in _shell, True)
+      "$holdLabel.Visible = $false" in _shell_code2, True)
+# ... et bascule reellement selon Test-SteamHold : forcer $holdLabel.Visible a
+# $false en permanence (revue, IMPORTANT 5 - l exigence "le proprietaire doit
+# voir ce qui se passe" resterait alors lettre morte) laisserait le check
+# ci-dessus au vert, puisqu il ne regarde que l etat par defaut. Celui-ci
+# verifie l affectation qui le fait VARIER, dans la boucle.
+check("la visibilite du message suit Test-SteamHold (pas figee sur sa valeur par defaut)",
+      "$holdLabel.Visible = (Test-SteamHold)" in _shell_code2, True)
 
 # New-Item -Force sur une cle de registre EXISTANTE ne cree pas : il SUPPRIME
 # l arbre puis le recree, et echoue sur « Cannot delete a subkey tree ». Le

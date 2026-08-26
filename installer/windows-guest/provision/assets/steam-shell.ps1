@@ -42,6 +42,17 @@ $HoldFile = 'C:\nivuus\state\steam.hold'
 # message ne doit plus s afficher, l horodatage du fichier restant seul juge.
 $HoldMaxAgeSeconds = 300
 
+# Get-Item SEUL, jamais Test-Path puis Get-Item : entre les deux, l hote a le
+# temps de retirer le sentinel, et lire l horodatage d un fichier qui vient de
+# disparaitre est exactement la course que ce couple veut eviter (meme geste
+# que steam-launch.ps1).
+function Test-SteamHold {
+    $item = Get-Item -Path $HoldFile -ErrorAction SilentlyContinue
+    if (-not $item) { return $false }
+    $age = (Get-Date) - $item.LastWriteTime
+    return ($age.TotalSeconds -lt $HoldMaxAgeSeconds)
+}
+
 # Le fond est dessine PAR CE SCRIPT, pas par Windows. Sans explorer.exe il n y a
 # pas de bureau, donc pas de papier peint : une image posee dans le registre ne
 # s afficherait nulle part.
@@ -90,20 +101,13 @@ while ($true) {
     # de se redessiner et Windows la marque « ne repond pas ».
     try { [System.Windows.Forms.Application]::DoEvents() } catch { }
 
-    # Inerte tant que personne ne pose le sentinel : un Test-Path de plus tous
-    # les trois secondes, sur un cycle qui tournait deja. L age vient de
+    # Inerte tant que personne ne pose le sentinel : un Test-SteamHold de plus
+    # tous les trois secondes, sur un cycle qui tournait deja. L age vient de
     # l horodatage du FICHIER et non d une variable de CE process, car ce
     # shell peut lui-meme redemarrer (AutoRestartShell) pendant la retenue
     # sans que ca ne la fasse repartir de zero.
     try {
-        if ($holdLabel) {
-            $onHold = $false
-            if (Test-Path $HoldFile) {
-                $age = (Get-Date) - (Get-Item $HoldFile).LastWriteTime
-                if ($age.TotalSeconds -lt $HoldMaxAgeSeconds) { $onHold = $true }
-            }
-            $holdLabel.Visible = $onHold
-        }
+        if ($holdLabel) { $holdLabel.Visible = (Test-SteamHold) }
     }
     catch { }
 
