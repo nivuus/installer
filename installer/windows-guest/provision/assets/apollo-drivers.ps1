@@ -41,13 +41,19 @@ function Test-ApolloDrivers {
     Write-Host "SudoVDA OK: $($vda.InstanceId)"
 
     # Same reasoning, same trap: match ViGEmBus by its own hardware ID, from
-    # ViGEmBus.inf: %DeviceName%=ViGEmBus_Device, Root\ViGEmBus. This is the
-    # driver that turns Moonlight's input stream into an XInput/DualShock
-    # pad; without it the failure is silent by construction - the image
-    # arrives, the sound arrives, and the controller just does nothing, with
-    # nothing in Apollo's own logs pointing at a driver. This check is
-    # unconditional: it has nothing to do with retrogaming, it is what makes
-    # ANY gamepad work over Moonlight at all.
+    # ViGEmBus.inf: %ViGEmBus.DeviceDesc%=ViGEmBus_Device,
+    # Nefarius\ViGEmBus\Gen1 - the modern ID, verified against the real .inf,
+    # NOT the pre-2018 Root\ViGEmBus (renamed upstream alongside the vendor's
+    # own rename to Nefarius Software Solutions; upstream commit 3a3f4188,
+    # "Changed hardware ID from Root\ViGEmBus to Nefarius\ViGEmBus\Gen1").
+    # Apollo bundles a modern build, so Root\ViGEmBus would never match a
+    # single real install. This is the driver that turns Moonlight's input
+    # stream into an XInput/DualShock pad; without it the failure is silent
+    # by construction - the image arrives, the sound arrives, and the
+    # controller just does nothing, with nothing in Apollo's own logs
+    # pointing at a driver. This check is unconditional: it has nothing to do
+    # with retrogaming, it is what makes ANY gamepad work over Moonlight at
+    # all.
     #
     # Unlike SudoVDA, this is NOT fatal. A missing display leaves nothing to
     # look at, so there is no point continuing. A missing ViGEmBus leaves
@@ -58,9 +64,9 @@ function Test-ApolloDrivers {
     # thing that can still be fixed remotely once it is visible - so warn
     # loudly instead, the same call 25-apollo.ps1 already makes for owner
     # config changes in Backup-IfChanged.
-    $vigem = Get-PnpDeviceByHardwareId -HardwareId 'Root\ViGEmBus'
+    $vigem = Get-PnpDeviceByHardwareId -HardwareId 'Nefarius\ViGEmBus\Gen1'
     if (-not $vigem -or $vigem.Status -ne 'OK') {
-        Write-Host 'WARNING: no working ViGEmBus device (hardware ID Root\ViGEmBus): no gamepad will work over Moonlight - continuing so the console stays reachable for diagnosis'
+        Write-Host 'WARNING: no working ViGEmBus device (hardware ID Nefarius\ViGEmBus\Gen1): no gamepad will work over Moonlight - continuing so the console stays reachable for diagnosis'
     }
     else {
         Write-Host "ViGEmBus OK: $($vigem.InstanceId)"

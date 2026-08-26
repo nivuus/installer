@@ -225,14 +225,37 @@ check("Apollo runs the bundled SudoVDA installer (certificate trust delegated to
 # all. The two device checks were split into their own helper (same 200-line
 # reason as the junction above) and are verified there.
 apollo_drivers = texts["apollo-drivers.ps1"]
+# Code with comments stripped: the mechanism checks below must bite on what
+# actually runs, not on a hardware-ID string that could just as well be
+# sitting in a comment or a Write-Host message while the real lookup was
+# swapped for something else (e.g. Get-Service).
+apollo_drivers_code = "\n".join(
+    ln for ln in apollo_drivers.splitlines()
+    if ln.strip() and not ln.lstrip().startswith("#"))
 check("25-apollo.ps1 dot-sources the driver-verification helper",
       "apollo-drivers.ps1" in apollo_stage, True)
 check("driver helper still checks SudoVDA by its precise hardware ID",
       "Root\\SudoMaker\\SudoVDA" in apollo_drivers, True)
 check("driver helper still treats a missing SudoVDA as fatal",
       "throw 'no working SudoVDA device" in apollo_drivers, True)
-check("driver helper checks ViGEmBus by its vendor hardware ID, not a service name",
-      "Root\\ViGEmBus" in apollo_drivers, True)
+# The historical Root\ViGEmBus ID was abandoned upstream in 2018 (renamed to
+# Nefarius\ViGEmBus\Gen1 alongside the vendor's own rename); a check still
+# aimed at the old ID would never match a real install and would warn on
+# every single provisioning run, healthy or not - the exact "noise teaches
+# the operator to ignore it" trap this file already warns about elsewhere.
+check("driver helper checks ViGEmBus by its modern vendor hardware ID",
+      "Nefarius\\ViGEmBus\\Gen1" in apollo_drivers, True)
+check("driver helper does not still look for the abandoned pre-2018 ID",
+      "Root\\ViGEmBus'" in apollo_drivers, False)
+# Mechanism check, not a string search: the ViGEmBus lookup must actually go
+# through the same hardware-ID function as SudoVDA, on code lines only. A
+# mutation that swapped the lookup for a Get-Service call while leaving the
+# surrounding comments and warning text untouched must fail these two.
+check("ViGEmBus is resolved via the shared hardware-ID lookup",
+      "Get-PnpDeviceByHardwareId -HardwareId 'Nefarius\\ViGEmBus\\Gen1'"
+      in apollo_drivers_code, True)
+check("driver helper never falls back to a service-name check",
+      "Get-Service" in apollo_drivers_code, False)
 check("driver helper names the consequence of a missing ViGEmBus",
       "no gamepad will work over Moonlight" in apollo_drivers, True)
 # Deliberate asymmetry with SudoVDA: a missing display leaves nothing to
@@ -242,7 +265,9 @@ check("driver helper names the consequence of a missing ViGEmBus",
 check("a missing ViGEmBus warns instead of throwing",
       "WARNING: no working ViGEmBus device" in apollo_drivers, True)
 check("a missing ViGEmBus does not abort the stage",
-      "throw" in apollo_drivers.rsplit("Root\\ViGEmBus", 1)[-1], False)
+      "throw" in apollo_drivers_code.rsplit(
+          "Get-PnpDeviceByHardwareId -HardwareId 'Nefarius\\ViGEmBus\\Gen1'", 1)[-1],
+      False)
 
 # FIX 11 (final review): cross-check the literals that were only recoupled
 # by convention until now - the same guard the PROVISION_VERSION check above
