@@ -8,10 +8,6 @@ echo "All CPUs + RTX 4070 @ Maximum Load"
 echo "========================================"
 echo ""
 
-# Check if HeavyLoad or Prime95 exists in VM for more intense CPU stress
-echo "Checking for intensive stress tools in VM..."
-HAS_PRIME95=$(winvm 'powershell -Command "Test-Path C:\prime95.exe"' 2>/dev/null | grep -i true)
-
 # Variables
 MAX_PACKAGE=0
 MAX_GPU=0
@@ -62,7 +58,13 @@ for i in $(seq 1 24); do
     # Track maximums
     [ ! -z "$PKG" ] && [ "$PKG" -gt "$MAX_PACKAGE" ] && MAX_PACKAGE=$PKG
     [ ! -z "$GPU" ] && [ "$GPU" -gt "$MAX_GPU" ] && MAX_GPU=$GPU
-    [ ! -z "$GPU_POWER" ] && [ "${GPU_POWER%.*}" -gt "${MAX_GPU_POWER%.*}" 2>/dev/null ] && MAX_GPU_POWER=$GPU_POWER
+    # power.draw can be non-numeric (e.g. "[Not Supported]") on some GPUs;
+    # guard with a numeric test instead of silencing a comparison error.
+    GPU_POWER_INT="${GPU_POWER%.*}"
+    case "$GPU_POWER_INT" in
+        ''|*[!0-9]*) ;;
+        *) [ "$GPU_POWER_INT" -gt "${MAX_GPU_POWER%.*}" ] && MAX_GPU_POWER=$GPU_POWER ;;
+    esac
 
     # Status
     [ "$PKG" -le 80 ] && CPU_S="✅" || CPU_S="⚠️"
