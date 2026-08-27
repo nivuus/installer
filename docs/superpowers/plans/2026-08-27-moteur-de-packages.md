@@ -19,6 +19,9 @@
 - **Commentaires en anglais**, comme tout le dépôt. Les docstrings expliquent *pourquoi*, pas *quoi*.
 - **Convention de test du dépôt** : scripts autonomes, `python3 scripts/tests/test_x.py`, liste `failures` + `check(label, got, want)`, `sys.exit(1)` sur échec. **Il n'y a ni pytest.ini, ni conftest.py** — ne pas en introduire.
 - **Aucune modification du comportement de `kvm-vfio`** dans ce plan. `install.sh`, `features.py::_kvm_vfio_thermal` et `common/retro.py` ne sont pas touchés.
+- **La CI ne lance aucun test Python** (`.github/workflows/ci.yml`, `test-paths: ""`) : les scripts de `scripts/tests/` s'exécutent à l'import, donc pytest les déclencherait pendant la collecte. C'est une dette déjà tracée en amont. **Chaque tâche lance donc ses tests à la main**, et `make test-packages` (tâche 11) est le seul agrégateur. Ne pas conclure d'un CI vert que les tests sont passés.
+- **La CI passe `shellcheck` sur tout le dépôt** (`shellcheck-paths: "."`). Les deux scripts modifiés par ce plan — `install.sh` (tâche 1) et `installer/iso-build/build.sh` (tâche 11) — doivent rester propres.
+- **PyYAML doit être ajouté aux DEUX fichiers de dépendances** : `requirements.txt` à la racine (consommé par la CI) et `installer/webapp/requirements.txt` (consommé par le venv de l'ISO). Le doublon vient du socle partagé amont ; l'oublier fait échouer la CI sans toucher l'ISO, ou l'inverse.
 - Chemin de découverte surchargeable par `NIVUUS_PACKAGES_DIR` (défaut `/opt/nivuus-packages`), exactement comme `NIVUUS_PROGRESS_DIR` l'est déjà.
 
 ---
@@ -135,9 +138,22 @@ Le manifeste est la seule chose que le moteur lit **avant** d'accepter d'exécut
   - `parse_manifest(data: Any, root: str) -> Manifest`
   - `load_manifest(path: str) -> Manifest`
 
-- [ ] **Step 1: Ajouter PyYAML aux dépendances**
+- [ ] **Step 1: Ajouter PyYAML aux dépendances — les deux fichiers**
 
-Dans `installer/webapp/requirements.txt`, après la ligne `jinja2>=3.1` :
+Depuis l'adoption du socle CI partagé (`dbc63c5`) il y a **deux** manifestes de dépendances, et les oublier l'un ou l'autre casse un côté sans toucher l'autre.
+
+Dans `requirements.txt` à la racine (consommé par la CI), en gardant l'ordre alphabétique :
+
+```
+fastapi
+jinja2
+pydantic
+pywinrm
+pyyaml
+uvicorn
+```
+
+Dans `installer/webapp/requirements.txt` (consommé par le venv de l'ISO), après la ligne `jinja2>=3.1` :
 
 ```
 pyyaml>=6.0
@@ -552,7 +568,7 @@ Attendu : `OK - all manifest contract tests passed`
 
 ```bash
 git add installer/packages/ scripts/tests/test_packages_manifest.py \
-        installer/webapp/requirements.txt \
+        requirements.txt installer/webapp/requirements.txt \
         installer/iso-build/config/hooks/normal/0500-nivuus-venv.hook.chroot
 git commit -m "feat(packages): contrat de manifeste nivuus.dev/v1
 
@@ -3047,6 +3063,8 @@ done
 
 ```bash
 bash -n installer/iso-build/build.sh && echo "syntaxe OK"
+# The shared CI socle runs shellcheck over the whole repo (shellcheck-paths: ".").
+shellcheck installer/iso-build/build.sh install.sh && echo "shellcheck OK"
 PACKAGE_REPOS="$PWD/scripts/tests/fixtures/packages/demo" bash -c '
   set -eu
   echo "PACKAGE_REPOS=$PACKAGE_REPOS"
