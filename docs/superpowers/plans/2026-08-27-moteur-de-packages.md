@@ -2199,32 +2199,90 @@ with tempfile.TemporaryDirectory() as tmp:
         check("the error names hugepages-mib for the boolean case",
               "hugepages-mib" in str(exc), True)
 
-# --- output cap: an accidental print loop must not OOM the installer. The
-# chosen behaviour is to keep the hook's own success/failure (exit code)
-# authoritative and just stop retaining stdout past the cap, with one warning
-# naming the package - failing the whole install over verbose-but-otherwise-
-# harmless output would be a worse outcome than a truncated log. ------------ #
-with tempfile.TemporaryDirectory() as tmp:
-    pkg = pathlib.Path(tmp) / "chatty"
+# --- output cap: an accidental print loop must not OOM the installer. Round
+# 1 capped the *parsed events*, but capture_output=True had already read the
+# whole subprocess stdout into memory before that cap ever ran - measured at
+# ~612 MB RSS growth for a 150 MB hook. runner.py now streams stdout line by
+# line via subprocess.Popen instead, so the cap actually bounds what is ever
+# held in memory. MAX_HOOK_OUTPUT_BYTES is patched small here so the test
+# stays fast without needing to actually print past the real 1 MiB default. #
+import packages.runner as runner_mod  # noqa: E402
+
+_ORIGINAL_MAX_HOOK_OUTPUT_BYTES = runner_mod.MAX_HOOK_OUTPUT_BYTES
+
+
+def _chatty_hook_body(exit_code=None):
+    body = (
+        "import json\n"
+        "for _ in range(5000):\n"
+        "    print(json.dumps({'event': 'progress', 'pct': 1, 'msg': 'x' * 20}))\n"
+    )
+    if exit_code is None:
+        body += "print(json.dumps({'event': 'done'}))\n"
+    else:
+        body += f"import sys\nsys.exit({exit_code})\n"
+    return body
+
+
+def _write_chatty_pkg(tmp, name, exit_code=None):
+    pkg = pathlib.Path(tmp) / name
     (pkg / "hooks").mkdir(parents=True)
     (pkg / "nivuus-package.yaml").write_text(
-        f"apiVersion: {manifest_mod.API_VERSION}\nname: chatty\nversion: 1.0.0\n"
-        'label: "Chatty"\ntier: userspace\nhooks:\n  install: hooks/install.py\n')
-    (pkg / "hooks" / "install.py").write_text(
-        "import json\n"
-        "for _ in range(50000):\n"
-        "    print(json.dumps({'event': 'progress', 'pct': 1, 'msg': 'x' * 20}))\n"
-        "print(json.dumps({'event': 'done'}))\n")
-    chatty = load_manifest(str(pkg / "nivuus-package.yaml"))
-    chatty_emit = FakeEmit()
-    run_install(chatty, HW, {}, tmp, chatty_emit)  # must not raise
-    check("a cap-exceeded warning names the package",
-          any(line[0] == "warn" and "chatty" in line[3]
-              for line in chatty_emit.lines),
-          True)
-    info_count = sum(1 for line in chatty_emit.lines if line[0] == "info")
-    check("progress events stopped accumulating once the cap was hit",
-          info_count < 50000, True)
+        f"apiVersion: {manifest_mod.API_VERSION}\nname: {name}\nversion: 1.0.0\n"
+        f'label: "{name}"\ntier: userspace\nhooks:\n  install: hooks/install.py\n')
+    (pkg / "hooks" / "install.py").write_text(_chatty_hook_body(exit_code))
+    return load_manifest(str(pkg / "nivuus-package.yaml"))
+
+
+runner_mod.MAX_HOOK_OUTPUT_BYTES = 1024  # 5000 lines * ~30 bytes >> 100 KB total
+try:
+    with tempfile.TemporaryDirectory() as tmp:
+        chatty = _write_chatty_pkg(tmp, "chatty")
+        chatty_emit = FakeEmit()
+        run_install(chatty, HW, {}, tmp, chatty_emit)  # must not raise
+        warn_lines = [line for line in chatty_emit.lines if line[0] == "warn"]
+        check("a cap-exceeded warning names the package",
+              any("chatty" in line[3] for line in warn_lines), True)
+        check("the cap-exceeded warning fires exactly once", len(warn_lines), 1)
+        info_count = sum(1 for line in chatty_emit.lines if line[0] == "info")
+        check("retained progress events are bounded by the cap, not by the "
+              "5000 the hook actually printed", info_count < 100, True)
+
+    # The pipe must still be fully drained past the cap: a hook that prints
+    # far more than MAX_HOOK_OUTPUT_BYTES and then exits non-zero must still
+    # raise HookError with its real exit code - proving the read loop was
+    # never blocked waiting on a full pipe the parent stopped reading.
+    with tempfile.TemporaryDirectory() as tmp:
+        chatty_fail = _write_chatty_pkg(tmp, "chattyfail", exit_code=9)
+        try:
+            run_install(chatty_fail, HW, {}, tmp)
+            failures.append(
+                "a hook exceeding the cap and exiting non-zero did not raise")
+        except HookError as exc:
+            check("the drained-past-cap failure names the package",
+                  "chattyfail" in str(exc), True)
+            check("the drained-past-cap failure carries the exit code",
+                  "9" in str(exc), True)
+finally:
+    runner_mod.MAX_HOOK_OUTPUT_BYTES = _ORIGINAL_MAX_HOOK_OUTPUT_BYTES
+
+# --- the timeout must still genuinely fire under the streaming rewrite ----- #
+_ORIGINAL_RESOLVE_TIMEOUT = runner_mod.HOOK_TIMEOUT["resolve"]
+runner_mod.HOOK_TIMEOUT["resolve"] = 1
+try:
+    with tempfile.TemporaryDirectory() as tmp:
+        sleepy = _resolve_only_pkg(
+            tmp, "sleepy", "import json, sys, time\n"
+            "json.load(sys.stdin)\ntime.sleep(5)\n")
+        try:
+            run_resolve(sleepy, HW, {})
+            failures.append("a hook exceeding its timeout did not raise HookError")
+        except HookError as exc:
+            check("the timeout error names the package", "sleepy" in str(exc), True)
+            check("the timeout error says it was killed",
+                  "killed" in str(exc), True)
+finally:
+    runner_mod.HOOK_TIMEOUT["resolve"] = _ORIGINAL_RESOLVE_TIMEOUT
 
 if failures:
     print(f"FAIL ({len(failures)})")
@@ -2295,6 +2353,23 @@ applies to the static declaration, so a hook cannot be laxer than the file it
 resolves. None of these are silently coerced: a hook that speaks the protocol
 wrongly is a broken hook, and the operator needs to know which package it was
 rather than get a suspiciously-empty command line.
+
+STREAMING, NOT CAPTURE_OUTPUT. `subprocess.run(capture_output=True)` reads a
+child's entire stdout into one Python string before this module gets to look
+at it, so a cap applied afterwards is cosmetic: by the time it runs, the
+whole output has already been materialised in the parent's memory. The live
+ISO's root runs in RAM (see CLAUDE.md), so this is not an abstract risk here
+- an accidental print loop in a package hook can OOM the installer itself,
+on a machine with no screen, mid-install. So `_run_hook` drives the child
+with `subprocess.Popen` and reads stdout one line at a time, parsing and
+retaining only up to MAX_HOOK_OUTPUT_BYTES; past the cap it keeps draining
+the pipe (never accumulating) so the child cannot block on a full pipe, and
+emits exactly one warning naming the package and phase. stderr is redirected
+to a temporary file rather than a second pipe: reading two pipes off one
+child from a single thread is the textbook deadlock (one fills while the
+other is being read), and a file has no such limit. The timeout is enforced
+by a background timer that kills the child - once killed, the pipe's write
+end closes and the blocking read loop unblocks with EOF on its own.
 """
 from __future__ import annotations
 
@@ -2302,6 +2377,8 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import threading
 from dataclasses import dataclass
 
 from .manifest import Manifest, Platform
@@ -2340,7 +2417,10 @@ def _context(manifest: Manifest, hw: dict, answers: dict) -> str:
 
 def _run_hook(manifest: Manifest, phase: str, hw: dict, answers: dict,
               root: str = "", emit=None) -> list[dict]:
-    """Run one hook and return the events it emitted. [] when none is declared."""
+    """Run one hook and return the events it emitted. [] when none is declared.
+
+    Streams stdout instead of buffering it whole - see the module docstring.
+    """
     hook = manifest.hook_path(phase)
     if not hook:
         return []
@@ -2352,55 +2432,96 @@ def _run_hook(manifest: Manifest, phase: str, hw: dict, answers: dict,
     if root:
         cmd += ["--root", root]
 
-    try:
-        proc = subprocess.run(
-            cmd, input=_context(manifest, hw, answers), capture_output=True,
-            text=True, timeout=HOOK_TIMEOUT[phase], cwd=manifest.root, check=False)
-    except subprocess.TimeoutExpired as exc:
-        raise HookError(
-            f"package {manifest.name}: hook '{phase}' exceeded "
-            f"{HOOK_TIMEOUT[phase]}s and was killed") from exc
+    context = _context(manifest, hw, answers)
 
-    events: list[dict] = []
-    consumed = 0
-    truncated = False
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if truncated:
-            continue
-        consumed += len(line) + 1
-        if consumed > MAX_HOOK_OUTPUT_BYTES:
-            truncated = True
-            if emit:
-                emit.warn(
-                    "packages", 0,
-                    f"[{manifest.name}] hook '{phase}' exceeded "
-                    f"{MAX_HOOK_OUTPUT_BYTES} bytes of stdout; "
-                    "the rest was discarded")
-            continue
+    # stderr to a real file, never a second pipe (see module docstring for
+    # why): it is only ever read back as a short tail on failure.
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=stderr_file, text=True, cwd=manifest.root)
+
+        # The context is a few KB - well under a pipe buffer (64 KiB on
+        # Linux) - so a plain write-then-close is safe; no feeder thread.
         try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            # Not protocol: relay it rather than drop it. A hook that prints
-            # is far easier to debug than one whose output vanished.
-            if emit:
-                emit.info("packages", 0, f"[{manifest.name}] {line[:120]}")
-            continue
-        if not isinstance(event, dict):
-            continue
-        events.append(event)
-        if emit and event.get("event") == "progress":
-            emit.info("packages", int(event.get("pct") or 0),
-                      f"[{manifest.name}] {str(event.get('msg', ''))[:120]}")
+            proc.stdin.write(context)
+        except BrokenPipeError:
+            pass  # hook exited (or never reads stdin) before we finished
+        finally:
+            proc.stdin.close()
 
-    if proc.returncode != 0:
-        detail = (proc.stderr or "").strip().splitlines()
-        tail = detail[-1] if detail else "no stderr"
-        raise HookError(
-            f"package {manifest.name}: hook '{phase}' exited {proc.returncode} "
-            f"({tail})")
+        timed_out = threading.Event()
+
+        def _enforce_timeout() -> None:
+            # poll() first: a race where the child already exited is
+            # harmless (kill() on a Popen with a known returncode is a
+            # no-op), this just avoids signalling a reused pid needlessly.
+            if proc.poll() is None:
+                timed_out.set()
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+
+        timer = threading.Timer(HOOK_TIMEOUT[phase], _enforce_timeout)
+        timer.daemon = True
+        timer.start()
+
+        events: list[dict] = []
+        consumed = 0
+        truncated = False
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                if truncated:
+                    # Keep iterating (this keeps draining the pipe) without
+                    # accumulating - stopping the read here would fill the
+                    # pipe and the hook would block on its own stdout forever.
+                    continue
+                consumed += len(line) + 1
+                if consumed > MAX_HOOK_OUTPUT_BYTES:
+                    truncated = True
+                    if emit:
+                        emit.warn(
+                            "packages", 0,
+                            f"[{manifest.name}] hook '{phase}' exceeded "
+                            f"{MAX_HOOK_OUTPUT_BYTES} bytes of stdout; "
+                            "the rest was discarded")
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    # Not protocol: relay it rather than drop it. A hook that
+                    # prints is far easier to debug than one whose output
+                    # vanished.
+                    if emit:
+                        emit.info("packages", 0, f"[{manifest.name}] {line[:120]}")
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                events.append(event)
+                if emit and event.get("event") == "progress":
+                    emit.info("packages", int(event.get("pct") or 0),
+                              f"[{manifest.name}] {str(event.get('msg', ''))[:120]}")
+        finally:
+            proc.stdout.close()
+            proc.wait()
+            timer.cancel()
+
+        if timed_out.is_set():
+            raise HookError(
+                f"package {manifest.name}: hook '{phase}' exceeded "
+                f"{HOOK_TIMEOUT[phase]}s and was killed")
+
+        if proc.returncode != 0:
+            stderr_file.seek(0)
+            detail = stderr_file.read().strip().splitlines()
+            tail = detail[-1] if detail else "no stderr"
+            raise HookError(
+                f"package {manifest.name}: hook '{phase}' exited {proc.returncode} "
+                f"({tail})")
     return events
 
 

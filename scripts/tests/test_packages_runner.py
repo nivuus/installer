@@ -197,32 +197,90 @@ with tempfile.TemporaryDirectory() as tmp:
         check("the error names hugepages-mib for the boolean case",
               "hugepages-mib" in str(exc), True)
 
-# --- output cap: an accidental print loop must not OOM the installer. The
-# chosen behaviour is to keep the hook's own success/failure (exit code)
-# authoritative and just stop retaining stdout past the cap, with one warning
-# naming the package - failing the whole install over verbose-but-otherwise-
-# harmless output would be a worse outcome than a truncated log. ------------ #
-with tempfile.TemporaryDirectory() as tmp:
-    pkg = pathlib.Path(tmp) / "chatty"
+# --- output cap: an accidental print loop must not OOM the installer. Round
+# 1 capped the *parsed events*, but capture_output=True had already read the
+# whole subprocess stdout into memory before that cap ever ran - measured at
+# ~612 MB RSS growth for a 150 MB hook. runner.py now streams stdout line by
+# line via subprocess.Popen instead, so the cap actually bounds what is ever
+# held in memory. MAX_HOOK_OUTPUT_BYTES is patched small here so the test
+# stays fast without needing to actually print past the real 1 MiB default. #
+import packages.runner as runner_mod  # noqa: E402
+
+_ORIGINAL_MAX_HOOK_OUTPUT_BYTES = runner_mod.MAX_HOOK_OUTPUT_BYTES
+
+
+def _chatty_hook_body(exit_code=None):
+    body = (
+        "import json\n"
+        "for _ in range(5000):\n"
+        "    print(json.dumps({'event': 'progress', 'pct': 1, 'msg': 'x' * 20}))\n"
+    )
+    if exit_code is None:
+        body += "print(json.dumps({'event': 'done'}))\n"
+    else:
+        body += f"import sys\nsys.exit({exit_code})\n"
+    return body
+
+
+def _write_chatty_pkg(tmp, name, exit_code=None):
+    pkg = pathlib.Path(tmp) / name
     (pkg / "hooks").mkdir(parents=True)
     (pkg / "nivuus-package.yaml").write_text(
-        f"apiVersion: {manifest_mod.API_VERSION}\nname: chatty\nversion: 1.0.0\n"
-        'label: "Chatty"\ntier: userspace\nhooks:\n  install: hooks/install.py\n')
-    (pkg / "hooks" / "install.py").write_text(
-        "import json\n"
-        "for _ in range(50000):\n"
-        "    print(json.dumps({'event': 'progress', 'pct': 1, 'msg': 'x' * 20}))\n"
-        "print(json.dumps({'event': 'done'}))\n")
-    chatty = load_manifest(str(pkg / "nivuus-package.yaml"))
-    chatty_emit = FakeEmit()
-    run_install(chatty, HW, {}, tmp, chatty_emit)  # must not raise
-    check("a cap-exceeded warning names the package",
-          any(line[0] == "warn" and "chatty" in line[3]
-              for line in chatty_emit.lines),
-          True)
-    info_count = sum(1 for line in chatty_emit.lines if line[0] == "info")
-    check("progress events stopped accumulating once the cap was hit",
-          info_count < 50000, True)
+        f"apiVersion: {manifest_mod.API_VERSION}\nname: {name}\nversion: 1.0.0\n"
+        f'label: "{name}"\ntier: userspace\nhooks:\n  install: hooks/install.py\n')
+    (pkg / "hooks" / "install.py").write_text(_chatty_hook_body(exit_code))
+    return load_manifest(str(pkg / "nivuus-package.yaml"))
+
+
+runner_mod.MAX_HOOK_OUTPUT_BYTES = 1024  # 5000 lines * ~30 bytes >> 100 KB total
+try:
+    with tempfile.TemporaryDirectory() as tmp:
+        chatty = _write_chatty_pkg(tmp, "chatty")
+        chatty_emit = FakeEmit()
+        run_install(chatty, HW, {}, tmp, chatty_emit)  # must not raise
+        warn_lines = [line for line in chatty_emit.lines if line[0] == "warn"]
+        check("a cap-exceeded warning names the package",
+              any("chatty" in line[3] for line in warn_lines), True)
+        check("the cap-exceeded warning fires exactly once", len(warn_lines), 1)
+        info_count = sum(1 for line in chatty_emit.lines if line[0] == "info")
+        check("retained progress events are bounded by the cap, not by the "
+              "5000 the hook actually printed", info_count < 100, True)
+
+    # The pipe must still be fully drained past the cap: a hook that prints
+    # far more than MAX_HOOK_OUTPUT_BYTES and then exits non-zero must still
+    # raise HookError with its real exit code - proving the read loop was
+    # never blocked waiting on a full pipe the parent stopped reading.
+    with tempfile.TemporaryDirectory() as tmp:
+        chatty_fail = _write_chatty_pkg(tmp, "chattyfail", exit_code=9)
+        try:
+            run_install(chatty_fail, HW, {}, tmp)
+            failures.append(
+                "a hook exceeding the cap and exiting non-zero did not raise")
+        except HookError as exc:
+            check("the drained-past-cap failure names the package",
+                  "chattyfail" in str(exc), True)
+            check("the drained-past-cap failure carries the exit code",
+                  "9" in str(exc), True)
+finally:
+    runner_mod.MAX_HOOK_OUTPUT_BYTES = _ORIGINAL_MAX_HOOK_OUTPUT_BYTES
+
+# --- the timeout must still genuinely fire under the streaming rewrite ----- #
+_ORIGINAL_RESOLVE_TIMEOUT = runner_mod.HOOK_TIMEOUT["resolve"]
+runner_mod.HOOK_TIMEOUT["resolve"] = 1
+try:
+    with tempfile.TemporaryDirectory() as tmp:
+        sleepy = _resolve_only_pkg(
+            tmp, "sleepy", "import json, sys, time\n"
+            "json.load(sys.stdin)\ntime.sleep(5)\n")
+        try:
+            run_resolve(sleepy, HW, {})
+            failures.append("a hook exceeding its timeout did not raise HookError")
+        except HookError as exc:
+            check("the timeout error names the package", "sleepy" in str(exc), True)
+            check("the timeout error says it was killed",
+                  "killed" in str(exc), True)
+finally:
+    runner_mod.HOOK_TIMEOUT["resolve"] = _ORIGINAL_RESOLVE_TIMEOUT
 
 if failures:
     print(f"FAIL ({len(failures)})")

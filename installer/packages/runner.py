@@ -46,6 +46,23 @@ applies to the static declaration, so a hook cannot be laxer than the file it
 resolves. None of these are silently coerced: a hook that speaks the protocol
 wrongly is a broken hook, and the operator needs to know which package it was
 rather than get a suspiciously-empty command line.
+
+STREAMING, NOT CAPTURE_OUTPUT. `subprocess.run(capture_output=True)` reads a
+child's entire stdout into one Python string before this module gets to look
+at it, so a cap applied afterwards is cosmetic: by the time it runs, the
+whole output has already been materialised in the parent's memory. The live
+ISO's root runs in RAM (see CLAUDE.md), so this is not an abstract risk here
+- an accidental print loop in a package hook can OOM the installer itself,
+on a machine with no screen, mid-install. So `_run_hook` drives the child
+with `subprocess.Popen` and reads stdout one line at a time, parsing and
+retaining only up to MAX_HOOK_OUTPUT_BYTES; past the cap it keeps draining
+the pipe (never accumulating) so the child cannot block on a full pipe, and
+emits exactly one warning naming the package and phase. stderr is redirected
+to a temporary file rather than a second pipe: reading two pipes off one
+child from a single thread is the textbook deadlock (one fills while the
+other is being read), and a file has no such limit. The timeout is enforced
+by a background timer that kills the child - once killed, the pipe's write
+end closes and the blocking read loop unblocks with EOF on its own.
 """
 from __future__ import annotations
 
@@ -53,6 +70,8 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import threading
 from dataclasses import dataclass
 
 from .manifest import Manifest, Platform
@@ -91,7 +110,10 @@ def _context(manifest: Manifest, hw: dict, answers: dict) -> str:
 
 def _run_hook(manifest: Manifest, phase: str, hw: dict, answers: dict,
               root: str = "", emit=None) -> list[dict]:
-    """Run one hook and return the events it emitted. [] when none is declared."""
+    """Run one hook and return the events it emitted. [] when none is declared.
+
+    Streams stdout instead of buffering it whole - see the module docstring.
+    """
     hook = manifest.hook_path(phase)
     if not hook:
         return []
@@ -103,55 +125,96 @@ def _run_hook(manifest: Manifest, phase: str, hw: dict, answers: dict,
     if root:
         cmd += ["--root", root]
 
-    try:
-        proc = subprocess.run(
-            cmd, input=_context(manifest, hw, answers), capture_output=True,
-            text=True, timeout=HOOK_TIMEOUT[phase], cwd=manifest.root, check=False)
-    except subprocess.TimeoutExpired as exc:
-        raise HookError(
-            f"package {manifest.name}: hook '{phase}' exceeded "
-            f"{HOOK_TIMEOUT[phase]}s and was killed") from exc
+    context = _context(manifest, hw, answers)
 
-    events: list[dict] = []
-    consumed = 0
-    truncated = False
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if truncated:
-            continue
-        consumed += len(line) + 1
-        if consumed > MAX_HOOK_OUTPUT_BYTES:
-            truncated = True
-            if emit:
-                emit.warn(
-                    "packages", 0,
-                    f"[{manifest.name}] hook '{phase}' exceeded "
-                    f"{MAX_HOOK_OUTPUT_BYTES} bytes of stdout; "
-                    "the rest was discarded")
-            continue
+    # stderr to a real file, never a second pipe (see module docstring for
+    # why): it is only ever read back as a short tail on failure.
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=stderr_file, text=True, cwd=manifest.root)
+
+        # The context is a few KB - well under a pipe buffer (64 KiB on
+        # Linux) - so a plain write-then-close is safe; no feeder thread.
         try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            # Not protocol: relay it rather than drop it. A hook that prints
-            # is far easier to debug than one whose output vanished.
-            if emit:
-                emit.info("packages", 0, f"[{manifest.name}] {line[:120]}")
-            continue
-        if not isinstance(event, dict):
-            continue
-        events.append(event)
-        if emit and event.get("event") == "progress":
-            emit.info("packages", int(event.get("pct") or 0),
-                      f"[{manifest.name}] {str(event.get('msg', ''))[:120]}")
+            proc.stdin.write(context)
+        except BrokenPipeError:
+            pass  # hook exited (or never reads stdin) before we finished
+        finally:
+            proc.stdin.close()
 
-    if proc.returncode != 0:
-        detail = (proc.stderr or "").strip().splitlines()
-        tail = detail[-1] if detail else "no stderr"
-        raise HookError(
-            f"package {manifest.name}: hook '{phase}' exited {proc.returncode} "
-            f"({tail})")
+        timed_out = threading.Event()
+
+        def _enforce_timeout() -> None:
+            # poll() first: a race where the child already exited is
+            # harmless (kill() on a Popen with a known returncode is a
+            # no-op), this just avoids signalling a reused pid needlessly.
+            if proc.poll() is None:
+                timed_out.set()
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+
+        timer = threading.Timer(HOOK_TIMEOUT[phase], _enforce_timeout)
+        timer.daemon = True
+        timer.start()
+
+        events: list[dict] = []
+        consumed = 0
+        truncated = False
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                if truncated:
+                    # Keep iterating (this keeps draining the pipe) without
+                    # accumulating - stopping the read here would fill the
+                    # pipe and the hook would block on its own stdout forever.
+                    continue
+                consumed += len(line) + 1
+                if consumed > MAX_HOOK_OUTPUT_BYTES:
+                    truncated = True
+                    if emit:
+                        emit.warn(
+                            "packages", 0,
+                            f"[{manifest.name}] hook '{phase}' exceeded "
+                            f"{MAX_HOOK_OUTPUT_BYTES} bytes of stdout; "
+                            "the rest was discarded")
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    # Not protocol: relay it rather than drop it. A hook that
+                    # prints is far easier to debug than one whose output
+                    # vanished.
+                    if emit:
+                        emit.info("packages", 0, f"[{manifest.name}] {line[:120]}")
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                events.append(event)
+                if emit and event.get("event") == "progress":
+                    emit.info("packages", int(event.get("pct") or 0),
+                              f"[{manifest.name}] {str(event.get('msg', ''))[:120]}")
+        finally:
+            proc.stdout.close()
+            proc.wait()
+            timer.cancel()
+
+        if timed_out.is_set():
+            raise HookError(
+                f"package {manifest.name}: hook '{phase}' exceeded "
+                f"{HOOK_TIMEOUT[phase]}s and was killed")
+
+        if proc.returncode != 0:
+            stderr_file.seek(0)
+            detail = stderr_file.read().strip().splitlines()
+            tail = detail[-1] if detail else "no stderr"
+            raise HookError(
+                f"package {manifest.name}: hook '{phase}' exited {proc.returncode} "
+                f"({tail})")
     return events
 
 
