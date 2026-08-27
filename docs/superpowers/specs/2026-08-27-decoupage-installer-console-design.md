@@ -182,12 +182,20 @@ Un hook émet du jsonl sur stdout selon une forme documentée. Le moteur de
 `console` l'imprime. Chacun a son lecteur, une trentaine de lignes. **`console`
 ne dépend jamais de `common/progress.py`.**
 
-### Propriété du schéma
+### Propriété du contrat
 
-`nivuus/installer` possède le JSON Schema, versionné par `apiVersion`.
-`nivuus/console` en vendorise une copie dans ses tests, et sa CI la compare à
-l'amont pour détecter la dérive. Pas de troisième dépôt : un dépôt de schéma pour
-deux consommateurs serait de la cérémonie.
+`nivuus/installer` possède le contrat, versionné par `apiVersion`. Pas de
+troisième dépôt : un dépôt de schéma pour deux consommateurs serait de la
+cérémonie.
+
+**Le contrat normatif est du code, pas un document** — `installer/packages/manifest.py`
+et `installer/packages/wizard.py`. Un fichier JSON Schema séparé serait une
+seconde source de vérité qui dériverait de l'implémentation, exactement comme
+on redoute que les deux dépôts dérivent l'un de l'autre. Les deux modules
+exposent donc leurs constantes (`API_VERSION`, `TIERS`, `HOOK_PHASES`,
+`CLAIM_MODES`, `PLATFORM_KEYS`, `QUESTION_TYPES`), et la CI de `nivuus/console`
+assertera ces valeurs — une dérive du contrat casse alors un test, au lieu de
+laisser un document mentir en silence.
 
 ## Trois coutures tranchées
 
