@@ -5,6 +5,7 @@ to the install engine. Field names mirror the JSON keys the engine reads.
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
@@ -100,6 +101,11 @@ class InstallConfig(BaseModel):
     gpu_passthrough: GpuPassthrough = Field(default_factory=GpuPassthrough)
     cpu: CpuConfig = Field(default_factory=CpuConfig)
     features: list[str] = Field(default_factory=lambda: ["os-base"])
+    # Package name -> raw answers. Deliberately opaque here: the answers are
+    # validated against each package's own question vocabulary by the engine,
+    # which is the only side that can read the manifests. Pydantic checks the
+    # shape; packages/wizard.py checks the meaning.
+    packages: dict[str, dict] = Field(default_factory=dict)
     suite: str = "bookworm"
     mirror: str = "http://deb.debian.org/debian"
 
@@ -127,4 +133,14 @@ class InstallConfig(BaseModel):
             raise ValueError(
                 "'retro' requires 'kvm-vfio' (the Windows guest VM)"
             )
+        return v
+
+    @field_validator("packages")
+    @classmethod
+    def _packages(cls, v: dict) -> dict:
+        for name, answers in v.items():
+            if not re.match(r"^[a-z][a-z0-9-]{0,31}$", name):
+                raise ValueError(f"invalid package name: {name!r}")
+            if not isinstance(answers, dict):
+                raise ValueError(f"answers for {name!r} must be a mapping")
         return v
