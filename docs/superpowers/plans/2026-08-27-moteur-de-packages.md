@@ -98,10 +98,12 @@ de référence à recopier, le domaine est construit depuis le matériel détect
 
 ```bash
 grep -rn "vm-template\|deployed-backup" --include='*.sh' --include='*.py' --include='*.md' . \
-  | grep -v '^./CLAUDE.md' | grep -v '^./CHANGELOG.md'
+  | grep -Ev '(CHANGELOG\.md|CLAUDE\.md|docs/superpowers/)'
 ```
 
-Attendu : **aucune sortie**.
+Attendu : **aucune sortie**. Les seules occurrences restantes dans le dépôt sont
+`CHANGELOG.md` (journal historique, laissé intact) et `docs/superpowers/` (le plan
+et le spec, qui *décrivent* cette suppression) — d'où leur exclusion explicite.
 
 - [ ] **Step 7: Commit**
 
