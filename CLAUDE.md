@@ -97,6 +97,16 @@ sudo python3 installer/install-engine/run.py --stop-after partition
 # ── Windows guest ──────────────────────────────────────────────────────────
 python3 installer/windows-guest/build.py    # unattended LTSC ISO
 python3 installer/windows-guest/domain.py   # define + start the libvirt domain
+python3 installer/windows-guest/retro_sync.py   # retrogaming (OPTIONAL): replay
+# `retro install` with the owner's manifest, refresh the durable witness on
+# D:\state\retro.status, then hold Steam and sync the library. It REFUSES to
+# sync unless that witness says `ok` for the current provisioning run: `retro
+# scan` builds emulator paths from the manifest without checking they exist, so
+# syncing a partial install fills Steam with entries that do not start. On a
+# console where retrogaming was never enabled it says so and exits 0. It also
+# refuses (exit 7) while a streaming session is live - stopping Steam would cut
+# the game being played, and nothing restarts it before the next Moonlight
+# connection; --force overrides, loudly.
 
 # ── Host scripts ───────────────────────────────────────────────────────────
 scripts/tests/test_pcie_wifi_link_guard.sh  # 16 assertions on a fake sysfs tree

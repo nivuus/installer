@@ -1,4 +1,5 @@
-"""Rendering of the Apollo configuration and of the guest-side secrets file.
+"""Rendering of the Apollo configuration, the guest-side secrets file, and
+the retrogaming toggle (config/retro.psd1).
 
 Apollo silently ignores a key it does not know, so a typo here costs a
 streaming session with no HDR and no error anywhere. Every key rendered by
@@ -106,3 +107,21 @@ def render_secrets(admin_password: str, ui_username: str,
             )
     body = "\n".join(f"    {k} = '{v}'" for k, v in values.items())
     return "@{\n" + body + "\n}\n"
+
+
+def render_retro(enabled: bool) -> str:
+    """Render config/retro.psd1: the retrogaming toggle read by the guest.
+
+    Retrogaming (RetroArch, via the `retro` package) is an OPTIONAL feature:
+    this is rendered on every build, never only when enabled, precisely so
+    the guest steps can tell "the operator did not want retro" apart from
+    "this payload predates the retro option and never wrote the file at
+    all". A file that says Enabled = $false cannot be confused with either.
+
+    No path rides along here on purpose: Steam's directory is already
+    defined twice (STEAM_DIR above, the literal in 30-steam.ps1) and a
+    third copy in this file would just be one more place to keep in sync
+    for a value nothing reads through retro.psd1 yet.
+    """
+    flag = "$true" if enabled else "$false"
+    return "@{\n" f"    Enabled = {flag}\n" "}\n"

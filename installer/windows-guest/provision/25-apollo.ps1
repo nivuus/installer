@@ -47,22 +47,12 @@ if (Test-Path (Join-Path $vdaDir 'install.bat')) {
                        -WorkingDirectory $vdaDir -Wait -PassThru
     Write-Host "SudoVDA install.bat exited $($p.ExitCode)"
 }
-# Match on the vendor-declared hardware ID, not a ROOT\DISPLAY\* instance-ID
-# wildcard: an instance ID only encodes the INF's enumerator string (e.g.
-# ROOT\DISPLAY\0003) and would also match an unrelated root-enumerated
-# display device. From SudoVDA.inf: %DeviceName%=SudoVDA_Install,
-# Root\SudoMaker\SudoVDA - keep this exact, do not loosen it back to a wildcard.
-$vda = Get-PnpDevice -Class Display -PresentOnly -ErrorAction SilentlyContinue |
-       Where-Object {
-           $hwids = (Get-PnpDeviceProperty -InstanceId $_.InstanceId `
-                                           -KeyName 'DEVPKEY_Device_HardwareIds' `
-                                           -ErrorAction SilentlyContinue).Data
-           $hwids -contains 'Root\SudoMaker\SudoVDA'
-       } | Select-Object -First 1
-if (-not $vda -or $vda.Status -ne 'OK') {
-    throw 'no working SudoVDA device (hardware ID Root\SudoMaker\SudoVDA): SudoVDA did not install'
-}
-Write-Host "SudoVDA OK: $($vda.InstanceId)"
+# --- Driver verification: SudoVDA (virtual display, fatal if missing) and
+# ViGEmBus (virtual gamepad, warns and continues - see
+# provision\assets\apollo-drivers.ps1 for why). Split out to keep this file
+# under 200 lines, same reasoning as the junction split below.
+. (Join-Path $PayloadRoot 'provision\assets\apollo-drivers.ps1')
+Test-ApolloDrivers
 
 $config = Join-Path $root 'config'
 

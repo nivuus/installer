@@ -1,10 +1,21 @@
 """Assembly and verification of the offline /nivuus payload.
 
-Everything the guest will ever need must be here: provisioning runs with no
-network at all. A missing binary fails the build, never the install.
+Everything the guest will ever need must be here: provisioning runs offline.
+A missing binary fails the build, never the install.
+
+ONE deliberate exception, and only when retrogaming is enabled: 32-retro.ps1
+runs `retro install`, which downloads the emulators from their vendors. They
+are gigabytes, they change on their own schedule, and freezing them into the
+image would mean rebuilding it to refresh one of them - while the install
+itself is idempotent and replayable. What still travels offline is everything
+that install NEEDS: the interpreter, 7zr.exe and the whole wheel closure. The
+emulator archives are pinned by sha256 in the package's manifest, so the worst
+case there is a named failure, never a silent substitution - and 32-retro.ps1
+records that failure on the persistent volume rather than only in the log.
 """
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,14 +59,73 @@ REQUIRED_BINARIES = [
 ]
 
 
-def missing_binaries(drivers_dir: Path) -> list[str]:
-    """Return a human-readable list of the offline binaries not provided."""
+# The one subdirectory of drivers/ that exists only for retrogaming. Named
+# once, because plan_payload() drops it BY THAT NAME when the option is off.
+RETRO_DIRNAME = "retro"
+_WHEELS = f"{RETRO_DIRNAME}/wheels"
+
+# Retrogaming rides in drivers/retro/, fetched only by `fetch_payload.py
+# --retro`. The wheels are named one by one rather than checked as "the
+# directory is not empty": a `pip download` that silently resolved no
+# dependency would leave a wheels/ holding the retro wheel alone, and the
+# guest would then fail offline, deep inside provisioning, on an import.
+RETRO_BINARIES = [
+    (RETRO_DIRNAME, "7zr.exe",
+     "7zr.exe (RetroArch's archives use the BCJ2 filter, which py7zr cannot "
+     "read, and no .zip variant exists - without it no retro emulator installs)"),
+    (RETRO_DIRNAME, "python-*-amd64.exe",
+     "Python installer (LTSC ships none, and the retro package is Python)"),
+    (_WHEELS, "retro-*.whl", "retro package wheel"),
+    (_WHEELS, "py7zr-*.whl", "py7zr wheel (retro dependency)"),
+    (_WHEELS, "vdf-*.whl", "vdf wheel (retro dependency)"),
+    (_WHEELS, "requests-*.whl", "requests wheel (retro dependency)"),
+]
+
+
+def missing_binaries(drivers_dir: Path, retro: bool = False) -> list[str]:
+    """Return a human-readable list of the offline binaries not provided.
+
+    `retro` comes from the rendered toggle (see retro_enabled), never from
+    the directory's own presence: asking "is drivers/retro/ there?" would
+    read a fetch that failed halfway as "retrogaming was not wanted", the one
+    confusion this whole option is written to avoid.
+    """
     missing = []
-    for subdir, pattern, what in REQUIRED_BINARIES:
+    required = REQUIRED_BINARIES + (RETRO_BINARIES if retro else [])
+    for subdir, pattern, what in required:
         where = drivers_dir.joinpath(*subdir.split("/"))
         if not list(where.glob(pattern)):
             missing.append(f"{what} ({pattern}) in {where}")
     return missing
+
+
+def retro_enabled(config_dir: Path) -> bool:
+    """Read the retrogaming toggle this build rendered for the guest.
+
+    What the payload must CARRY follows the very file the guest will READ:
+    32-retro.ps1 decides what to install from config/retro.psd1, so the
+    build requires exactly what that same file promises. Threading a second
+    flag down from the command line would create two places to keep in sync,
+    and their divergence would only surface an hour into provisioning, on a
+    machine with no screen - a payload claiming Enabled = $true with no
+    drivers/retro/ in it.
+
+    A toggle that says neither is a hard error, never a silent "off": that
+    is the same confusion (absent vs. explicitly disabled) the file exists
+    to prevent.
+    """
+    path = config_dir / "retro.psd1"
+    if not path.is_file():
+        raise PayloadError(f"missing the retrogaming toggle: {path}")
+    text = path.read_text()
+    if re.search(r"Enabled\s*=\s*\$true", text):
+        return True
+    if re.search(r"Enabled\s*=\s*\$false", text):
+        return False
+    raise PayloadError(
+        f"{path} carries no 'Enabled = $true' nor 'Enabled = $false': the "
+        "retrogaming state cannot be guessed, and guessing 'off' would "
+        "silently drop the feature from a build that asked for it")
 
 
 def _walk(src_dir: Path, prefix: str) -> list[tuple[Path, str]]:
@@ -73,10 +143,22 @@ def _walk(src_dir: Path, prefix: str) -> list[tuple[Path, str]]:
 
 
 def plan_payload(sources: PayloadSources) -> list[tuple[Path, str]]:
-    """Map each source file to its destination path relative to /nivuus."""
+    """Map each source file to its destination path relative to /nivuus.
+
+    drivers/retro/ is dropped when the toggle says retrogaming is off: the
+    drivers directory is a persistent working tree, so an earlier
+    `fetch_payload.py --retro` leaves ~30 MB behind that a later build with
+    the option unchecked would otherwise still ship - the very cost the
+    option exists to avoid, and a guest carrying an interpreter and a
+    wheelhouse it is told never to open.
+    """
+    retro = (retro_enabled(sources.config_dir)
+             if sources.config_dir is not None else False)
+    drivers = [(src, rel) for src, rel in _walk(sources.drivers_dir, "drivers")
+               if retro or not rel.startswith(f"drivers/{RETRO_DIRNAME}/")]
     entries = (_walk(sources.provision_dir, "provision")
                + _walk(sources.probe_dir, "probe")
-               + _walk(sources.drivers_dir, "drivers"))
+               + drivers)
     if sources.config_dir is not None:
         entries += _walk(sources.config_dir, "config")
     if sources.assets_dir is not None:
@@ -116,7 +198,12 @@ def stage_payload(dest_root: Path, sources: PayloadSources, marker: str) -> None
         raise PayloadError(f"dest_root cannot be a source directory: {dest_root}")
     if dest_resolved.parent == dest_resolved or not dest_resolved.name:
         raise PayloadError(f"dest_root cannot be filesystem root: {dest_root}")
-    missing = missing_binaries(sources.drivers_dir)
+    # The rendered toggle decides what this payload must contain (see
+    # retro_enabled). No config_dir at all is a caller that renders no
+    # configuration, therefore no retrogaming either.
+    retro = (retro_enabled(sources.config_dir)
+             if sources.config_dir is not None else False)
+    missing = missing_binaries(sources.drivers_dir, retro=retro)
     if missing:
         error_msg = ("offline payload incomplete, refusing to build:\n  - "
                      + "\n  - ".join(missing))
@@ -124,6 +211,17 @@ def stage_payload(dest_root: Path, sources: PayloadSources, marker: str) -> None
             error_msg += (
                 "\n\nagent.exe must be extracted from the current Windows VM "
                 "BEFORE it is wiped - no machine can rebuild it afterwards."
+            )
+        if retro:
+            # Name the command, the way every guest-side message here does: a
+            # build that stops at "7zr.exe is missing" without saying how to
+            # get it sends the owner reading source at the one moment they
+            # just wanted their image.
+            error_msg += (
+                "\n\nconfig/retro.psd1 says Enabled = $true, so the retro "
+                "artefacts above are required. Fetch them with:\n"
+                f"  python3 fetch_payload.py --drivers-dir {sources.drivers_dir}"
+                " --retro"
             )
         raise PayloadError(error_msg)
     if dest_root.exists():
@@ -147,17 +245,26 @@ def verify_staged(dest_root: Path) -> None:
         "provision/assets/steam-launch.ps1",
         "provision/assets/apollo-junction.ps1",
         "provision/assets/steam-shell.ps1",
+        # Dot-sources par 32-retro.ps1 AVANT qu'elle lise le basculement, donc
+        # requis meme sans retrogaming: absents, l'etape meurt au lieu de dire
+        # posement que l'option n'est pas cochee.
+        "provision/assets/retro-status.ps1",
+        "provision/assets/retro-7zr.ps1",
         "assets/wallpaper.png",
         "probe/advanced-color.ps1",
         "config/sunshine.conf",
         "config/apps.json",
         "config/secrets.psd1",
+        "config/retro.psd1",
     ]
     for rel in required:
         path = dest_root / rel
         if not path.is_file() or path.stat().st_size == 0:
             raise PayloadError(f"staged payload is missing or empty: {rel}")
-    missing = missing_binaries(dest_root / "drivers")
+    # Required above, so it is there: the staged toggle is the same one the
+    # guest will read, and it alone says whether drivers/retro/ is required.
+    missing = missing_binaries(dest_root / "drivers",
+                               retro=retro_enabled(dest_root / "config"))
     if missing:
         raise PayloadError(
             "staged payload is incomplete:\n  - "

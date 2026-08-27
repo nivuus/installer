@@ -15,7 +15,7 @@ PROVISION = GUEST / "provision"
 PROBE = GUEST / "probe"
 
 STAGES = ["00-bootstrap.ps1", "10-nvidia.ps1", "15-virtio.ps1", "20-disk.ps1",
-          "25-apollo.ps1", "30-steam.ps1", "35-shares.ps1",
+          "25-apollo.ps1", "30-steam.ps1", "32-retro.ps1", "35-shares.ps1",
           "40-agent.ps1", "45-debloat.ps1", "50-power.ps1",
           "55-updates.ps1", "99-marker.ps1"]
 
@@ -25,6 +25,21 @@ failures = []
 def check(label, got, want):
     if got != want:
         failures.append(f"{label}: got {got!r}, want {want!r}")
+
+
+def code_only(text):
+    """Strip PowerShell comments, block ones included.
+
+    _shell_code (below, pre-existing) only drops lines that START with '#'
+    or '<#', which leaves every interior line of a <# ... #> block comment
+    counted as "code" - a docstring paragraph can therefore satisfy a check
+    meant to verify actual behaviour. This strips the whole <# ... #> span
+    first (DOTALL, non-greedy: this repo never nests block comments), then
+    drops single-line '#' comments the same way.
+    """
+    without_blocks = re.sub(r"<#.*?#>", "", text, flags=re.S)
+    return "\n".join(ln for ln in without_blocks.splitlines()
+                      if ln.strip() and not ln.lstrip().startswith("#"))
 
 
 for name in STAGES + ["run-all.ps1"]:
@@ -217,6 +232,58 @@ check("Apollo install location is read, not assumed",
 check("Apollo runs the bundled SudoVDA installer (certificate trust delegated to it)",
       "install.bat" in apollo_stage, True)
 
+# Task 1 (sub-project C2): 25-apollo.ps1 verified SudoVDA scrupulously by
+# hardware ID and said nothing about ViGEmBus, Apollo's virtual gamepad
+# driver. Its absence is silent by construction - image and sound work, the
+# pad just does nothing - and it is unconditional: it has nothing to do with
+# retrogaming, it is what makes ANY gamepad passed through Moonlight work at
+# all. The two device checks were split into their own helper (same 200-line
+# reason as the junction above) and are verified there.
+apollo_drivers = texts["apollo-drivers.ps1"]
+# Code with comments stripped: the mechanism checks below must bite on what
+# actually runs, not on a hardware-ID string that could just as well be
+# sitting in a comment or a Write-Host message while the real lookup was
+# swapped for something else (e.g. Get-Service).
+apollo_drivers_code = "\n".join(
+    ln for ln in apollo_drivers.splitlines()
+    if ln.strip() and not ln.lstrip().startswith("#"))
+check("25-apollo.ps1 dot-sources the driver-verification helper",
+      "apollo-drivers.ps1" in apollo_stage, True)
+check("driver helper still checks SudoVDA by its precise hardware ID",
+      "Root\\SudoMaker\\SudoVDA" in apollo_drivers, True)
+check("driver helper still treats a missing SudoVDA as fatal",
+      "throw 'no working SudoVDA device" in apollo_drivers, True)
+# The historical Root\ViGEmBus ID was abandoned upstream in 2018 (renamed to
+# Nefarius\ViGEmBus\Gen1 alongside the vendor's own rename); a check still
+# aimed at the old ID would never match a real install and would warn on
+# every single provisioning run, healthy or not - the exact "noise teaches
+# the operator to ignore it" trap this file already warns about elsewhere.
+check("driver helper checks ViGEmBus by its modern vendor hardware ID",
+      "Nefarius\\ViGEmBus\\Gen1" in apollo_drivers, True)
+check("driver helper does not still look for the abandoned pre-2018 ID",
+      "Root\\ViGEmBus'" in apollo_drivers, False)
+# Mechanism check, not a string search: the ViGEmBus lookup must actually go
+# through the same hardware-ID function as SudoVDA, on code lines only. A
+# mutation that swapped the lookup for a Get-Service call while leaving the
+# surrounding comments and warning text untouched must fail these two.
+check("ViGEmBus is resolved via the shared hardware-ID lookup",
+      "Get-PnpDeviceByHardwareId -HardwareId 'Nefarius\\ViGEmBus\\Gen1'"
+      in apollo_drivers_code, True)
+check("driver helper never falls back to a service-name check",
+      "Get-Service" in apollo_drivers_code, False)
+check("driver helper names the consequence of a missing ViGEmBus",
+      "no gamepad will work over Moonlight" in apollo_drivers, True)
+# Deliberate asymmetry with SudoVDA: a missing display leaves nothing to
+# diagnose from, so that stays fatal. A missing ViGEmBus still leaves image,
+# sound and WinRM reachable, so the stage warns instead of throwing - see the
+# reasoning written into apollo-drivers.ps1 itself.
+check("a missing ViGEmBus warns instead of throwing",
+      "WARNING: no working ViGEmBus device" in apollo_drivers, True)
+check("a missing ViGEmBus does not abort the stage",
+      "throw" in apollo_drivers_code.rsplit(
+          "Get-PnpDeviceByHardwareId -HardwareId 'Nefarius\\ViGEmBus\\Gen1'", 1)[-1],
+      False)
+
 # FIX 11 (final review): cross-check the literals that were only recoupled
 # by convention until now - the same guard the PROVISION_VERSION check above
 # already applies, extended to the other repeated constants. A future edit
@@ -243,7 +310,7 @@ check(r"D:\Steam: 99-marker.ps1 matches apollo.STEAM_DIR",
       apollo.STEAM_DIR in marker, True)
 
 for name in ["run-all.ps1", "25-apollo.ps1", "40-agent.ps1", "99-marker.ps1",
-             "run-agent.ps1"]:
+             "run-agent.ps1", "steam-launch.ps1", "steam-shell.ps1"]:
     check(rf"C:\nivuus\state: {name} uses the canonical state directory",
           "C:\\nivuus\\state" in texts[name], True)
 
@@ -391,6 +458,115 @@ check("steam-launch.ps1 demarre bien Steam",
 # qu un ecran vide, donc on lance quand meme passe le delai.
 check("l attente est bornee", "WaitSeconds = 45" in _launch, True)
 
+# Task 2 (sub-project C2) : steam.hold. La synchronisation de bibliotheque
+# (hote) arrete Steam pour reecrire shortcuts.vdf, que Steam re-ecrit lui-meme
+# a sa fermeture - sans garde, la synchro reussit sans rien produire, par
+# intermittence, des qu une session redemarre Steam pendant l ecriture.
+#
+# Le shell de session (steam-shell.ps1) ne lance plus Steam depuis le
+# 2026-08-26 (voir les checks plus bas) : c est steam-launch.ps1, l entree
+# « detached » qu Apollo invoque a chaque nouvelle session, qui demarre
+# reellement Steam - et donc le seul endroit ou une garde a quelque chose a
+# empecher. La reintroduire dans le shell rouvrirait exactement les deux bugs
+# que son en-tete documente (rendu logiciel avant l ecran virtuel, et Steam
+# qui se relance quand on le quitte).
+#
+# Tout ce qui suit lit le code, jamais le docstring (code_only, defini plus
+# haut) : le docstring de ce fichier parle deja de steam.hold, LastWriteTime
+# et 300 en toutes lettres pour expliquer le pourquoi, et un check qui lirait
+# le texte brut resterait vert meme si le comportement decrit disparaissait du
+# code.
+_launch_code = code_only(_launch)
+check("steam-launch.ps1 connait le sentinel steam.hold",
+      "steam.hold" in _launch_code, True)
+check("steam-launch.ps1 definit Test-SteamHold plutot que de disperser le controle",
+      "function Test-SteamHold" in _launch_code, True)
+# TOCTOU (revue) : Test-Path puis Get-Item laisse une fenetre ou l hote peut
+# retirer le sentinel entre les deux. Get-Item seul, avec -ErrorAction
+# SilentlyContinue, rend le meme $null que le fichier soit absent ou parti
+# entre-temps - une seule question, jamais un horodatage lu sur du vide.
+check("steam-launch.ps1 lit le sentinel par un Get-Item unique (pas de Test-Path puis Get-Item)",
+      "Get-Item -Path $HoldFile -ErrorAction SilentlyContinue" in _launch_code, True)
+check("steam-launch.ps1 ne teste plus l existence separement avant de lire l horodatage",
+      "Test-Path $HoldFile" in _launch_code, False)
+# L age doit venir de l horodatage du FICHIER, jamais d une variable interne :
+# ce script est un nouveau processus a chaque invocation, sans etat persistant
+# entre deux sessions - une minuterie en memoire repartirait de zero a chaque
+# lancement, ne garantissant jamais l expiration.
+check("steam-launch.ps1 lit l age du sentinel sur son horodatage de fichier",
+      "LastWriteTime" in _launch_code, True)
+check("steam-launch.ps1 fait expirer le sentinel au bout de cinq minutes",
+      "$HoldMaxAgeSeconds = 300" in _launch_code, True)
+
+# La fonction elle-meme, isolee du reste du fichier (entre sa signature et
+# l appel qui la termine) : c est ici, et non a l echelle du fichier entier,
+# qu il faut verifier l assemblage - une lecture a l echelle du fichier
+# laisserait passer un retour $true retire (revue, CRITIQUE 1) ou un -lt
+# invertit en -gt (revue, CRITIQUE 2), les deux rendant la garde decorative
+# tout en laissant chaque "piece" (steam.hold, LastWriteTime, 300) presente.
+_fn_start = _launch_code.find("function Test-SteamHold")
+_fn_end = _launch_code.find('Write-Log "--- lancement demande')
+check("la fonction Test-SteamHold est bien localisee dans le fichier",
+      -1 not in (_fn_start, _fn_end) and _fn_start < _fn_end, True)
+_fn_body = _launch_code[_fn_start:_fn_end]
+# Mutation testee (CRITIQUE 2) : inverser -lt en -gt. Le texte exact
+# "-lt $HoldMaxAgeSeconds" disparait alors du corps de la fonction, et ce
+# check a lui seul le detecte deja.
+check("la retenue exige un age INFERIEUR au maximum, jamais l inverse (-lt, pas -gt)",
+      "-lt $HoldMaxAgeSeconds" in _fn_body, True)
+_after_lt = _fn_body[_fn_body.find("-lt $HoldMaxAgeSeconds"):] if "-lt $HoldMaxAgeSeconds" in _fn_body else ""
+# Mutation testee (CRITIQUE 1) : retirer "return $true" de la branche active
+# (la fonction retomberait alors systematiquement sur "return $false" plus
+# bas, et Test-SteamHold ne dirait plus jamais vrai - garde purement
+# decorative a chacun de ses trois points d appel).
+check("le sentinel frais (age < maximum) fait retourner $true depuis Test-SteamHold",
+      "return $true" in _after_lt, True)
+# Et ce $true doit preceder le $false de la branche perimee, pas l inverse -
+# sinon rien ne garantit qu il s agit bien de LA branche active.
+check("le $true de la branche active precede le $false de la branche perimee",
+      "return $true" in _after_lt and "return $false" in _after_lt and
+      _after_lt.find("return $true") < _after_lt.find("return $false"), True)
+
+# La propriete qui compte le plus : la garde ne doit RIEN casser du
+# comportement normal. En l absence de sentinel (ou perime), Steam doit
+# toujours etre lance - sans quoi la garde aurait cache un vrai defaut derriere
+# un defaut different.
+check("steam-launch.ps1 demarre toujours Steam quand le sentinel est absent ou perime",
+      "Start-Process -FilePath $SteamExe" in _launch_code, True)
+
+# IMPORTANT 3 (revue) : un controle unique tout en haut laisse une fenetre de
+# $WaitSeconds (45 s) entre "sentinel absent" et le lancement reel - l hote
+# peut poser le sentinel pendant cette attente, et Steam demarrerait quand
+# meme, en plein milieu de l ecriture. Le controle doit donc etre repete a
+# CHACUN des trois points ou ce script peut faire demarrer ou reagir avec
+# Steam, pas seulement au tout debut.
+_launch_lines = [ln.strip() for ln in _launch_code.splitlines() if ln.strip()]
+
+
+def line_index(lines, needle, start=0):
+    for i in range(start, len(lines)):
+        if needle in lines[i]:
+            return i
+    return -1
+
+
+_idx_wait = line_index(_launch_lines, "$deadline = (Get-Date).AddSeconds($WaitSeconds)")
+_idx_bigpicture_uri = line_index(_launch_lines, "Start-Process 'steam://open/bigpicture'")
+_idx_final_bigpicture = line_index(_launch_lines, "Start-Process -FilePath $SteamExe -ArgumentList")
+_idx_final_default = line_index(_launch_lines, "else { Start-Process -FilePath $SteamExe }")
+_guard = "if (Test-SteamHold) { return }"
+check("tous les anchors necessaires a ces controles ont ete localises",
+      -1 not in (_idx_wait, _idx_bigpicture_uri, _idx_final_bigpicture, _idx_final_default), True)
+_idx_first_guard = line_index(_launch_lines, _guard)
+check("un premier controle precede l attente d affichage (evite d attendre 45 s pour rien)",
+      _idx_first_guard != -1 and _idx_wait != -1 and _idx_first_guard < _idx_wait, True)
+check("un controle protege directement l envoi de steam://open/bigpicture a un Steam deja vivant",
+      _idx_bigpicture_uri > 0 and _launch_lines[_idx_bigpicture_uri - 1] == _guard, True)
+check("un dernier controle precede immediatement le lancement final de Steam (mode Big Picture)",
+      _idx_final_bigpicture > 0 and _launch_lines[_idx_final_bigpicture - 1] == _guard, True)
+check("ce meme dernier controle couvre aussi la branche par defaut (Desktop)",
+      _idx_final_default == _idx_final_bigpicture + 1, True)
+
 # Les lecteurs optiques s emparent des premieres lettres libres et se posent
 # exactement la ou les partages doivent aller : mesure le 2026-08-26, les deux
 # media d installation tenaient E: et F:. L etage doit les deplacer AVANT.
@@ -429,6 +605,44 @@ check("le fond ne passe jamais devant un jeu",
 check("l habillage ne peut pas empecher Steam de demarrer",
       "wallpaper not shown" in _shell, True)
 
+# Task 2 (sub-project C2) : le shell ne pose ni ne consomme le sentinel
+# steam.hold (c est steam-launch.ps1 qui empeche le relancement, voir plus
+# haut), mais c est lui qui possede l ecran - il doit dire au proprietaire que
+# la bibliotheque se met a jour, faute de quoi un ecran fige sans Steam se lit
+# comme une panne et quelqu un finit par redemarrer la machine en plein milieu
+# d une ecriture.
+#
+# code_only (pas _shell brut, pas meme _shell_code du check plus haut, qui ne
+# retire que les lignes DEBUTANT par # ou <# et laisse donc passer tout le
+# corps du docstring) : le docstring de ce fichier decrit deja steam.hold,
+# son expiration a cinq minutes et parle de "bibliotheque" en toutes lettres
+# (revue, IMPORTANT 4) - un check lu sur le texte brut resterait vert meme si
+# le label et son affectation disparaissaient entierement du code.
+_shell_code2 = code_only(_shell)
+check("le shell lit le meme sentinel steam.hold que steam-launch.ps1",
+      "steam.hold" in _shell_code2, True)
+check("le shell definit lui aussi Test-SteamHold (meme protection TOCTOU que steam-launch.ps1)",
+      "function Test-SteamHold" in _shell_code2, True)
+check("le shell lit le sentinel par un Get-Item unique (pas de Test-Path puis Get-Item)",
+      "Get-Item -Path $HoldFile -ErrorAction SilentlyContinue" in _shell_code2, True)
+# Meme regle d expiration que steam-launch.ps1, sur le meme horodatage de
+# fichier - jamais une minuterie a lui, puisque AutoRestartShell peut relancer
+# ce script pendant la retenue elle-meme.
+check("le shell fait aussi expirer le sentinel au bout de cinq minutes, sur l horodatage du fichier",
+      "LastWriteTime" in _shell_code2 and "$HoldMaxAgeSeconds = 300" in _shell_code2, True)
+check("le shell affiche un message pendant la retenue (dans le CODE, pas seulement le docstring)",
+      "bibliotheque" in _shell_code2.lower(), True)
+# Le message doit rester l EXCEPTION : invisible par defaut...
+check("le message de retenue reste cache hors retenue",
+      "$holdLabel.Visible = $false" in _shell_code2, True)
+# ... et bascule reellement selon Test-SteamHold : forcer $holdLabel.Visible a
+# $false en permanence (revue, IMPORTANT 5 - l exigence "le proprietaire doit
+# voir ce qui se passe" resterait alors lettre morte) laisserait le check
+# ci-dessus au vert, puisqu il ne regarde que l etat par defaut. Celui-ci
+# verifie l affectation qui le fait VARIER, dans la boucle.
+check("la visibilite du message suit Test-SteamHold (pas figee sur sa valeur par defaut)",
+      "$holdLabel.Visible = (Test-SteamHold)" in _shell_code2, True)
+
 # New-Item -Force sur une cle de registre EXISTANTE ne cree pas : il SUPPRIME
 # l arbre puis le recree, et echoue sur « Cannot delete a subkey tree ». Le
 # 2026-08-26 l etage d epuration est mort dessus apres avoir desactive dix
@@ -459,6 +673,280 @@ check("00-bootstrap.ps1 ne referme pas la regle WinRM",
       any("Disable-NetFirewallRule" in ln for ln in _code), False)
 check("00-bootstrap.ps1 relit la regle au lieu de croire Enable-PSRemoting",
       "stayed disabled" in _boot, True)
+
+# --- Tache 4 (sous-projet C2) : 32-retro.ps1, l etape de retrogaming.
+#
+# Tout ce qui suit lit le CODE SEUL (code_only) : le docstring de cette etape
+# explique deja 7zr, le BCJ2, les 1,5 Gio et l absence de « retro sync » en
+# toutes lettres, et un controle lu sur le texte brut resterait vert alors
+# meme que la mecanique aurait disparu - le motif attrape quatre fois sur ce
+# seul sous-projet.
+_retro = (PROVISION / "32-retro.ps1").read_text(encoding="utf-8")
+_retro_code = code_only(_retro)
+_retro_lines = [ln.strip() for ln in _retro_code.splitlines() if ln.strip()]
+# Deux morceaux de l etape vivent dans provision/assets/, comme apollo-drivers
+# pour l etape 25 : le temoin durable et la mise en place de 7zr. Ils sont
+# dot-sources, donc ils tournent DANS l etape - les controles les suivent la
+# ou le code est parti, ils ne s allegent pas d avoir traverse un fichier.
+_status_ps1 = (PROVISION / "assets" / "retro-status.ps1").read_text(encoding="utf-8")
+_status_code = code_only(_status_ps1)
+_7zr_code = code_only((PROVISION / "assets" / "retro-7zr.ps1").read_text(encoding="utf-8"))
+for _asset in ("retro-status.ps1", "retro-7zr.ps1"):
+    check(f"32-retro.ps1 dot-source assets\\{_asset} (dans le code)",
+          f"assets\\{_asset}')" in _retro_code, True)
+
+# Le nom du dossier de pilotes retrogaming : nomme une fois cote Python
+# (payload.RETRO_DIRNAME, deja epingle a fetch_payload.RETRO_DIRNAME par
+# test_windows_guest_fetch_payload.py), mais recopie ici en litteral
+# PowerShell plutot qu importe - Windows ne lit pas payload.py. Un renommage
+# d un seul cote n est detecte par rien : sur une console ou la case EST
+# cochee, l etape leve alors une erreur bruyante qui accuse la charge utile
+# d avoir ete construite sans --retro (voir le message "aucun installateur
+# Python dans $PayloadRetro" plus bas), alors que le vrai probleme est ce
+# desaccord de nom entre les deux cotes.
+check("32-retro.ps1 cherche les pilotes retrogaming au nom que Python leur donne",
+      f"'drivers\\{payload.RETRO_DIRNAME}'" in _retro_code, True)
+
+# L etape reste dans la liste MEME quand l option n est pas cochee : une etape
+# absente ne laisse aucune trace. La position se lit sur le code de
+# run-all.ps1, pas sur son texte : le commentaire qui justifie l insertion
+# nomme lui aussi le fichier, et satisferait un find() sur le texte brut.
+_runall_code = code_only(runall)
+check("run-all lance 32-retro.ps1 (dans le code, pas seulement en commentaire)",
+      "'32-retro.ps1'" in _runall_code, True)
+check("32-retro.ps1 s insere entre Steam (30) et les partages (35)",
+      _runall_code.find("'30-steam.ps1'") < _runall_code.find("'32-retro.ps1'")
+      < _runall_code.find("'35-shares.ps1'"), True)
+
+
+def _first_line_with(needle, start=0):
+    for i in range(start, len(_retro_lines)):
+        if needle in _retro_lines[i]:
+            return i
+    return -1
+
+
+# 1. Le basculement. L etape lit config\retro.psd1, le fichier que build.py
+# rend DANS TOUS LES CAS - et son absence n est pas « desactive » mais « charge
+# utile anterieure a l option », deux etats qu elle ne doit pas confondre.
+check("32-retro.ps1 lit le basculement rendu par build.py",
+      "Import-PowerShellDataFile" in _retro_code
+      and "config\\retro.psd1" in _retro_code, True)
+_idx_absent = _first_line_with("if (-not (Test-Path $toggle))")
+_idx_read = _first_line_with("Import-PowerShellDataFile")
+_absent_block = _retro_lines[_idx_absent:_idx_read]
+check("la garde « basculement absent » est bien localisee",
+      _idx_absent >= 0 and _idx_read > _idx_absent, True)
+# Le message seul ne prouve rien : remplacer le throw par un Write-Host suivi
+# d un return laissait ce controle vert, alors que c est l UNIQUE invariant
+# pour lequel toute la distinction « absent != desactive » existe.
+check("un basculement absent LEVE (le throw, pas seulement son texte)",
+      any(ln.startswith("throw") for ln in _absent_block), True)
+check("... et ne sort jamais en succes a la place",
+      any("return" in ln or "Write-Host" in ln for ln in _absent_block), False)
+check("la levee dit pourquoi l absence n est pas un refus",
+      "$toggle est absent" in _retro_code, True)
+
+# 2. Option non cochee : l etape DIT pourquoi elle s arrete, puis sort en
+# succes. Mutations couvertes : retirer le return (l etape installerait tout
+# malgre le refus), et retirer le message (elle sortirait muette, ce que le
+# proprietaire ne pourrait pas distinguer d une etape jamais executee).
+_idx_guard = _first_line_with("if (-not $retro.Enabled) {")
+_idx_msg = _first_line_with("retrogaming desactive", _idx_guard if _idx_guard >= 0 else 0)
+_idx_return = _first_line_with("return", _idx_guard if _idx_guard >= 0 else 0)
+# Install-Retro7zr remplace le Copy-Item parti dans l asset : c est la meme
+# action, appelee depuis ici, et elle doit rester derriere les memes gardes.
+_actions = ["Start-Process", "pip install", "$retroExe install",
+            "Install-Retro7zr", "New-Item -ItemType Directory"]
+_idx_actions = [_first_line_with(a) for a in _actions]
+check("la garde « option non cochee » est bien localisee", _idx_guard >= 0, True)
+check("toutes les actions d installation ont ete localisees",
+      all(i >= 0 for i in _idx_actions), True)
+check("la garde ecrit POURQUOI elle s arrete (dans le code, pas le docstring)",
+      _idx_msg > _idx_guard, True)
+check("la garde sort de l etape (return), au lieu de continuer",
+      _idx_return > _idx_guard, True)
+check("aucune installation n a lieu avant cette sortie",
+      all(i > _idx_return for i in _idx_actions), True)
+check("l etape sort en SUCCES quand l option n est pas cochee (return, pas throw)",
+      "throw" in "\n".join(_retro_lines[_idx_guard:_idx_return + 1]), False)
+
+# 3. Le volume persistant, VERIFIE et non suppose : c est le marqueur que
+# l etape 20 pose, pas la seule existence de la lettre D:.
+check("32-retro.ps1 verifie le volume prepare par l etape 20",
+      "D:\\state\\NIVUUS-DATA.id" in _retro_code, True)
+
+# 4. L espace temporaire. Prerequis MESURE : ~1,3 Gio transitent par %TEMP%,
+# sur la partition systeme qui n est pas celle des jeux. Mutations couvertes :
+# inverser la comparaison (-lt en -gt, soit refuser les machines qui ont la
+# place), et deplacer la verification apres les installations qu elle protege.
+check("32-retro.ps1 exige 1,5 Gio dans le dossier temporaire",
+      "$MinTempFreeGiB = 1.5" in _retro_code, True)
+check("l espace libre est LU sur le lecteur du dossier temporaire",
+      "[System.IO.Path]::GetTempPath()" in _retro_code
+      and "Get-PSDrive" in _retro_code, True)
+check("la garde exige un espace SUPERIEUR au minimum, jamais l inverse",
+      "if ($tempDrive.Free -lt ($MinTempFreeGiB * 1GB))" in _retro_code, True)
+check("le message nomme la partition systeme et le transit mesure",
+      "1,3 Gio" in _retro_code and "SYSTEME" in _retro_code
+      and "PAS le volume des jeux" in _retro_code, True)
+_idx_temp = _first_line_with("if ($tempDrive.Free -lt ($MinTempFreeGiB * 1GB))")
+check("l espace est verifie AVANT toute installation",
+      _idx_temp >= 0 and all(i > _idx_temp for i in _idx_actions), True)
+
+# 5. 7zr.exe : EXIGENCE, pas commodite. Sans lui, les archives BCJ2 de
+# RetroArch sont inextractibles et la console n a aucun emulateur retro. Le
+# paquet le cherche par shutil.which(), donc ce qui compte n est pas qu il
+# soit copie quelque part mais qu il se RESOLVE par le PATH - y compris pour
+# un « retro install » relance depuis l hote, dans une autre session.
+check("32-retro.ps1 depose 7zr.exe depuis la charge utile",
+      "$sevenZr = Join-Path $PayloadRetro '7zr.exe'" in _7zr_code
+      and "Copy-Item -Path $sevenZr -Destination $BinDir" in _7zr_code, True)
+check("7zr.exe survit a la reconstruction de C: (il va sur le volume persistant)",
+      "$RetroBinDir = 'D:\\Emulation\\bin'" in _retro_code, True)
+check("son dossier entre dans le PATH machine, pas seulement dans ce processus",
+      "[Environment]::SetEnvironmentVariable('Path'" in _7zr_code, True)
+check("le PATH machine est relu au lieu d etre cru",
+      "[Environment]::GetEnvironmentVariable('Path', 'Machine') -notlike"
+      in _7zr_code, True)
+check("la resolution par le PATH est verifiee, pas supposee",
+      "Get-Command '7zr.exe'" in _7zr_code, True)
+check("un 7zr.exe absent de la charge utile leve",
+      "sans 7zr.exe" in _7zr_code, True)
+_idx_7zr = _first_line_with("Install-Retro7zr -PayloadRetro")
+_idx_install = _first_line_with("$retroExe install")
+check("7zr.exe est en place AVANT que les emulateurs s installent",
+      _idx_7zr >= 0 and _idx_install > _idx_7zr, True)
+
+# 6. Le paquet, hors ligne : les roues voyagent dans la charge utile, et le
+# provisionnement ne doit pas dependre de PyPI.
+check("le paquet retro s installe sans index, depuis les roues embarquees",
+      "--no-index" in _retro_code and "--find-links $wheels" in _retro_code, True)
+check("Python vient de la charge utile, jamais du reseau",
+      "python-*-amd64.exe" in _retro_code, True)
+
+# 7. « retro install », et surtout PAS « retro sync » : les partages ne sont
+# montes qu a l etape 35, donc G:\ROMs n existe pas encore et un scan
+# produirait une bibliotheque vide. Le controle porte sur les invocations
+# elles-memes, pas sur le mot « sync » - le dernier message de l etape parle
+# de synchronisation, a juste titre.
+check("32-retro.ps1 installe les emulateurs",
+      "& $retroExe install --emulation-root $EmulationRoot" in _retro_code, True)
+_invocations = [ln for ln in _retro_lines if "$retroExe " in ln]
+check("aucune invocation de retro autre qu install (jamais sync ici)",
+      [ln for ln in _invocations if " sync" in ln], [])
+check("l etape dit d ou viendra la premiere synchronisation",
+      "viendra de l hote" in _retro_code, True)
+# Un emulateur dont l URL est morte (code 1) ne doit pas emporter tout le
+# provisionnement d une console dont le streaming fonctionne - meme arbitrage
+# que ViGEmBus et que les partages non montes. Un manifeste illisible (code 2),
+# lui, ne laisse rien d installe et doit lever.
+check("un echec partiel avertit au lieu de bloquer la console",
+      "elseif ($installExit -eq 1)" in _retro_code
+      and "warning: au moins un emulateur" in _retro_code, True)
+check("l avertissement s ecrit en minuscules, comme ailleurs dans le depot",
+      "WARNING" in _retro_code, False)
+check("un echec total leve",
+      "throw \"retro install a rendu $installExit" in _retro_code, True)
+
+# 8. Le TEMOIN DURABLE. L arbitrage ci-dessus (avertir sans bloquer) laisse
+# declarer le provisionnement complet avec un dossier d emulation partiel : la
+# premiere synchronisation depuis l hote fabriquerait alors une bibliotheque
+# Steam d entrees qui ne demarrent pas, puisque le scan construit les chemins
+# depuis le manifeste sans verifier qu ils existent. L avertissement, lui, ne
+# vit que dans le journal de C:, efface a la reconstruction suivante. Le
+# temoin doit donc etre sur D:, comme le PROVISION.failed de run-all.ps1.
+check("le temoin est ecrit sur le volume PERSISTANT, pas dans le journal de C:",
+      "$RetroStatusFile = 'D:\\state\\retro.status'" in _status_code, True)
+check("le temoin dit quand",
+      "when=$(Get-Date -Format o)" in _status_code, True)
+check("le temoin porte le rapport, donc ce qui a reussi et ce qui a echoue",
+      "'report:') + $Report" in _status_code, True)
+
+# Le temoin doit dire de QUEL passage il parle. D: survit aux reconstructions :
+# sans identifiant, le « status=ok » d une installation ANTERIEURE affirme que
+# tout va bien pour le passage courant, et rien ne permet de le contester. Un
+# temoin perime qui dit « ok » est pire que pas de temoin du tout.
+check("le temoin porte un identifiant de passage",
+      "run=$RetroRunId" in _status_code, True)
+# Sur le fichier lu, pas sur le mot : le contrat inscrit dans le temoin nomme
+# lui aussi provision.started, et il satisferait un « in » sur le texte.
+check("l identifiant vient de l horodatage que run-all pose a chaque passage",
+      "$RetroRunFile = 'C:\\nivuus\\state\\provision.started'" in _status_code
+      and "Get-Content -Path $RetroRunFile" in _status_code, True)
+# Ecrit AVANT tout le reste : c est ce qui empeche un temoin ancien de se
+# faire passer pour recent, puisque le passage courant l ecrase des l entree.
+_idx_started = _first_line_with("Write-RetroStatus 'started'")
+_idx_volume = _first_line_with("D:\\state\\NIVUUS-DATA.id")
+check("le temoin « en cours » est ecrit des l entree dans l etape",
+      _idx_started >= 0 and all(i > _idx_started for i in _idx_actions), True)
+check("... juste apres le volume qui le porte, seul endroit ou l ecrire",
+      _idx_volume >= 0 and _idx_started > _idx_volume, True)
+# Une interruption entre « started » et l installation doit laisser un temoin
+# qui le DIT, plutot que le silence - lequel ne se distingue pas d une etape
+# jamais atteinte.
+check("toute levee ulterieure laisse un temoin qui le dit",
+      "Write-RetroStatus 'interrupted'" in _retro_code
+      and "error=$($_.Exception.Message)" in _retro_code, True)
+_catch = _retro_code[_retro_code.rindex("catch {"):]
+check("le rattrapage releve apres avoir temoigne, il n avale pas l echec",
+      "throw" in _catch, True)
+check("un status precis deja pose n est pas ecrase par le generique",
+      "if ($RetroStatusLast -eq 'started')" in _retro_code, True)
+
+# Le vocabulaire doit nommer la situation reelle : « failed » ne couvrait que
+# le manifeste illisible, et les echecs plus precoces n ecrivaient rien.
+check("chaque issue de l etape laisse un temoin, l option decochee comprise",
+      sorted(set(re.findall(r"Write-RetroStatus '([\w-]+)'", _retro_code))),
+      ["disabled", "interrupted", "manifest-unreadable", "ok", "partial",
+       "started"])
+# Le contrat vit dans le fichier PRODUIT : le lecteur qui l ouvre a la liste
+# des status sous les yeux sans avoir a retrouver le script qui l ecrit.
+check("le contrat est ECRIT dans le temoin, pas seulement declare a cote",
+      "$lines = $RetroStatusHeader + @(" in _status_code, True)
+_header = _status_code[_status_code.find("$RetroStatusHeader"):
+                       _status_code.find("function Write-RetroStatus")]
+for _state in ["started", "disabled", "interrupted", "ok", "partial",
+               "manifest-unreadable"]:
+    check(f"le temoin documente lui-meme son status « {_state} »",
+          _state in _header, True)
+check("le temoin dit lui-meme lequel autorise la synchronisation",
+      'Seul "ok" autorise la synchronisation' in _header, True)
+check("le temoin explique lui-meme a quoi sert run=",
+      "run= identifie le passage" in _header, True)
+# Le rapport doit voyager jusqu au temoin : un temoin qui ne porte que
+# « status=partial » ne dit pas QUEL emulateur manque.
+check("le temoin d un echec partiel embarque le rapport de l installation",
+      "Write-RetroStatus 'partial' $installOutput" in _retro_code, True)
+_idx_status_partial = _first_line_with("Write-RetroStatus 'partial'")
+_idx_warn = _first_line_with("warning: au moins un emulateur")
+check("le temoin est ecrit dans la branche de l echec partiel",
+      _idx_status_partial >= 0 and abs(_idx_warn - _idx_status_partial) <= 2, True)
+
+# 9. Les flux d erreur des outils natifs. pip ecrit A COUP SUR sur stderr
+# l avertissement « installed in ... which is not on PATH » (le PATH machine a
+# change, pas celui de ce processus), et PowerShell 5.1 sous
+# $ErrorActionPreference = 'Stop' peut promouvoir ce flux en erreur
+# terminante : une installation REUSSIE echouerait sur un avertissement.
+for needle, what in [("-m pip install", "pip"), ("$retroExe install", "retro install")]:
+    _lines = [ln for ln in _retro_lines if needle in ln]
+    check(f"{what} redirige son flux d erreur (2>&1)",
+          bool(_lines) and all("2>&1" in ln for ln in _lines), True)
+
+# 10. Un seul installateur Python. Un relevement de version laisse l ANCIEN
+# dans le dossier des pilotes ; « le premier par ordre alphabetique » est
+# justement l ancien, et il s installerait avec les roues de la nouvelle
+# version - un echec sur l invite, bruyant mais tres tardif.
+_idx_multi = _first_line_with("if ($installers.Count -gt 1) {")
+_idx_pick = _first_line_with("$installer = $installers[0]")
+check("l ambiguite est refusee AVANT qu un installateur soit choisi",
+      _idx_multi >= 0 and _idx_pick > _idx_multi, True)
+check("plusieurs installateurs Python levent, jamais ne se departagent",
+      any(ln.startswith("throw")
+          for ln in _retro_lines[_idx_multi:_idx_pick]), True)
+check("aucun choix implicite du premier installateur venu",
+      "Select-Object -First 1" in _retro_code, False)
+
 
 if failures:
     print(f"FAIL ({len(failures)})")

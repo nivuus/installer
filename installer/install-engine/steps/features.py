@@ -3,16 +3,22 @@
 Each feature is self-contained and gated on the wizard's feature list. The KVM/
 VFIO/thermal feature reuses the repo's install.sh (run with computed, non-
 hardcoded kernel params); networking/wifi/firewall render Jinja2 templates from
-the wizard answers; docker/home-assistant deploy the application layer.
+the wizard answers; docker/home-assistant deploy the application layer. retro
+(RetroArch, via the `retro` package) is the odd one out: it installs nothing
+in the chroot - it runs entirely on the Windows guest VM, provisioned
+separately and later by windows-guest/build.py - so its only job here is to
+record the operator's choice durably on the target; see _retro().
 """
 from __future__ import annotations
 
+import json
 import os
 import uuid
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .util import StepError, chroot_run, chroot_stream, write_file
+from common.retro import retro_state_path
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates")
 
@@ -53,6 +59,8 @@ def apply_features(config: dict, target: str, nivuus_dir: str, hw: dict,
         _firewall(config, target, emit)
     if "docker" in features:
         _docker(target, emit)
+    if "retro" in features:
+        _retro(target, features, emit)
     if features & {"home-assistant", "mqtt"}:
         _home_assistant_mqtt(target, nivuus_dir, features, emit)
 
@@ -177,6 +185,49 @@ def _docker(target, emit) -> None:
     chroot_run(target, ["apt-get", "install", "-y", "docker.io",
                         "docker-compose-v2"], check=False)
     chroot_run(target, ["systemctl", "enable", "docker"], check=False)
+
+
+# --------------------------------------------------------------------------- #
+def _retro(target, features, emit) -> None:
+    """Record that retrogaming was requested, on the target filesystem.
+
+    Retro (RetroArch, via the `retro` package) runs entirely on the Windows
+    guest VM, built separately and later by windows-guest/build.py -
+    possibly on this very host, but as a manual step the wizard cannot see
+    or trigger. build.py falls back to reading this file
+    (common.retro.retro_state_path()) when its own --retro flag is not
+    given explicitly, so this marker is the only durable trace of the
+    operator's choice once the installer has moved on. The path itself is
+    defined once, in common/retro.py, and imported by both sides - see
+    that module's docstring for why.
+
+    Called only when "retro" was selected (see apply_features), like every
+    other feature here: an unchecked install writes nothing, exactly as it
+    did before this option existed. That still agrees with build.py, which
+    treats an absent marker as "off" - the unchecked case needs no marker
+    of its own to say so.
+
+    retro depends on the Windows guest VM (the "kvm-vfio" feature); the
+    wizard already refuses that combination at submit time (see
+    webapp/models.py). By the time a config reaches this step, though,
+    partitioning, the base system and the bootloader are already done -
+    raising here would fail an otherwise-complete install over a file
+    nothing reads yet. Warn and record retro as disabled instead: the
+    wizard's own guard is what actually protects the common case.
+    """
+    if "kvm-vfio" not in features:
+        emit.warn(
+            "features", 93,
+            "'retro' was selected without 'kvm-vfio' (the Windows guest VM "
+            "it depends on); recording retrogaming as disabled rather than "
+            "failing an otherwise-complete install")
+        enabled = False
+    else:
+        emit.info("features", 93, "Retrogaming (Windows guest VM): enabled")
+        enabled = True
+    write_file(
+        retro_state_path(target),
+        json.dumps({"enabled": enabled}, indent=2) + "\n")
 
 
 # --------------------------------------------------------------------------- #

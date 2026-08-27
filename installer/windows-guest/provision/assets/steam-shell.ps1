@@ -25,9 +25,33 @@
     sortie ferme la session. Ce script garde le seul role qui reste : etre un
     shell vivant. Sans shell, Winlogon considere la session comme perdue, et
     l ecran noir se voit vraiment sur une machine sans moniteur.
+
+    STEAM.HOLD : la synchronisation de bibliotheque (hote) arrete Steam le
+    temps de reecrire shortcuts.vdf, et c est steam-launch.ps1 - pas ce
+    script, qui ne relance plus rien - qui fait sauter son propre lancement
+    tant que le sentinel tient. Ce script-ci n a pas de geste a annuler : il
+    n a que le fond d ecran a completer, pour que le proprietaire voie POURQUOI
+    l ecran reste sans Steam au lieu d y lire une panne. Un ecran fige sans
+    explication finit redemarre a la main, potentiellement au milieu d une
+    ecriture.
 #>
 $ErrorActionPreference = 'Continue'
 $Wallpaper = 'C:\nivuus\wallpaper.png'
+$HoldFile = 'C:\nivuus\state\steam.hold'
+# Meme duree que cote steam-launch.ps1 : au-dela, le sentinel est perime et le
+# message ne doit plus s afficher, l horodatage du fichier restant seul juge.
+$HoldMaxAgeSeconds = 300
+
+# Get-Item SEUL, jamais Test-Path puis Get-Item : entre les deux, l hote a le
+# temps de retirer le sentinel, et lire l horodatage d un fichier qui vient de
+# disparaitre est exactement la course que ce couple veut eviter (meme geste
+# que steam-launch.ps1).
+function Test-SteamHold {
+    $item = Get-Item -Path $HoldFile -ErrorAction SilentlyContinue
+    if (-not $item) { return $false }
+    $age = (Get-Date) - $item.LastWriteTime
+    return ($age.TotalSeconds -lt $HoldMaxAgeSeconds)
+}
 
 # Le fond est dessine PAR CE SCRIPT, pas par Windows. Sans explorer.exe il n y a
 # pas de bureau, donc pas de papier peint : une image posee dans le registre ne
@@ -48,6 +72,21 @@ try {
         $form.BackgroundImageLayout = 'Zoom'
         $form.ShowInTaskbar = $false
         $form.TopMost = $false
+
+        # Cache derriere le fond, invisible tant que rien n est en retenue : le
+        # sentinel est l exception, pas la norme, et un message qui reste en
+        # permanence deviendrait aussi ignorable qu un ecran fige.
+        $holdLabel = New-Object System.Windows.Forms.Label
+        $holdLabel.Dock = 'Bottom'
+        $holdLabel.Height = 64
+        $holdLabel.TextAlign = 'MiddleCenter'
+        $holdLabel.Font = New-Object System.Drawing.Font('Segoe UI', 14, [System.Drawing.FontStyle]::Bold)
+        $holdLabel.ForeColor = [System.Drawing.Color]::White
+        $holdLabel.BackColor = [System.Drawing.Color]::FromArgb(14, 17, 23)
+        $holdLabel.Text = 'Mise a jour de la bibliotheque Steam en cours...'
+        $holdLabel.Visible = $false
+        $form.Controls.Add($holdLabel)
+
         $form.Show()
         $form.SendToBack()
         [System.Windows.Forms.Application]::DoEvents()
@@ -61,5 +100,16 @@ while ($true) {
     # DoEvents garde la fenetre de fond vivante : une form jamais pompee cesse
     # de se redessiner et Windows la marque « ne repond pas ».
     try { [System.Windows.Forms.Application]::DoEvents() } catch { }
+
+    # Inerte tant que personne ne pose le sentinel : un Test-SteamHold de plus
+    # tous les trois secondes, sur un cycle qui tournait deja. L age vient de
+    # l horodatage du FICHIER et non d une variable de CE process, car ce
+    # shell peut lui-meme redemarrer (AutoRestartShell) pendant la retenue
+    # sans que ca ne la fasse repartir de zero.
+    try {
+        if ($holdLabel) { $holdLabel.Visible = (Test-SteamHold) }
+    }
+    catch { }
+
     Start-Sleep -Seconds 3
 }

@@ -22,12 +22,38 @@
     Le journal existe pour que la prochaine session tranche sans avoir a
     deviner : il enregistre ce que le script a observe et par quelle condition
     il est sorti.
+
+    STEAM.HOLD : la synchronisation de bibliotheque (hote) arrete Steam pour
+    reecrire shortcuts.vdf, que Steam re-ecrit lui-meme a sa fermeture. C est
+    ce script qui remet Steam en route des qu une session Moonlight redemarre
+    - et donc lui, plus que le shell de session (qui ne lance plus Steam
+    depuis le 2026-08-26), qui pouvait ecraser une synchronisation en cours en
+    relancant Steam pendant qu elle ecrit. Un sentinel pose par l hote fait
+    sauter le lancement ; son age vient de l horodatage du FICHIER, pas d une
+    variable de ce processus qui ne survit pas d un appel a l autre, afin de
+    rester correct meme si l hote qui l a pose disparait en route.
+
+    LE CONTROLE EST REPETE A CHAQUE POINT DE LANCEMENT, PAS UNE SEULE FOIS EN
+    HAUT DE SCRIPT. La sequence hote est : poser le sentinel, PUIS arreter
+    Steam, PUIS synchroniser. Un controle unique fait tout en haut laisserait
+    une fenetre allant jusqu a $WaitSeconds (45 s, l attente d affichage) ou
+    le sentinel peut apparaitre APRES que ce script l a deja verifie absent -
+    Steam demarrerait alors en plein milieu de l ecriture, exactement l echec
+    intermittent que ce fichier existe pour supprimer. D ou Test-SteamHold,
+    revalidee juste avant chacun des trois lancements possibles (l attente
+    elle-meme, le steam:// envoye a un Steam deja vivant, et le Start-Process
+    final).
 #>
 param([ValidateSet('Desktop', 'BigPicture')][string]$Mode = 'Desktop')
 
 $ErrorActionPreference = 'Continue'
 $SteamExe = 'D:\Steam\steam.exe'
 $Log = 'C:\nivuus\apollo\steam-launch.log'
+$HoldFile = 'C:\nivuus\state\steam.hold'
+# Une synchronisation qui plante ne doit pas priver la console de Steam
+# indefiniment sans que personne ne le remarque - cette machine n a ni clavier
+# ni ecran physique. Passe ce delai le sentinel est ignore, hote present ou pas.
+$HoldMaxAgeSeconds = 300
 
 # Borne haute VOLONTAIREMENT COURTE. Attendre protege le rendu ; attendre trop
 # reproduit le defaut qu on vient de corriger, ou un prep-cmd retardait chaque
@@ -44,7 +70,26 @@ function Write-Log([string]$Message) {
     try { Add-Content -Path $Log -Value ("{0}  {1}" -f (Get-Date -Format 's'), $Message) } catch { }
 }
 
+# Get-Item SEUL, jamais Test-Path puis Get-Item : entre les deux, l hote a le
+# temps de retirer le sentinel, et lire son horodatage sur un fichier qui
+# vient de disparaitre lancerait une erreur (ou, silencieuse, une duree bidon).
+# Get-Item -ErrorAction SilentlyContinue rend le meme $null que le fichier soit
+# absent ou parti entre-temps : une seule question, une seule reponse.
+function Test-SteamHold {
+    $item = Get-Item -Path $HoldFile -ErrorAction SilentlyContinue
+    if (-not $item) { return $false }
+    $age = (Get-Date) - $item.LastWriteTime
+    if ($age.TotalSeconds -lt $HoldMaxAgeSeconds) {
+        Write-Log ("steam.hold actif depuis {0:N0} s (< {1} s) - bibliotheque en cours de synchronisation, lancement differe" -f $age.TotalSeconds, $HoldMaxAgeSeconds)
+        return $true
+    }
+    Write-Log ("steam.hold perime depuis {0:N0} s (>= {1} s) - ignore" -f $age.TotalSeconds, $HoldMaxAgeSeconds)
+    return $false
+}
+
 Write-Log "--- lancement demande, Mode=$Mode"
+
+if (Test-SteamHold) { return }
 
 # Deux signaux, dont un seul suffit :
 #  - un moniteur WMI apparait : SudoVDA a presente un EDID, donc un affichage
@@ -69,7 +114,11 @@ foreach ($a in Get-Adapters) {
 if (Get-Process -Name 'steam' -ErrorAction SilentlyContinue) {
     # Steam tourne deja (session precedente, ou reprise apres pause). Le
     # protocole steam:// est le seul moyen de lui faire ouvrir Big Picture sans
-    # demarrer une seconde instance.
+    # demarrer une seconde instance - mais l envoyer pendant une retenue reste
+    # une interaction avec un Steam que l hote croit arrete, donc reteste ici
+    # aussi plutot que de supposer que le controle d entree de script suffit
+    # encore, 45 s plus tard.
+    if (Test-SteamHold) { return }
     if ($Mode -eq 'BigPicture') { Start-Process 'steam://open/bigpicture' }
     Write-Log 'Steam tournait deja'
     return
@@ -78,6 +127,7 @@ if (-not (Test-Path $SteamExe)) {
     Write-Log "AUCUN steam.exe a $SteamExe"
     return
 }
+if (Test-SteamHold) { return }
 if ($Mode -eq 'BigPicture') { Start-Process -FilePath $SteamExe -ArgumentList '-bigpicture' }
 else { Start-Process -FilePath $SteamExe }
 Write-Log "Steam demarre ($Mode)"

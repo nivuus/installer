@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 KNOWN_FEATURES = {
     "os-base", "kvm-vfio", "thermal", "networking", "wifi-ap",
     "firewall", "docker", "home-assistant", "mqtt", "gpu-passthrough",
+    "retro",
 }
 
 
@@ -118,4 +119,12 @@ class InstallConfig(BaseModel):
         # os-base is always required.
         if "os-base" not in v:
             v = ["os-base", *v]
+        # retro (RetroArch, via the `retro` package) runs on the Windows
+        # guest VM; checking it without also checking kvm-vfio (the VM
+        # itself) cannot work. Refuse it here, at submit time, rather than
+        # let it surface later as a failed step on a machine with no screen.
+        if "retro" in v and "kvm-vfio" not in v:
+            raise ValueError(
+                "'retro' requires 'kvm-vfio' (the Windows guest VM)"
+            )
         return v
