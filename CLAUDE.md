@@ -122,7 +122,36 @@ touching it:
 
 Activation uses a stamp (`/var/lib/nivuus/packages/<name>.activated`), not a
 self-disabling unit: an interrupted activation must retry at the next boot
-rather than believe it succeeded. Tests: `cd installer && make test-packages`
+rather than believe it succeeded.
+
+**Arming `activate` takes three copies onto the target, and the whole phase is
+dead if any is missed** (it was, on the first cut of this branch, while the
+install still reported success — `systemctl enable` ran with `check=False`).
+`apply_packages()` does all three: it copies
+`configs/systemd/nivuus-package-activate@.service` out of the payload into
+`{target}/etc/systemd/system/`, chmods `activate_cli.py` executable **in
+place** at `/opt/nivuus/installer/packages/` — the unit's `ExecStart` points
+there, *not* at `/usr/local/sbin`, because the script computes its own
+`sys.path` from `__file__` and a copy elsewhere cannot import `common`/`packages` —
+and copies each **selected** package's directory to
+`{target}/opt/nivuus-packages/<name>/` (the live medium's copy is on the LIVE
+root and does not survive the reboot). Enablement is a **direct symlink** into
+`multi-user.target.wants/`, which is precisely what `systemctl enable` does for
+a `WantedBy=multi-user.target` template unit — chosen over shelling into the
+chroot because `systemctl` fails silently in constrained environments (see the
+PID-namespace note below) and a symlink either exists or raises. The target
+also gets `python3-yaml`: `activate_cli.py` re-parses the manifest at first
+boot and nothing else pulls PyYAML in.
+
+**Kernel parameters are validated in `plan_packages`, not in `bootloader`.**
+The allowlist lives in `bootloader.py::grub_defaults`, which runs at step 7 —
+after `partition` has wiped the disk. `plan_packages` now calls it purely for
+its validation, so `vfio-pci.ids=$(x)` is refused while the target is still
+untouched. Same reason the package state file (`etc/nivuus/packages.json`) is
+written **after each package**, not once at the end: a residue that describes
+itself beats a partially applied install with no record.
+
+Tests: `cd installer && make test-packages`
 (9 files). Spec: `docs/superpowers/specs/2026-08-27-decoupage-installer-console-design.md`.
 
 **Build & test:** `cd installer && sudo make build-iso` (needs `live-build`).

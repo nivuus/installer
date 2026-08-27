@@ -2877,16 +2877,17 @@ aucun parametre noyau legitime n en a besoin."
 
 **Files:**
 - Create: `installer/install-engine/steps/packages.py`
-- Create: `installer/packages/activate_cli.py`
+- Create: `installer/packages/activate_cli.py` (mode 755 — l'unité l'exécute directement)
 - Create: `configs/systemd/nivuus-package-activate@.service`
+- Create: `scripts/tests/fixtures/packages/injecteur/` (paramètre noyau shell-injectant)
 - Modify: `installer/install-engine/run.py`
 - Test: `scripts/tests/test_install_engine_packages.py`
 
 **Interfaces:**
-- Consumes: `packages.discovery.discover/eligibility` (**`eligibility`, pas `partition`** : cette étape doit lever sur le premier inéligible en donnant sa raison, là où `partition` se contente de trier — c'est le portail, tâche 10, qui veut le tri), `packages.capabilities.detect_capabilities`, `packages.conflicts.check_conflicts`, `packages.wizard.load_questions/validate_answers`, `packages.manifest.ManifestError`, `packages.runner.run_resolve/run_install/HookError`, `steps.util.chroot_run/write_file/StepError`
+- Consumes: `steps.bootloader.grub_defaults` (appelé dans `plan_packages` **uniquement pour sa validation** : l'allowlist qui protège `/etc/default/grub` vit dans `bootloader.py`, qui tourne à l'étape 7, donc après `partition` — un paramètre shell-injectant doit être refusé avant que le disque soit effacé), `packages.discovery.discover/eligibility` (**`eligibility`, pas `partition`** : cette étape doit lever sur le premier inéligible en donnant sa raison, là où `partition` se contente de trier — c'est le portail, tâche 10, qui veut le tri), `packages.capabilities.detect_capabilities`, `packages.conflicts.check_conflicts`, `packages.wizard.load_questions/validate_answers`, `packages.manifest.ManifestError`, `packages.runner.run_resolve/run_install/HookError`, `steps.util.chroot_run/write_file/StepError`
 - Produces:
   - `plan_packages(config: dict, hw: dict, emit) -> tuple[list[tuple[Manifest, dict, Resolution]], tuple[str, ...]]` — lève `StepError` sur conflit ou refus
-  - `apply_packages(plan, target: str, hw: dict, emit) -> None`
+  - `apply_packages(plan, target: str, nivuus_dir: str, hw: dict, emit) -> None` — `nivuus_dir` est le chemin de la charge utile **vu depuis le chroot** (`/opt/nivuus`, ce que retourne `copy_payload`) : c'est de là que sont copiées l'unité d'activation et le CLI qu'elle lance.
 
 - [ ] **Step 1: Écrire le test qui échoue**
 
@@ -2904,11 +2905,21 @@ it returns is the kernel command line the bootloader step will write.
 apply_packages() then writes: modules, hugepages, apt, the install hook, and
 the activation unit that carries the package into first boot.
 
+The apply_packages assertions below deliberately look at ARTEFACTS UNDER THE
+TARGET, not at calls. chroot_run is faked here, so asserting that a
+`systemctl enable` command was issued proves only that this test's own fake
+was called - it cannot tell an installed system from an empty directory, and
+that is exactly how a branch shipped in which the activate phase could not
+run on any installed machine. What has to exist on the target is checked as
+files: the unit, the enablement symlink, the package directory, the CLI the
+unit's ExecStart names.
+
 Run: python3 scripts/tests/test_install_engine_packages.py
 """
 import json
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 
@@ -3052,6 +3063,22 @@ with tempfile.TemporaryDirectory() as collision_root:
     finally:
         steps_packages.discover = real_discover
 
+# --- kernel parameters are validated before anything is written ------------- #
+# The allowlist guarding /etc/default/grub lives in bootloader.py, which runs
+# at step 7 - after partition() has wiped the disk. A manifest resolving to a
+# parameter carrying shell meaning must therefore be refused HERE, in
+# plan_packages, or the operator meets "Unexpected error" on an already
+# destroyed target.
+check_raises("a shell-injecting kernel parameter is refused while planning",
+             lambda: steps_packages.plan_packages(
+                 {**config, "packages": {"injecteur": {}}}, HW, FakeEmit()),
+             "vfio-pci.ids=$(rm -rf /)")
+
+check_raises("and the refusal says it is a kernel parameter problem",
+             lambda: steps_packages.plan_packages(
+                 {**config, "packages": {"injecteur": {}}}, HW, FakeEmit()),
+             "paramètre noyau refusé")
+
 # --- apply_packages -------------------------------------------------------- #
 calls = []
 
@@ -3063,11 +3090,29 @@ def fake_chroot_run(target, cmd, **kwargs):
     return R()
 
 
+def seed_payload(target: pathlib.Path) -> str:
+    """Reproduce what copy_payload() leaves at /opt/nivuus on the target.
+
+    The real files, not stand-ins: the unit copied onto the target has to be
+    the one in configs/systemd/, and its ExecStart has to name the CLI that
+    actually exists in the payload.
+    """
+    payload = target / "opt" / "nivuus"
+    (payload / "configs" / "systemd").mkdir(parents=True)
+    shutil.copyfile(REPO / "configs/systemd/nivuus-package-activate@.service",
+                    payload / "configs/systemd/nivuus-package-activate@.service")
+    (payload / "installer" / "packages").mkdir(parents=True)
+    shutil.copyfile(REPO / "installer/packages/activate_cli.py",
+                    payload / "installer/packages/activate_cli.py")
+    return "/opt/nivuus"
+
+
 with tempfile.TemporaryDirectory() as tmp:
     steps_packages.chroot_run = fake_chroot_run
-    plan, _ = steps_packages.plan_packages(config, HW, FakeEmit())
-    steps_packages.apply_packages(plan, tmp, HW, FakeEmit())
     target = pathlib.Path(tmp)
+    nivuus_dir = seed_payload(target)
+    plan, _ = steps_packages.plan_packages(config, HW, FakeEmit())
+    steps_packages.apply_packages(plan, tmp, nivuus_dir, HW, FakeEmit())
 
     modules = (target / "etc/modules").read_text()
     check("static module written", "vfio_pci" in modules, True)
@@ -3079,9 +3124,37 @@ with tempfile.TemporaryDirectory() as tmp:
 
     check("apt was asked for the declared packages",
           any("cowsay" in c for c in calls), True)
-    check("the activation unit was enabled",
-          any("nivuus-package-activate@demo.service" in " ".join(c)
-              for c in calls), True)
+    check("apt was asked for the YAML parser the activate phase needs",
+          any("python3-yaml" in c for c in calls), True)
+
+    # --- the activate phase must be able to run on the installed system ----- #
+    unit = target / "etc/systemd/system/nivuus-package-activate@.service"
+    check("the activation unit reaches the target", unit.is_file(), True)
+    unit_text = unit.read_text()
+    check("its ExecStart points at the CLI where the payload actually puts it",
+          "ExecStart=/opt/nivuus/installer/packages/activate_cli.py %i"
+          in unit_text, True)
+
+    cli = target / "opt/nivuus/installer/packages/activate_cli.py"
+    check("the CLI that ExecStart names exists on the target", cli.is_file(),
+          True)
+    check("and it is executable", os.access(cli, os.X_OK), True)
+
+    pkg_dir = target / "opt/nivuus-packages/demo"
+    check("the selected package travels to the target", pkg_dir.is_dir(), True)
+    check("with its manifest, which is what discover() looks for",
+          (pkg_dir / "nivuus-package.yaml").is_file(), True)
+    check("and its hooks, which activate would run",
+          (pkg_dir / "hooks" / "resolve.py").is_file(), True)
+    check("a package that was NOT selected is not copied",
+          (target / "opt/nivuus-packages/refuser").exists(), False)
+
+    link = (target / "etc/systemd/system/multi-user.target.wants"
+            / "nivuus-package-activate@demo.service")
+    check("the activation is armed for first boot", link.is_symlink(), True)
+    check("and the symlink points at the template unit",
+          os.readlink(link),
+          "/etc/systemd/system/nivuus-package-activate@.service")
 
     marker = target / "etc" / "nivuus-demo.json"
     check("the install hook ran under the target root", marker.is_file(), True)
@@ -3093,6 +3166,85 @@ with tempfile.TemporaryDirectory() as tmp:
           state["demo"]["answers"]["greeting"], "salut")
     check("the recorded version matches the manifest",
           state["demo"]["version"], "1.0.0")
+
+# A payload with no activation unit must fail the install, not report success:
+# an install that cannot activate anything at first boot has not done what it
+# said it did.
+with tempfile.TemporaryDirectory() as tmp:
+    steps_packages.chroot_run = fake_chroot_run
+    target = pathlib.Path(tmp)
+    (target / "opt/nivuus/installer/packages").mkdir(parents=True)
+    shutil.copyfile(REPO / "installer/packages/activate_cli.py",
+                    target / "opt/nivuus/installer/packages/activate_cli.py")
+    plan, _ = steps_packages.plan_packages(config, HW, FakeEmit())
+    check_raises("a payload missing the activation unit fails the install",
+                 lambda: steps_packages.apply_packages(
+                     plan, tmp, "/opt/nivuus", HW, FakeEmit()),
+                 "nivuus-package-activate@.service")
+
+# Same for the CLI the unit's ExecStart names.
+with tempfile.TemporaryDirectory() as tmp:
+    steps_packages.chroot_run = fake_chroot_run
+    target = pathlib.Path(tmp)
+    (target / "opt/nivuus/configs/systemd").mkdir(parents=True)
+    shutil.copyfile(REPO / "configs/systemd/nivuus-package-activate@.service",
+                    target / "opt/nivuus/configs/systemd"
+                    / "nivuus-package-activate@.service")
+    plan, _ = steps_packages.plan_packages(config, HW, FakeEmit())
+    check_raises("a payload missing activate_cli.py fails the install",
+                 lambda: steps_packages.apply_packages(
+                     plan, tmp, "/opt/nivuus", HW, FakeEmit()),
+                 "activate_cli.py")
+
+# The state file must describe the residue of a PARTIAL apply: a package whose
+# install hook succeeded, then one that raised, must still leave the first one
+# recorded - it is on the target and armed for first boot either way.
+with tempfile.TemporaryDirectory() as tmp:
+    steps_packages.chroot_run = fake_chroot_run
+    target = pathlib.Path(tmp)
+    nivuus_dir = seed_payload(target)
+    plan, _ = steps_packages.plan_packages(config, HW, FakeEmit())
+
+    real_run_install = steps_packages.run_install
+
+    def exploding_run_install(manifest, hw, answers, root, emit):
+        real_run_install(manifest, hw, answers, root, emit)
+        raise steps_packages.HookError("hook install en échec (simulé)")
+
+    steps_packages.run_install = exploding_run_install
+    try:
+        check_raises("an install hook failure fails the step",
+                     lambda: steps_packages.apply_packages(
+                         plan, tmp, nivuus_dir, HW, FakeEmit()),
+                     "simulé")
+    finally:
+        steps_packages.run_install = real_run_install
+
+    check("a package whose hook raised is not recorded",
+          (target / "etc/nivuus/packages.json").exists(), False)
+
+    # And with the failure on the SECOND package, the first one is recorded.
+    two = plan + [plan[0]]
+    seen = []
+
+    def second_explodes(manifest, hw, answers, root, emit):
+        seen.append(manifest.name)
+        if len(seen) > 1:
+            raise steps_packages.HookError("second hook en échec (simulé)")
+        real_run_install(manifest, hw, answers, root, emit)
+
+    steps_packages.run_install = second_explodes
+    try:
+        check_raises("the second package's failure fails the step",
+                     lambda: steps_packages.apply_packages(
+                         plan + [plan[0]], tmp, nivuus_dir, HW, FakeEmit()),
+                     "second hook")
+    finally:
+        steps_packages.run_install = real_run_install
+
+    state = json.loads((target / "etc/nivuus/packages.json").read_text())
+    check("the package applied before the failure IS recorded",
+          "demo" in state, True)
 
 if failures:
     print(f"FAIL ({len(failures)})")
@@ -3129,7 +3281,11 @@ ConditionPathExists=!/var/lib/nivuus/packages/%i.activated
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/nivuus-package-activate %i
+# Run straight from the payload the installer copied to /opt/nivuus.
+# activate_cli.py derives its own sys.path from __file__, so copying it
+# to /usr/local/sbin would break its imports; pointing at it where it
+# already lives removes a moving part instead of adding one.
+ExecStart=/opt/nivuus/installer/packages/activate_cli.py %i
 # Third-party code on first boot must never wedge the boot itself.
 TimeoutStartSec=7200
 
@@ -3145,10 +3301,13 @@ Créer `installer/packages/activate_cli.py` :
 #!/usr/bin/env python3
 """First-boot entry point for a package's `activate` phase.
 
-Deployed as /usr/local/sbin/nivuus-package-activate and run once per package
-by nivuus-package-activate@<name>.service. It re-reads the answers the wizard
-recorded on the target at install time, because the activate phase runs long
-after the portal is gone - there is nobody left to ask.
+Run once per package by nivuus-package-activate@<name>.service, IN PLACE at
+/opt/nivuus/installer/packages/activate_cli.py - the unit's ExecStart points
+here rather than at a copy under /usr/local/sbin, because this file computes
+its own sys.path from __file__ and a copy elsewhere could not import `common`
+or `packages`. It re-reads the answers the wizard recorded on the target at
+install time, because the activate phase runs long after the portal is gone -
+there is nobody left to ask.
 
 The stamp is written ONLY on success. An activation that fails is retried at
 the next boot rather than silently marked done, which matters because this is
@@ -3192,7 +3351,7 @@ class _StderrEmit:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
-        print("usage: nivuus-package-activate <package-name>", file=sys.stderr)
+        print("usage: activate_cli.py <package-name>", file=sys.stderr)
         return 2
     name = argv[1]
 
@@ -3244,24 +3403,46 @@ it returns is the kernel command line the bootloader step will write.
 
 apply_packages() writes, and only then: modules, hugepages, apt, the install
 hook, and the activation unit that carries the package into first boot.
+
+The activate phase is armed HERE, and arming it means putting three separate
+things on the target - the unit, the CLI it runs, and the package directories
+the CLI rediscovers at first boot. None of them get there by any other route:
+copy_payload() copies the repo to /opt/nivuus, and the packages live outside
+the repo (they are sibling repositories embedded in the live medium at
+/opt/nivuus-packages, which is the LIVE root, not the target). Every one of
+those copies is therefore load-bearing, and every one of them fails loudly:
+an install that reports success while first-boot activation cannot possibly
+run is the exact failure this file exists to prevent.
 """
 from __future__ import annotations
 
 import json
 import os
+import shutil
 
 from packages.capabilities import detect_capabilities
 from packages.conflicts import check_conflicts
 from packages.discovery import discover, eligibility
-from packages.manifest import ManifestError
+from packages.manifest import MANIFEST_NAME, ManifestError
 from packages.runner import HookError, run_install, run_resolve
 from packages.wizard import WizardError, load_questions, validate_answers
 
+from .bootloader import grub_defaults
 from .util import StepError, chroot_run, write_file
 
 STATE_REL_PATH = "etc/nivuus/packages.json"
 SYSCTL_REL_PATH = "etc/sysctl.d/60-nivuus-packages.conf"
 MODULES_REL_PATH = "etc/modules"
+UNIT_NAME = "nivuus-package-activate@.service"
+UNIT_REL_DIR = "etc/systemd/system"
+WANTS_REL_DIR = "etc/systemd/system/multi-user.target.wants"
+PACKAGES_REL_DIR = "opt/nivuus-packages"
+CLI_REL_PATH = "installer/packages/activate_cli.py"
+UNIT_SRC_REL_PATH = "configs/systemd/" + UNIT_NAME
+# activate_cli.py parses the manifest again at first boot, and manifest.py
+# imports PyYAML. Nothing else in the target's package list pulls it in, so a
+# package with an activate phase would fail on every boot with ImportError.
+ACTIVATE_APT = ["python3-yaml"]
 # A 2 MiB hugepage is the x86-64 default; the manifest speaks MiB because
 # "how much memory does the guest need" is the question an author can answer.
 HUGEPAGE_MIB = 2
@@ -3365,17 +3546,100 @@ def plan_packages(config: dict, hw: dict, emit):
                 cmdline.append(param)
         plan.append((manifest, answers, resolution))
 
+    # The allowlist that guards /etc/default/grub lives in bootloader.py, and
+    # bootloader.py runs at step 7 - after partition and debootstrap. A
+    # manifest yielding `vfio-pci.ids=$(x)` would therefore blow up on an
+    # already-wiped disk, which is precisely what "decide before you write"
+    # forbids. Render it here purely for its validation and throw the result
+    # away: the same call runs again for real in install_bootloader().
+    try:
+        grub_defaults(tuple(cmdline))
+    except ValueError as exc:
+        raise StepError(f"paramètre noyau refusé : {exc}") from exc
+
     return plan, tuple(cmdline)
 
 
-def apply_packages(plan, target: str, hw: dict, emit) -> None:
+def _deploy_activation(plan, target: str, nivuus_dir: str, emit) -> None:
+    """Put on the target everything the first-boot activate phase needs.
+
+    Three copies, all mandatory, all fatal when they fail:
+      1. the template unit, from the payload rather than re-written inline so
+         configs/systemd/ stays the single source of truth for it;
+      2. the CLI made executable where it already lives - the unit's ExecStart
+         points into /opt/nivuus, because activate_cli.py computes its own
+         sys.path from __file__ and would not survive being moved;
+      3. the SELECTED packages' directories under /opt/nivuus-packages. Only
+         the ones that were planned: the live medium may carry packages the
+         operator declined, and copying those would claim an install that did
+         not happen.
+    """
+    payload = os.path.join(target, nivuus_dir.lstrip("/"))
+
+    src_unit = os.path.join(payload, UNIT_SRC_REL_PATH)
+    if not os.path.isfile(src_unit):
+        raise StepError(
+            f"unité d'activation introuvable dans la charge utile : {src_unit} "
+            "— la phase activate ne pourrait pas démarrer au premier boot")
+    dest_unit = os.path.join(target, UNIT_REL_DIR, UNIT_NAME)
+    os.makedirs(os.path.dirname(dest_unit), exist_ok=True)
+    shutil.copyfile(src_unit, dest_unit)
+    os.chmod(dest_unit, 0o644)
+
+    cli = os.path.join(payload, CLI_REL_PATH)
+    if not os.path.isfile(cli):
+        raise StepError(
+            f"activate_cli.py introuvable dans la charge utile : {cli} — "
+            "l'ExecStart de l'unité d'activation pointerait dans le vide")
+    os.chmod(cli, 0o755)
+
+    for manifest, _, _ in plan:
+        dest = os.path.join(target, PACKAGES_REL_DIR, manifest.name)
+        if os.path.exists(dest):
+            shutil.rmtree(dest)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copytree(manifest.root, dest, symlinks=True)
+        if not os.path.isfile(os.path.join(dest, MANIFEST_NAME)):
+            raise StepError(
+                f"package « {manifest.label} » : copie incomplète vers {dest}")
+        emit.info("packages", 91,
+                  f"Package « {manifest.label} » copié vers "
+                  f"/{PACKAGES_REL_DIR}/{manifest.name}")
+
+
+def _enable_activation(target: str, name: str) -> None:
+    """Arm nivuus-package-activate@<name> for first boot, by symlink.
+
+    `systemctl enable` on a template unit whose [Install] says
+    WantedBy=multi-user.target does exactly one thing: create
+    multi-user.target.wants/<unit>@<instance>.service pointing at the template
+    file. Doing it directly is both simpler and more robust than shelling into
+    the chroot - systemctl needs a working D-Bus or an offline-mode guess, and
+    this project has been bitten more than once by systemctl failing silently
+    in a constrained environment (see CLAUDE.md). A symlink either exists or
+    raises OSError; there is no third, quiet outcome.
+    """
+    wants = os.path.join(target, WANTS_REL_DIR)
+    os.makedirs(wants, exist_ok=True)
+    link = os.path.join(wants, f"nivuus-package-activate@{name}.service")
+    if os.path.islink(link) or os.path.exists(link):
+        os.unlink(link)
+    try:
+        os.symlink("/" + UNIT_REL_DIR + "/" + UNIT_NAME, link)
+    except OSError as exc:
+        raise StepError(
+            f"package « {name} » : impossible d'armer l'activation au premier "
+            f"boot ({link}) : {exc}") from exc
+
+
+def apply_packages(plan, target: str, nivuus_dir: str, hw: dict, emit) -> None:
     """Write everything the plan decided, in dependency order."""
     if not plan:
         return
 
     modules: list[str] = []
     hugepages_mib = 0
-    apt: list[str] = []
+    apt: list[str] = list(ACTIVATE_APT)
     for manifest, _, resolution in plan:
         for module in resolution.platform.modules:
             if module not in modules:
@@ -3406,9 +3670,30 @@ def apply_packages(plan, target: str, hw: dict, emit) -> None:
 
     if apt:
         emit.info("packages", 94, f"Installing: {' '.join(apt)}")
-        chroot_run(target, ["apt-get", "install", "-y", *apt], check=False)
+        # Not fatal - a package may still be usable without an optional
+        # dependency, and failing the whole install here would be worse than
+        # the risk. But it must never be silent: the install hook is about to
+        # run against a system that does not have what it asked for, and the
+        # operator has to be able to connect the two.
+        proc = chroot_run(target, ["apt-get", "install", "-y", *apt],
+                          check=False)
+        if proc.returncode != 0:
+            emit.warn("packages", 94,
+                      f"apt-get install a échoué (code {proc.returncode}) pour "
+                      f": {' '.join(apt)} — les hooks install vont s'exécuter "
+                      "sans ces dépendances")
 
+    _deploy_activation(plan, target, nivuus_dir, emit)
+
+    # The answers must outlive the portal: the activate phase runs at first
+    # boot, long after there is anyone left to ask. Written incrementally,
+    # after each package succeeds, and not once at the end: if package 2's
+    # install hook raises, package 1 has already written into the target and
+    # been armed for first boot. A state file written only on full success
+    # would leave that residue undescribed - the machine would activate a
+    # package no file admits to having installed.
     state = {}
+    state_path = os.path.join(target, STATE_REL_PATH)
     for manifest, answers, _ in plan:
         emit.info("packages", 95, f"Applying package « {manifest.label} »…")
         try:
@@ -3416,14 +3701,9 @@ def apply_packages(plan, target: str, hw: dict, emit) -> None:
         except HookError as exc:
             raise StepError(str(exc)) from exc
         state[manifest.name] = {"version": manifest.version, "answers": answers}
-        chroot_run(target, ["systemctl", "enable",
-                            f"nivuus-package-activate@{manifest.name}.service"],
-                   check=False)
-
-    # The answers must outlive the portal: the activate phase runs at first
-    # boot, long after there is anyone left to ask.
-    write_file(os.path.join(target, STATE_REL_PATH),
-               json.dumps(state, indent=2, ensure_ascii=False) + "\n")
+        write_file(state_path,
+                   json.dumps(state, indent=2, ensure_ascii=False) + "\n")
+        _enable_activation(target, manifest.name)
 ```
 
 - [ ] **Step 6: Lancer le test pour le voir passer**
@@ -3476,7 +3756,7 @@ Et insérer l'application après `features.apply_features` :
         features.apply_features(config, target, nivuus_dir, hw, emit)
         if stop("features"):
             return 0
-        packages.apply_packages(plan, target, hw, emit)
+        packages.apply_packages(plan, target, nivuus_dir, hw, emit)
         if stop("packages"):
             return 0
 ```
@@ -3501,9 +3781,12 @@ Attendu : `run.py imports OK` puis trois `OK - …`.
 - [ ] **Step 9: Commit**
 
 ```bash
+chmod +x installer/packages/activate_cli.py \
+         scripts/tests/fixtures/packages/injecteur/hooks/resolve.py
 git add installer/install-engine/steps/packages.py installer/install-engine/run.py \
         installer/packages/activate_cli.py \
         configs/systemd/nivuus-package-activate@.service \
+        scripts/tests/fixtures/packages/injecteur \
         scripts/tests/test_install_engine_packages.py
 git commit -m "feat(packages): planifier avant d ecrire, puis appliquer
 
@@ -3787,6 +4070,29 @@ confirmation. A `userspace` manifest declaring any of the three is **refused**,
 not silently stripped.
 
 See `scripts/tests/fixtures/packages/demo/` for a complete working example.
+
+### How `activate` reaches the installed system
+
+Nothing about the live medium survives the reboot, so the install step puts
+all three moving parts on the target itself:
+
+| On the target | Copied from | By |
+|---|---|---|
+| `/etc/systemd/system/nivuus-package-activate@.service` | `/opt/nivuus/configs/systemd/` (the payload) | `apply_packages()` |
+| `/opt/nivuus/installer/packages/activate_cli.py` | the repo payload | `copy_payload()`, made executable by `apply_packages()` |
+| `/opt/nivuus-packages/<name>/` | the live medium, **selected packages only** | `apply_packages()` |
+
+The unit's `ExecStart` points at `activate_cli.py` **where the payload already
+puts it** rather than at a copy under `/usr/local/sbin`: the script derives its
+own `sys.path` from `__file__`, so moving it would break its imports.
+
+Activation is armed by creating
+`etc/systemd/system/multi-user.target.wants/nivuus-package-activate@<name>.service`
+directly — that is exactly what `systemctl enable` does for a template unit
+with `WantedBy=multi-user.target`, without needing a working `systemctl`
+inside the chroot. Any of these failing fails the install: an install that
+reports success while first-boot activation cannot run is the failure mode
+this replaced.
 ````
 
 - [ ] **Step 4: Ajouter la cible Makefile qui exerce le moteur**
@@ -3849,10 +4155,61 @@ Three properties carry the design and are easy to break by accident:
   `cpu-hybrid`); the precise work — PCI functions, IOMMU groups, `vfio-pci.ids`
   — belongs to `resolve`.
 
+Two more findings from implementing the engine, both worth knowing before
+touching it:
+* **`resolve` being read-only is a CONVENTION, not a sandbox.** Tested
+  directly: a `resolve` hook that writes to disk succeeds, and the write
+  persists — nothing chroots or restricts the subprocess. What the pipeline
+  ordering actually depends on is that the engine never *asks* `resolve` to
+  write and never *uses* anything it wrote, not that `resolve` is incapable. A
+  malicious package owns the machine from the `install` phase onward
+  regardless, since that runs as root. The rule protects against accident and
+  ordering mistakes — real, worth having — but must be described as that, not
+  as a security boundary. Real sandboxing would be its own project.
+* **`chroot_base.py:9` imports `crypt`, removed from the Python stdlib in 3.13
+  (PEP 594).** Used for exactly one thing (line 98): hashing the user
+  account's password. The live ISO builds on **bookworm**
+  (`iso-build/auto/config --distribution bookworm`), Python 3.11, so
+  production is unaffected today — but `run.py` cannot even be imported on a
+  Python 3.13 host, and the day the ISO base moves to trixie the installer
+  breaks at the step that creates the user account, at the very end of an
+  otherwise successful install. Remedies: `passlib`, `openssl passwd -6`, or
+  `chpasswd -e` inside the chroot. Dated technical debt, not a bug to fix now
+  — out of the package-engine plan's scope.
+
 Activation uses a stamp (`/var/lib/nivuus/packages/<name>.activated`), not a
 self-disabling unit: an interrupted activation must retry at the next boot
-rather than believe it succeeded. Tests: `cd installer && make test-packages`
-(8 files). Spec: `docs/superpowers/specs/2026-08-27-decoupage-installer-console-design.md`.
+rather than believe it succeeded.
+
+**Arming `activate` takes three copies onto the target, and the whole phase is
+dead if any is missed** (it was, on the first cut of this branch, while the
+install still reported success — `systemctl enable` ran with `check=False`).
+`apply_packages()` does all three: it copies
+`configs/systemd/nivuus-package-activate@.service` out of the payload into
+`{target}/etc/systemd/system/`, chmods `activate_cli.py` executable **in
+place** at `/opt/nivuus/installer/packages/` — the unit's `ExecStart` points
+there, *not* at `/usr/local/sbin`, because the script computes its own
+`sys.path` from `__file__` and a copy elsewhere cannot import `common`/`packages` —
+and copies each **selected** package's directory to
+`{target}/opt/nivuus-packages/<name>/` (the live medium's copy is on the LIVE
+root and does not survive the reboot). Enablement is a **direct symlink** into
+`multi-user.target.wants/`, which is precisely what `systemctl enable` does for
+a `WantedBy=multi-user.target` template unit — chosen over shelling into the
+chroot because `systemctl` fails silently in constrained environments (see the
+PID-namespace note below) and a symlink either exists or raises. The target
+also gets `python3-yaml`: `activate_cli.py` re-parses the manifest at first
+boot and nothing else pulls PyYAML in.
+
+**Kernel parameters are validated in `plan_packages`, not in `bootloader`.**
+The allowlist lives in `bootloader.py::grub_defaults`, which runs at step 7 —
+after `partition` has wiped the disk. `plan_packages` now calls it purely for
+its validation, so `vfio-pci.ids=$(x)` is refused while the target is still
+untouched. Same reason the package state file (`etc/nivuus/packages.json`) is
+written **after each package**, not once at the end: a residue that describes
+itself beats a partially applied install with no record.
+
+Tests: `cd installer && make test-packages`
+(9 files). Spec: `docs/superpowers/specs/2026-08-27-decoupage-installer-console-design.md`.
 ```
 
 - [ ] **Step 7: Commit**

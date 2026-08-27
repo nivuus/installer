@@ -79,6 +79,29 @@ not silently stripped.
 
 See `scripts/tests/fixtures/packages/demo/` for a complete working example.
 
+### How `activate` reaches the installed system
+
+Nothing about the live medium survives the reboot, so the install step puts
+all three moving parts on the target itself:
+
+| On the target | Copied from | By |
+|---|---|---|
+| `/etc/systemd/system/nivuus-package-activate@.service` | `/opt/nivuus/configs/systemd/` (the payload) | `apply_packages()` |
+| `/opt/nivuus/installer/packages/activate_cli.py` | the repo payload | `copy_payload()`, made executable by `apply_packages()` |
+| `/opt/nivuus-packages/<name>/` | the live medium, **selected packages only** | `apply_packages()` |
+
+The unit's `ExecStart` points at `activate_cli.py` **where the payload already
+puts it** rather than at a copy under `/usr/local/sbin`: the script derives its
+own `sys.path` from `__file__`, so moving it would break its imports.
+
+Activation is armed by creating
+`etc/systemd/system/multi-user.target.wants/nivuus-package-activate@<name>.service`
+directly — that is exactly what `systemctl enable` does for a template unit
+with `WantedBy=multi-user.target`, without needing a working `systemctl`
+inside the chroot. Any of these failing fails the install: an install that
+reports success while first-boot activation cannot run is the failure mode
+this replaced.
+
 ## Build the ISO
 
 ```bash
