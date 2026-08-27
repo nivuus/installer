@@ -217,6 +217,33 @@ check("aucun partage n expose une racine",
 check("tous les partages sont des sous-dossiers",
       all(s.count("/") >= 3 for s in _srcs), True)
 
+# --- MARQUEUR D ECHEC : domain.py est mort jusqu a la phase 2b ----------- #
+# Tout ce qui precede appelle domain_xml() avec des arguments explicites et
+# ne touche jamais la detection materielle - donc cette suite, et l agregateur
+# entier, restent verts alors que `domain.py xml` et `domain.py define` sont
+# inutilisables. Le marqueur est la pour que le vert cesse de sur-promettre.
+#
+# main() echoue des son entree, sur `from common.hardware import
+# HardwareError` : ce nom a quitte installer/common/hardware.py quand la
+# moitie precise de la detection est passee dans le package (console/), et
+# domain.py l importe encore. L echec est donc un ImportError a l entree, pas
+# l AttributeError qu on rencontre plus profond dans build_domain_xml().
+#
+# Ce test DOIT casser le jour ou quelqu un repare domain.py en phase 2b :
+# c est exactement le rappel voulu - retirez alors le marqueur en meme temps
+# que la reparation.
+def _domain_main_xml():
+    argv = sys.argv
+    sys.argv = ["domain.py", "xml"]
+    try:
+        return domain.main()
+    finally:
+        sys.argv = argv
+
+
+check_raises("domain.py main() reste casse jusqu a la phase 2b",
+             ImportError, _domain_main_xml)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

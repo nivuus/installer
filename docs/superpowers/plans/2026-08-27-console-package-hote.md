@@ -75,10 +75,11 @@ Le moteur doit répondre à `requires.capabilities` **avant** d'exécuter le moi
 - Consumes: rien
 - Produces:
   - `installer/common/hardware.py` garde : `list_disks`, `list_ethernet`, `list_wifi`, `first_ap_interface`, `first_wired_with_carrier`, `iommu_support`, `list_gpus` (**sans le champ `ids`**), `cpu_topology` (**sans `isolcpus` ni `nohz_full`**), `memory_total_mib(meminfo_path="/proc/meminfo") -> int` (RAM hôte en MiB depuis `MemTotal`, fail-open à `0`), `detect_all` — dont le dict rendu porte désormais une clé **`memory_mib`** (ajoutée en fix round 2 de la tâche 2 : `detect_all()` ne la portait pas, donc `resolve` tombait systématiquement sur son repli plancher)
-  - `console/hardware.py` expose : `HardwareError`, `pci_slot_ids(slot) -> list[str]`, `parse_pci_functions(raw, slot) -> list[dict]`, `pci_slot_functions(slot) -> list[dict]`, `parse_nvme_controllers(raw) -> list[dict]`, `select_passthrough_nvme(controllers, host_addresses) -> dict`, `host_root_pci_addresses() -> set[str] | None`, `resolve_passthrough_nvme(raw, host_addresses) -> dict`, `passthrough_nvme() -> dict`, `_whole_disk_name(name, sysfs_root=...) -> str`, `pci_address_for_device(path) -> str | None`, `vfio_ids_for_slot(slot) -> list[str]`, `cpu_ranges(nums) -> str`, `isolation_plan(cpu: dict) -> dict` → `{"isolcpus": str, "nohz_full": str}`
+  - `console/hardware.py` expose : `HardwareError`, `pci_slot_ids(slot) -> list[str]`, `parse_pci_functions(raw, slot) -> list[dict]`, `pci_slot_functions(slot) -> list[dict]`, `parse_nvme_controllers(raw) -> list[dict]`, `select_passthrough_nvme(controllers, host_addresses, wanted_address=None) -> dict`, `host_root_pci_addresses() -> set[str] | None`, `resolve_passthrough_nvme(raw, host_addresses, wanted_address=None) -> dict`, `passthrough_nvme(wanted_address=None) -> dict`, `_whole_disk_name(name, sysfs_root=...) -> str`, `pci_address_for_device(path, sysfs_root=None) -> str | None`, `vfio_ids_for_slot(slot) -> list[str]`, `cpu_ranges(nums) -> str`, `isolation_plan(cpu: dict) -> dict` → `{"isolcpus": str, "nohz_full": str}`
 
 ⚠️ **Deux faits sur ces fonctions que le code appelant DOIT respecter, vérifiés dans la source :**
-  - `passthrough_nvme()` et `select_passthrough_nvme()` **lèvent `HardwareError`** sur tous leurs chemins d'échec (aucun contrôleur NVMe, candidat ambigu, disque appartenant à l'hôte). Elles ne rendent **jamais** un dict vide. Un appelant qui teste `if not nvme:` ne détectera jamais rien — l'exception sera déjà partie.
+  - `passthrough_nvme()` et `select_passthrough_nvme()` **lèvent `HardwareError`** sur tous leurs chemins d'échec (aucun contrôleur NVMe, réponse qui ne désigne pas un contrôleur NVMe, disque appartenant à l'hôte, auto-sélection ambiguë). Elles ne rendent **jamais** un dict vide. Un appelant qui teste `if not nvme:` ne détectera jamais rien — l'exception sera déjà partie.
+  - `wanted_address` (l'adresse PCI derrière la réponse `dedicated_nvme`) **choisit** le contrôleur ; l'exclusion de la racine hôte est une assertion sur ce choix. `host_addresses=None` (racine non traçable — le cas ISO live) ne déclenche donc **pas** de refus, sauf si aucune réponse n'a été donnée. Voir « Correctif final » en fin de plan.
   - Le dict rendu est une **fonction PCI**, avec les clés `{address, id, function, bus, slot, domain}`. Il n'y a **pas** de clé `device` : comparer un chemin `/dev/…` à ce dict exige de passer par `pci_address_for_device()`.
 
 - [ ] **Step 1: Constater la frontière avant de couper**
@@ -992,35 +993,32 @@ def main() -> int:
     # IOMMU group with the host cannot be handed over, and falling back to a
     # disk image would silently deliver something slower than what was asked.
     #
-    # passthrough_nvme() RAISES HardwareError on every failure path - no NVMe,
-    # ambiguous candidate, disk owned by the host - and never returns empty.
-    # Catching it is what turns "this machine will not do" into a sentence the
-    # operator reads before their disk is touched, instead of a traceback and
-    # a non-zero exit they cannot act on.
+    # THE OPERATOR'S ANSWER DRIVES THE SELECTION - it is not a cross-check on
+    # a choice made without it. See "Correctif final" at the end of this plan:
+    # deriving the device from "the NVMe that does not back the host root"
+    # works only on an already-installed host; on the ISO it refuses on every
+    # machine.
     wanted = (answers.get("dedicated_nvme") or "").strip()
-    try:
-        nvme = hardware.passthrough_nvme()
-    except hardware.HardwareError as exc:
-        emit({"event": "refuse",
-              "reason": f"aucun NVMe dedie utilisable en passthrough PCI : {exc}"})
-        return 0
-
-    # The dict is a PCI FUNCTION - {address, id, function, bus, slot, domain}.
-    # There is no `device` key, so the operator's /dev/... answer has to be
-    # translated before it can be compared. Skipping this check would let the
-    # install hand over a disk the operator never chose.
+    wanted_address = None
     if wanted:
-        chosen = hardware.pci_address_for_device(wanted)
-        if chosen is None:
+        wanted_address = hardware.pci_address_for_device(wanted)
+        if wanted_address is None:
             emit({"event": "refuse",
                   "reason": f"impossible de resoudre {wanted} vers une adresse PCI ; "
                             "ce disque ne peut pas etre passe a la VM"})
             return 0
-        if chosen != nvme["address"]:
-            emit({"event": "refuse",
-                  "reason": f"le disque demande ({wanted}, {chosen}) n'est pas "
-                            f"celui qui peut etre detache ({nvme['address']})"})
-            return 0
+
+    # passthrough_nvme() RAISES HardwareError on every failure path - no NVMe,
+    # an answer that is not an NVMe controller, a device that backs the host
+    # root, an ambiguous auto-selection - and never returns empty. Catching it
+    # is what turns "this machine will not do" into a sentence the operator
+    # reads before their disk is touched.
+    try:
+        nvme = hardware.passthrough_nvme(wanted_address=wanted_address)
+    except hardware.HardwareError as exc:
+        emit({"event": "refuse",
+              "reason": f"aucun NVMe dedie utilisable en passthrough PCI : {exc}"})
+        return 0
 
     ids.append(nvme["id"])
 
@@ -1109,7 +1107,7 @@ enough for anyone.
 | Phase | What it does |
 |---|---|
 | `resolve` | Read-only. Derives `vfio-pci.ids` from the discrete GPU's PCI slot and the dedicated NVMe, `nohz_full` from the CPU topology, and the hugepage budget from host RAM. **Refuses**, with a reason, a machine with no discrete GPU or no properly isolated NVMe. |
-| `install` | Deploys the libvirt hooks, the host-side scripts and the wake-on-demand units onto the target. |
+| `install` | Places files on the target — la liste exacte est dans `console/README.md` ; elle ne comprend **ni** le dispatcher `qemu`, **ni** les hooks GPU/règles/hugepages, **ni** les unités `vm-trigger-*`. |
 | `activate` | **Not implemented yet** (phase 2b). The Windows guest is still built by hand with `installer/windows-guest/build.py`. |
 
 ## PCI passthrough only
@@ -2072,8 +2070,78 @@ les details."
 
 Périmètre de **2b**, volontairement hors sujet ici :
 
-* **`installer/windows-guest/` ne bouge pas.** `domain.py` casse en tâche 1 (il importe la moitié précise de `hardware.py`) et reste cassé jusqu'en 2b. C'est assumé et signalé, pas ignoré.
+* **`installer/windows-guest/` ne bouge pas.** `domain.py` casse en tâche 1 et reste cassé jusqu'en 2b. Mode d'échec **mesuré** : `main()` lève `ImportError: cannot import name 'HardwareError' from 'common.hardware'` dès son entrée (`domain.py:263`, avant le `try`) — pas l'`AttributeError` de `build_domain_xml()`, qui n'est atteignable qu'en appelant cette fonction directement. `scripts/tests/test_windows_guest_production_domain.py` porte désormais un **marqueur d'échec** qui l'assère : il cassera le jour de la réparation, ce qui est le rappel voulu.
 * **`console/hooks/activate.py` ne construit rien.** Il journalise et sort 0, pour que le témoin s'écrive et que systemd cesse de réessayer une unité qui n'a rien à faire.
 * **`installer/common/retro.py` reste partagé** : le hook install du package écrit le témoin, `windows-guest/build.py` le lit encore depuis `installer/`. Le pont ne disparaît qu'en 2b.
 * **Les 13 suites `test_windows_guest_*` restent où elles sont**, sauf `test_windows_guest_hardware.py` que la tâche 1 ampute ou supprime.
 * **La phase 3** (`git filter-repo --path console`) reste intacte, et devient mécanique une fois 2b terminée.
+
+
+---
+
+## Correctif final (2026-08-27, revue de branche)
+
+Trois constats de la revue finale, appliqués en une vague.
+
+### 1. Le package ne s'installait pas depuis l'ISO — son chemin principal
+
+`console/hardware.py::select_passthrough_nvme()` choisissait le NVMe à passer
+en **excluant** ceux qui portent la racine hôte. Mesure :
+
+```
+hote deja installe, racine sur A  -> choisit B          (correct)
+ISO live, racine = overlay        -> REFUS : "host root not identified"
+```
+
+Sur un support live la racine est l'image live : `findmnt -no SOURCE /` rend
+`overlay`, aucun disque PCI ne la porte, `host_root_pci_addresses()` rend
+`None` — le sélecteur refusait donc sur **toutes** les machines. Les
+vérifications matérielles précédentes passaient parce qu'elles s'exécutaient
+sur un hôte déjà installé : le mauvais chemin était exercé. Et la réponse de
+l'opérateur ne pouvait pas rattraper le coup : `resolve.py` lisait
+`dedicated_nvme` **après** que `passthrough_nvme()` ait décidé ou échoué.
+
+**Correctif — la relation est inversée.** `dedicated_nvme` devient le
+sélecteur ; les exclusions deviennent des assertions de sécurité :
+
+* `resolve` traduit d'abord la réponse en adresse PCI
+  (`pci_address_for_device`), puis la passe à
+  `passthrough_nvme(wanted_address=…)`.
+* `select_passthrough_nvme(controllers, host_addresses, wanted_address=None)`
+  cherche le contrôleur correspondant, et refuse s'il n'en existe aucun (le
+  refus nomme l'adresse trouvée **et** les contrôleurs connus).
+* Le refus « ce disque porte la racine hôte » ne s'applique que si la racine
+  **est** identifiable. `host_addresses=None` n'est plus un refus.
+* Sans réponse, l'auto-sélection d'origine reste le repli : un seul candidat
+  non ambigu, sinon refus motivé.
+
+**Garde côté moteur**, là où elle est possible : `plan_packages()` refuse par
+`StepError` une réponse de type `disque` qui désigne le **disque cible de
+l'installation**. Le package ne peut pas le voir — un hook reçoit `hw` et ses
+réponses, jamais la config. C'était aussi le désaccord entre
+`packages/capabilities.py` (qui exclut la cible d'installation) et le package
+(qui excluait la racine hôte) : pendant une install ISO ce ne sont pas les
+mêmes disques.
+
+Tests : `test_console_hardware.py` (fonctions pures, sur texte `lspci`
+capturé) et `test_console_resolve.py` (le hook en sous-processus, avec un faux
+`lspci`, un faux `findmnt` et un faux arbre sysfs via `NIVUUS_SYSFS_BLOCK`,
+donc vrai sur n'importe quelle machine).
+
+### 2. `console/README.md` promettait plus que `install.py` ne fait
+
+Le README annonçait « the libvirt hooks, the host-side scripts and the
+wake-on-demand units ». En réalité `install.py` place `vm-cpu-partition.sh`,
+les deux wrappers CPU, trois scripts hôte et `retro.json` — et **pas** le
+dispatcher `console/host/libvirt/hooks/qemu`, sans lequel les wrappers qu'il
+écrit ne sont jamais exécutés ; ni `bind-vfio-gpu.sh` /
+`rebind-host-gpu.sh`, ni la paire `rules.sh`, ni les hooks hugepages, ni les
+unités `vm-trigger-*`. C'est la parité avec le `install.sh` supprimé, donc le
+déploiement n'a **pas** été élargi : le README dit maintenant exactement ce
+qui est placé, et nomme ce qui attend la phase 2b.
+
+### 3. `domain.py` est mort, et une note vaut moins qu'un test rouge
+
+Voir ci-dessus : `ImportError` à l'entrée de `main()`, marqueur d'échec ajouté
+dans `test_windows_guest_production_domain.py`, `CLAUDE.md` corrigé (mode
+d'échec réel + la commande `domain.py` signalée comme inutilisable).
