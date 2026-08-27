@@ -60,6 +60,36 @@ with tempfile.TemporaryDirectory() as tmp:
 check("a missing packages dir is empty, not an error",
       discover("/nonexistent/packages"), ([], []))
 
+# --- duplicate names --------------------------------------------------------#
+# The package name becomes a systemd unit instance name and a key in the
+# installed target's package-state file: two directories declaring the same
+# name must not both be offered, or they would overwrite each other's state
+# and activation unit at first boot.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    write_pkg(root, "dup-a", GOOD.format(api=API_VERSION, name="console"))
+    write_pkg(root, "dup-b", GOOD.format(api=API_VERSION, name="console"))
+
+    found, errors = discover(str(root))
+    check("colliding names are excluded from the valid list", found, [])
+    check("exactly one collision error is reported", len(errors), 1)
+    path_a = str(root / "dup-a" / "nivuus-package.yaml")
+    path_b = str(root / "dup-b" / "nivuus-package.yaml")
+    check("the collision error mentions both colliding paths",
+          all(p in errors[0][1] for p in (path_a, path_b)), True)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    write_pkg(root, "trip-a", GOOD.format(api=API_VERSION, name="console"))
+    write_pkg(root, "trip-b", GOOD.format(api=API_VERSION, name="console"))
+    write_pkg(root, "trip-c", GOOD.format(api=API_VERSION, name="console"))
+    write_pkg(root, "solo", GOOD.format(api=API_VERSION, name="solo"))
+
+    found, errors = discover(str(root))
+    check("a three-way collision is still exactly one error", len(errors), 1)
+    check("the collision does not poison an unrelated package",
+          [m.name for m in found], ["solo"])
+
 # --- eligibility ----------------------------------------------------------- #
 base = {"apiVersion": API_VERSION, "name": "demo", "version": "1.0.0",
         "label": "Demo", "tier": "platform"}

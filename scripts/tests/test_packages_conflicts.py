@@ -71,6 +71,24 @@ check("conflicts are sorted by resource",
 check("Conflict is hashable and comparable",
       Conflict("gpu", ("a", "b")) == Conflict("gpu", ("a", "b")), True)
 
+# --- self-conflicts --------------------------------------------------------#
+# check_conflicts is public and other callers may reach it without going
+# through discover() first, so it must defend on its own against a package
+# appearing to conflict with itself.
+check("the same manifest object passed twice is not a self-conflict",
+      check_conflicts([console, console]), [])
+
+console_dup = pkg("console", {"gpu": "exclusive"})
+check("two distinct manifests sharing a name do not self-conflict either",
+      check_conflicts([console, console_dup]), [])
+
+# Regression guard: distinct claimants still produce one conflict naming all.
+regression = check_conflicts([console, inference, third])
+check("regression: three distinct claimants still yield one conflict",
+      len(regression), 1)
+check("regression: the conflict still names all three",
+      regression[0].packages, ("console", "inference", "third"))
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

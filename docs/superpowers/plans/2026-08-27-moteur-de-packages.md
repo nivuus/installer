@@ -1018,6 +1018,36 @@ with tempfile.TemporaryDirectory() as tmp:
 check("a missing packages dir is empty, not an error",
       discover("/nonexistent/packages"), ([], []))
 
+# --- duplicate names --------------------------------------------------------#
+# The package name becomes a systemd unit instance name and a key in the
+# installed target's package-state file: two directories declaring the same
+# name must not both be offered, or they would overwrite each other's state
+# and activation unit at first boot.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    write_pkg(root, "dup-a", GOOD.format(api=API_VERSION, name="console"))
+    write_pkg(root, "dup-b", GOOD.format(api=API_VERSION, name="console"))
+
+    found, errors = discover(str(root))
+    check("colliding names are excluded from the valid list", found, [])
+    check("exactly one collision error is reported", len(errors), 1)
+    path_a = str(root / "dup-a" / "nivuus-package.yaml")
+    path_b = str(root / "dup-b" / "nivuus-package.yaml")
+    check("the collision error mentions both colliding paths",
+          all(p in errors[0][1] for p in (path_a, path_b)), True)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    write_pkg(root, "trip-a", GOOD.format(api=API_VERSION, name="console"))
+    write_pkg(root, "trip-b", GOOD.format(api=API_VERSION, name="console"))
+    write_pkg(root, "trip-c", GOOD.format(api=API_VERSION, name="console"))
+    write_pkg(root, "solo", GOOD.format(api=API_VERSION, name="solo"))
+
+    found, errors = discover(str(root))
+    check("a three-way collision is still exactly one error", len(errors), 1)
+    check("the collision does not poison an unrelated package",
+          [m.name for m in found], ["solo"])
+
 # --- eligibility ----------------------------------------------------------- #
 base = {"apiVersion": API_VERSION, "name": "demo", "version": "1.0.0",
         "label": "Demo", "tier": "platform"}
@@ -1097,6 +1127,15 @@ def discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, 
     Returns (valid manifests sorted by name, [(path, error message)]).
     A directory with no manifest is not a package and is skipped in silence;
     a directory WITH a manifest that does not parse is an error worth showing.
+
+    `name` becomes a systemd unit instance name and a key in the installed
+    target's package-state file, so two manifests declaring the same name is
+    load-bearing, not cosmetic - they would overwrite each other's state and
+    each other's activation unit at first boot. When that happens, EVERY
+    manifest sharing the name is excluded from the valid list, not just the
+    losers of some directory-sort order: silently installing whichever one
+    happened to sort first would be worse than installing none. The operator
+    gets one error naming the collision and every colliding path.
     """
     manifests: list[Manifest] = []
     errors: list[tuple[str, str]] = []
@@ -1114,8 +1153,24 @@ def discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, 
         except ManifestError as exc:
             errors.append((path, str(exc)))
 
-    manifests.sort(key=lambda m: m.name)
-    return manifests, errors
+    by_name: dict[str, list[Manifest]] = {}
+    for manifest in manifests:
+        by_name.setdefault(manifest.name, []).append(manifest)
+
+    valid: list[Manifest] = []
+    for name, group in sorted(by_name.items()):
+        if len(group) > 1:
+            paths = ", ".join(os.path.join(m.root, MANIFEST_NAME) for m in group)
+            errors.append((
+                name,
+                f"deux packages ou plus déclarent le nom {name!r} : {paths} "
+                "— aucun n'est proposé, renommez-en un",
+            ))
+        else:
+            valid.extend(group)
+
+    valid.sort(key=lambda m: m.name)
+    return valid, errors
 
 
 def eligibility(manifest: Manifest, capabilities: set[str],
@@ -1258,6 +1313,24 @@ check("conflicts are sorted by resource",
 check("Conflict is hashable and comparable",
       Conflict("gpu", ("a", "b")) == Conflict("gpu", ("a", "b")), True)
 
+# --- self-conflicts --------------------------------------------------------#
+# check_conflicts is public and other callers may reach it without going
+# through discover() first, so it must defend on its own against a package
+# appearing to conflict with itself.
+check("the same manifest object passed twice is not a self-conflict",
+      check_conflicts([console, console]), [])
+
+console_dup = pkg("console", {"gpu": "exclusive"})
+check("two distinct manifests sharing a name do not self-conflict either",
+      check_conflicts([console, console_dup]), [])
+
+# Regression guard: distinct claimants still produce one conflict naming all.
+regression = check_conflicts([console, inference, third])
+check("regression: three distinct claimants still yield one conflict",
+      len(regression), 1)
+check("regression: the conflict still names all three",
+      regression[0].packages, ("console", "inference", "third"))
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
@@ -1315,12 +1388,19 @@ def check_conflicts(manifests) -> list[Conflict]:
     One conflict per contested resource, naming every claimant - not one per
     pair, which would report the same problem three times for three packages.
     Ordered by resource so the portal renders a stable list.
+
+    Claimants are collected in a set keyed by name, not a list: this function
+    is public and other callers may reach it without going through
+    `discover()` first, so it must not rely on the caller having already
+    de-duplicated by name. Without that, the same manifest object passed
+    twice, or two distinct manifest objects that happen to share a `name`,
+    would read as two claimants and produce a conflict against itself.
     """
-    claimants: dict[str, list[str]] = {}
+    claimants: dict[str, set[str]] = {}
     for manifest in manifests:
         for resource, mode in manifest.claims:
             if mode == "exclusive":
-                claimants.setdefault(resource, []).append(manifest.name)
+                claimants.setdefault(resource, set()).add(manifest.name)
 
     return [
         Conflict(resource=resource, packages=tuple(sorted(names)))

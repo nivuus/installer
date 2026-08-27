@@ -28,6 +28,15 @@ def discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, 
     Returns (valid manifests sorted by name, [(path, error message)]).
     A directory with no manifest is not a package and is skipped in silence;
     a directory WITH a manifest that does not parse is an error worth showing.
+
+    `name` becomes a systemd unit instance name and a key in the installed
+    target's package-state file, so two manifests declaring the same name is
+    load-bearing, not cosmetic - they would overwrite each other's state and
+    each other's activation unit at first boot. When that happens, EVERY
+    manifest sharing the name is excluded from the valid list, not just the
+    losers of some directory-sort order: silently installing whichever one
+    happened to sort first would be worse than installing none. The operator
+    gets one error naming the collision and every colliding path.
     """
     manifests: list[Manifest] = []
     errors: list[tuple[str, str]] = []
@@ -45,8 +54,24 @@ def discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, 
         except ManifestError as exc:
             errors.append((path, str(exc)))
 
-    manifests.sort(key=lambda m: m.name)
-    return manifests, errors
+    by_name: dict[str, list[Manifest]] = {}
+    for manifest in manifests:
+        by_name.setdefault(manifest.name, []).append(manifest)
+
+    valid: list[Manifest] = []
+    for name, group in sorted(by_name.items()):
+        if len(group) > 1:
+            paths = ", ".join(os.path.join(m.root, MANIFEST_NAME) for m in group)
+            errors.append((
+                name,
+                f"deux packages ou plus déclarent le nom {name!r} : {paths} "
+                "— aucun n'est proposé, renommez-en un",
+            ))
+        else:
+            valid.extend(group)
+
+    valid.sort(key=lambda m: m.name)
+    return valid, errors
 
 
 def eligibility(manifest: Manifest, capabilities: set[str],

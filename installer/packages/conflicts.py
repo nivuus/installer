@@ -34,12 +34,19 @@ def check_conflicts(manifests) -> list[Conflict]:
     One conflict per contested resource, naming every claimant - not one per
     pair, which would report the same problem three times for three packages.
     Ordered by resource so the portal renders a stable list.
+
+    Claimants are collected in a set keyed by name, not a list: this function
+    is public and other callers may reach it without going through
+    `discover()` first, so it must not rely on the caller having already
+    de-duplicated by name. Without that, the same manifest object passed
+    twice, or two distinct manifest objects that happen to share a `name`,
+    would read as two claimants and produce a conflict against itself.
     """
-    claimants: dict[str, list[str]] = {}
+    claimants: dict[str, set[str]] = {}
     for manifest in manifests:
         for resource, mode in manifest.claims:
             if mode == "exclusive":
-                claimants.setdefault(resource, []).append(manifest.name)
+                claimants.setdefault(resource, set()).add(manifest.name)
 
     return [
         Conflict(resource=resource, packages=tuple(sorted(names)))
