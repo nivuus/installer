@@ -1302,7 +1302,7 @@ Un package tiers ne doit pas pouvoir dessiner des formulaires arbitraires dans l
 - Test: `scripts/tests/test_packages_wizard.py`
 
 **Interfaces:**
-- Consumes: `manifest.ManifestError`
+- Consumes: rien — `wizard.py` lève son propre `WizardError` ; le coupler à `ManifestError` lierait deux vocabulaires distincts sans raison
 - Produces:
   - `QUESTION_TYPES = ("bool", "choix", "texte", "secret", "disque", "gpu")`
   - `class WizardError(RuntimeError)`
@@ -2300,7 +2300,7 @@ aucun parametre noyau legitime n en a besoin."
 - Test: `scripts/tests/test_install_engine_packages.py`
 
 **Interfaces:**
-- Consumes: `packages.discovery.discover/partition`, `packages.capabilities.detect_capabilities`, `packages.conflicts.check_conflicts`, `packages.wizard.load_questions/validate_answers`, `packages.runner.run_resolve/run_install`, `steps.util.chroot_run/write_file/StepError`
+- Consumes: `packages.discovery.discover/eligibility` (**`eligibility`, pas `partition`** : cette étape doit lever sur le premier inéligible en donnant sa raison, là où `partition` se contente de trier — c'est le portail, tâche 10, qui veut le tri), `packages.capabilities.detect_capabilities`, `packages.conflicts.check_conflicts`, `packages.wizard.load_questions/validate_answers`, `packages.manifest.ManifestError`, `packages.runner.run_resolve/run_install/HookError`, `steps.util.chroot_run/write_file/StepError`
 - Produces:
   - `plan_packages(config: dict, hw: dict, emit) -> tuple[list[tuple[Manifest, dict, Resolution]], tuple[str, ...]]` — lève `StepError` sur conflit ou refus
   - `apply_packages(plan, target: str, hw: dict, emit) -> None`
@@ -3123,7 +3123,8 @@ test-packages:
 	@for t in test_packages_manifest test_packages_capabilities \
 	          test_packages_discovery test_packages_conflicts \
 	          test_packages_wizard test_packages_runner \
-	          test_install_engine_bootloader test_install_engine_packages; do \
+	          test_install_engine_bootloader test_install_engine_packages \
+	          test_webapp_models; do \
 	    echo "--- $$t"; \
 	    python3 $(dir $(INSTALLER_DIR))scripts/tests/$$t.py || exit 1; \
 	done
@@ -3135,7 +3136,7 @@ test-packages:
 cd installer && make test-packages && cd ..
 ```
 
-Attendu : huit `OK - …`, aucun échec.
+Attendu : neuf `OK - …`, aucun échec. `test_webapp_models` en fait partie : la tâche 10 l'étend pour couvrir `InstallConfig.packages`, et comme la CI ne lance aucun test Python, cette cible est le seul agrégateur.
 
 - [ ] **Step 6: Consigner dans `CLAUDE.md`**
 
