@@ -144,6 +144,7 @@ check("resolved function", resolved["function"], "0x0")
 check("resolved id", resolved["id"], "144d:a808")
 
 # --- isolation_plan: la derivation que le moteur ne fait plus ------------- #
+# Regression guard: les deux chemins heureux du brief doivent rester verts.
 check("hybrid: les P-cores sont isoles",
       hardware.isolation_plan({"hybrid": True, "performance_cpus": [0, 1, 2, 3],
                                "total_cpus": 8}),
@@ -154,8 +155,47 @@ check("uniforme: tout sauf cpu0",
       {"isolcpus": "1-3", "nohz_full": "1-3"})
 check("snapshot vide ne leve pas",
       hardware.isolation_plan({}), {"isolcpus": "", "nohz_full": ""})
+check("un seul cpu: rien a isoler",
+      hardware.isolation_plan({"hybrid": False, "performance_cpus": [],
+                               "total_cpus": 1}),
+      {"isolcpus": "", "nohz_full": ""})
 check("cpu_ranges compresse", hardware.cpu_ranges([0, 1, 2, 3, 8]), "0-3,8")
 check("cpu_ranges vide", hardware.cpu_ranges([]), "")
+
+# ABSENT (rien a isoler) et MALFORME (snapshot qui ment) sont distingues.
+# isolation_plan() finit sur la ligne de commande noyau (nohz_full=...) et
+# la liste blanche GRUB en aval ne garde que l injection shell, pas la
+# validite semantique - donc filtrer les entrees fautives laisserait passer
+# une plage plausible tiree d un snapshot dont on vient de prouver qu il
+# est faux. Refuser est le seul comportement sur qui compter.
+check_raises(
+    "performance_cpus avec une chaine",
+    hardware.HardwareError,
+    lambda: hardware.isolation_plan(
+        {"hybrid": True, "performance_cpus": [0, "x"], "total_cpus": 8}
+    ),
+)
+check_raises(
+    "performance_cpus avec True (piege bool-est-un-int)",
+    hardware.HardwareError,
+    lambda: hardware.isolation_plan(
+        {"hybrid": True, "performance_cpus": [0, True], "total_cpus": 8}
+    ),
+)
+check_raises(
+    "performance_cpus avec un numero de cpu negatif",
+    hardware.HardwareError,
+    lambda: hardware.isolation_plan(
+        {"hybrid": True, "performance_cpus": [-1, 0, 1], "total_cpus": 8}
+    ),
+)
+check_raises(
+    "performance_cpus avec un numero de cpu >= total_cpus",
+    hardware.HardwareError,
+    lambda: hardware.isolation_plan(
+        {"hybrid": True, "performance_cpus": [0, 1, 8], "total_cpus": 8}
+    ),
+)
 
 # --- pci_address_for_device : le pont entre /dev/... et une adresse PCI --- #
 check("un chemin introuvable rend None",

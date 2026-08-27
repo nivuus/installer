@@ -344,6 +344,36 @@ def cpu_ranges(nums: list[int]) -> str:
     return ",".join(parts)
 
 
+def _validate_performance_cpus(performance: list, total: int) -> None:
+    """Reject a `performance_cpus` list this module cannot trust.
+
+    isolation_plan's output is emitted onto the kernel command line
+    (nohz_full=...). The GRUB allowlist downstream
+    (`^[A-Za-z0-9_.,:=/@+-]+$`) exists to stop shell injection, not to judge
+    semantic validity - a range like "-1-1" passes it untouched. So this is
+    the only place that can catch a malformed CPU snapshot before it reaches
+    the boot chain of an installed machine, and it must refuse rather than
+    silently filter: dropping the bad entries would still emit a
+    plausible-looking range derived from a snapshot just proven untrustworthy,
+    and the operator would never learn their machine was mis-detected.
+    """
+    for value in performance:
+        # bool is an int subclass in Python - isinstance(True, int) is True -
+        # so True must be rejected explicitly, or it would silently mean CPU 1.
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise HardwareError(
+                f"performance_cpus contains a non-integer entry: {value!r}"
+            )
+        if value < 0:
+            raise HardwareError(
+                f"performance_cpus contains a negative CPU number: {value}"
+            )
+        if total and value >= total:
+            raise HardwareError(
+                f"performance_cpus contains CPU {value} but total_cpus is {total}"
+            )
+
+
 def isolation_plan(cpu: dict) -> dict:
     """CPUs handed to the guest, as kernel range strings.
 
@@ -353,9 +383,20 @@ def isolation_plan(cpu: dict) -> dict:
     CPUs out of the scheduler for the whole uptime and leave the host on the
     remaining cores even while the guest is shut off. The host/guest split is
     dynamic, done by vm-cpu-partition.sh from the libvirt hooks.
+
+    ABSENT versus MALFORMED are deliberately distinguished, the way
+    passthrough_nvme() already refuses to guess rather than return an empty
+    dict. An absent snapshot ({}, no performance_cpus, no/zero total_cpus) is
+    not an error - there is simply nothing to isolate, so this returns an
+    empty plan. A PRESENT but invalid performance_cpus (a non-int entry, a
+    negative CPU number, or a CPU number >= total_cpus) raises HardwareError:
+    see _validate_performance_cpus for why this must refuse rather than
+    filter, given where this string ends up.
     """
     performance = cpu.get("performance_cpus") or []
     total = cpu.get("total_cpus") or 0
+    if performance:
+        _validate_performance_cpus(performance, total)
     if cpu.get("hybrid") and performance:
         isolated = sorted(performance)
     elif total:

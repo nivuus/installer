@@ -105,6 +105,7 @@ Ajouter les cas qui n'existaient pas, pour les deux fonctions nouvelles :
 
 ```python
 # --- isolation_plan: la derivation que le moteur ne fait plus ------------- #
+# Regression guard: les deux chemins heureux ci-dessous doivent rester verts.
 check("hybrid: les P-cores sont isoles",
       hardware.isolation_plan({"hybrid": True, "performance_cpus": [0, 1, 2, 3],
                                "total_cpus": 8}),
@@ -115,8 +116,49 @@ check("uniforme: tout sauf cpu0",
       {"isolcpus": "1-3", "nohz_full": "1-3"})
 check("snapshot vide ne leve pas",
       hardware.isolation_plan({}), {"isolcpus": "", "nohz_full": ""})
+check("un seul cpu: rien a isoler",
+      hardware.isolation_plan({"hybrid": False, "performance_cpus": [],
+                               "total_cpus": 1}),
+      {"isolcpus": "", "nohz_full": ""})
 check("cpu_ranges compresse", hardware.cpu_ranges([0, 1, 2, 3, 8]), "0-3,8")
 check("cpu_ranges vide", hardware.cpu_ranges([]), "")
+
+# ABSENT (rien a isoler) et MALFORME (snapshot qui ment) sont distingues,
+# comme passthrough_nvme() ailleurs dans ce module refuse de deviner plutot
+# que de rendre un dict vide. isolation_plan() finit sur la ligne de
+# commande noyau (nohz_full=...) et la liste blanche GRUB en aval ne garde
+# que l injection shell, pas la validite semantique - filtrer les entrees
+# fautives laisserait donc passer une plage plausible tiree d un snapshot
+# dont on vient de prouver qu il est faux. Refuser est le seul comportement
+# sur qui compter.
+check_raises(
+    "performance_cpus avec une chaine",
+    hardware.HardwareError,
+    lambda: hardware.isolation_plan(
+        {"hybrid": True, "performance_cpus": [0, "x"], "total_cpus": 8}
+    ),
+)
+check_raises(
+    "performance_cpus avec True (piege bool-est-un-int)",
+    hardware.HardwareError,
+    lambda: hardware.isolation_plan(
+        {"hybrid": True, "performance_cpus": [0, True], "total_cpus": 8}
+    ),
+)
+check_raises(
+    "performance_cpus avec un numero de cpu negatif",
+    hardware.HardwareError,
+    lambda: hardware.isolation_plan(
+        {"hybrid": True, "performance_cpus": [-1, 0, 1], "total_cpus": 8}
+    ),
+)
+check_raises(
+    "performance_cpus avec un numero de cpu >= total_cpus",
+    hardware.HardwareError,
+    lambda: hardware.isolation_plan(
+        {"hybrid": True, "performance_cpus": [0, 1, 8], "total_cpus": 8}
+    ),
+)
 
 # --- pci_address_for_device : le pont entre /dev/... et une adresse PCI --- #
 check("un chemin introuvable rend None",
@@ -208,6 +250,36 @@ def vfio_ids_for_slot(slot: str) -> list[str]:
     return pci_slot_ids(slot)
 
 
+def _validate_performance_cpus(performance: list, total: int) -> None:
+    """Reject a `performance_cpus` list this module cannot trust.
+
+    isolation_plan's output is emitted onto the kernel command line
+    (nohz_full=...). The GRUB allowlist downstream
+    (`^[A-Za-z0-9_.,:=/@+-]+$`) exists to stop shell injection, not to judge
+    semantic validity - a range like "-1-1" passes it untouched. So this is
+    the only place that can catch a malformed CPU snapshot before it reaches
+    the boot chain of an installed machine, and it must refuse rather than
+    silently filter: dropping the bad entries would still emit a
+    plausible-looking range derived from a snapshot just proven untrustworthy,
+    and the operator would never learn their machine was mis-detected.
+    """
+    for value in performance:
+        # bool is an int subclass in Python - isinstance(True, int) is True -
+        # so True must be rejected explicitly, or it would silently mean CPU 1.
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise HardwareError(
+                f"performance_cpus contains a non-integer entry: {value!r}"
+            )
+        if value < 0:
+            raise HardwareError(
+                f"performance_cpus contains a negative CPU number: {value}"
+            )
+        if total and value >= total:
+            raise HardwareError(
+                f"performance_cpus contains CPU {value} but total_cpus is {total}"
+            )
+
+
 def isolation_plan(cpu: dict) -> dict:
     """CPUs handed to the guest, as kernel range strings.
 
@@ -217,9 +289,20 @@ def isolation_plan(cpu: dict) -> dict:
     CPUs out of the scheduler for the whole uptime and leave the host on the
     remaining cores even while the guest is shut off. The host/guest split is
     dynamic, done by vm-cpu-partition.sh from the libvirt hooks.
+
+    ABSENT versus MALFORMED are deliberately distinguished, the way
+    passthrough_nvme() already refuses to guess rather than return an empty
+    dict. An absent snapshot ({}, no performance_cpus, no/zero total_cpus) is
+    not an error - there is simply nothing to isolate, so this returns an
+    empty plan. A PRESENT but invalid performance_cpus (a non-int entry, a
+    negative CPU number, or a CPU number >= total_cpus) raises HardwareError:
+    see _validate_performance_cpus for why this must refuse rather than
+    filter, given where this string ends up.
     """
     performance = cpu.get("performance_cpus") or []
     total = cpu.get("total_cpus") or 0
+    if performance:
+        _validate_performance_cpus(performance, total)
     if cpu.get("hybrid") and performance:
         isolated = sorted(performance)
     elif total:
