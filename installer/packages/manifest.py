@@ -114,6 +114,29 @@ def _safe_relpath(rel: str, what: str) -> str:
     return os.path.normpath(rel)
 
 
+def _str_pairs(raw: Any, what: str, kind: str) -> list[tuple[str, str]]:
+    """Sorted (key, value) pairs from a mapping, both sides required to be strings.
+
+    PyYAML implements YAML 1.1, where a bare `on`, `off`, `yes` or `no` key
+    parses as a boolean - so `claims: {on: exclusive}` is a plausible authoring
+    slip that yields a bool key. Sorting mixed-type keys raises TypeError, which
+    would leave this module as an unhandled crash instead of the ManifestError
+    every caller is written to expect. So keys and values are checked, and
+    rejected with a specific message, before anything sorts or coerces them.
+    """
+    if not isinstance(raw, dict):
+        raise ManifestError(f"{what}: '{kind}' must be a mapping")
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            raise ManifestError(
+                f"{what}: {kind} key {key!r} must be a string - quote it if it "
+                "looks like on/off/yes/no, which YAML parses as a boolean")
+        if not isinstance(value, str):
+            raise ManifestError(
+                f"{what}: {kind} value {value!r} for {key!r} must be a string")
+    return sorted(raw.items())
+
+
 def _parse_platform(raw: Any, tier: str, what: str) -> Platform:
     if not isinstance(raw, dict):
         raise ManifestError(f"{what}: 'platform' must be a mapping")
@@ -163,31 +186,30 @@ def parse_manifest(data: Any, root: str) -> Manifest:
         raise ManifestError(f"{what}: 'requires' must be a mapping")
 
     claims_raw = data.get("claims") or {}
-    if not isinstance(claims_raw, dict):
-        raise ManifestError(f"{what}: 'claims' must be a mapping")
     claims = []
-    for resource, mode in sorted(claims_raw.items()):
+    for resource, mode in _str_pairs(claims_raw, what, "claims"):
         if mode not in CLAIM_MODES:
             raise ManifestError(
                 f"{what}: claim {resource!r} mode must be one of {CLAIM_MODES}, "
                 f"got {mode!r}")
-        claims.append((str(resource), str(mode)))
+        claims.append((resource, mode))
 
     wizard = data.get("wizard") or {}
     if not isinstance(wizard, dict):
         raise ManifestError(f"{what}: 'wizard' must be a mapping")
-    questions_file = (_safe_relpath(str(wizard["questions"]), what)
-                      if wizard.get("questions") else "")
+    questions_raw = wizard.get("questions")
+    if questions_raw is not None and not isinstance(questions_raw, str):
+        raise ManifestError(
+            f"{what}: wizard 'questions' must be a string, got {questions_raw!r}")
+    questions_file = _safe_relpath(questions_raw, what) if questions_raw else ""
 
     hooks_raw = data.get("hooks") or {}
-    if not isinstance(hooks_raw, dict):
-        raise ManifestError(f"{what}: 'hooks' must be a mapping")
     hooks = []
-    for phase, rel in sorted(hooks_raw.items()):
+    for phase, rel in _str_pairs(hooks_raw, what, "hooks"):
         if phase not in HOOK_PHASES:
             raise ManifestError(
                 f"{what}: unknown hook phase {phase!r}; expected {HOOK_PHASES}")
-        hooks.append((phase, _safe_relpath(str(rel), what)))
+        hooks.append((phase, _safe_relpath(rel, what)))
 
     return Manifest(
         name=name, version=version, label=label, tier=tier, root=root,

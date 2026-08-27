@@ -138,6 +138,45 @@ with tempfile.TemporaryDirectory() as tmp:
     check_raises("invalid YAML refused",
                  lambda: load_manifest(str(d / "broken.yaml")), "invalid YAML")
 
+    # PyYAML implements YAML 1.1: a bare on/off/yes/no key parses as a bool,
+    # not a string. Built through real YAML (not a hand-built dict), because
+    # the point is that PyYAML itself produces the bool.
+    (d / "bool-key-claims.yaml").write_text(
+        f"apiVersion: {API_VERSION}\nname: demo\nversion: 1.0.0\n"
+        "label: Demo\ntier: userspace\nclaims:\n  on: exclusive\n"
+        "  gpu: exclusive\n")
+    check_raises("bare 'on:' claims key refused",
+                 lambda: load_manifest(str(d / "bool-key-claims.yaml")),
+                 "must be a string")
+
+    (d / "bool-key-hooks.yaml").write_text(
+        f"apiVersion: {API_VERSION}\nname: demo\nversion: 1.0.0\n"
+        "label: Demo\ntier: userspace\nhooks:\n  yes: hooks/x.py\n")
+    check_raises("bare 'yes:' hooks key refused",
+                 lambda: load_manifest(str(d / "bool-key-hooks.yaml")),
+                 "must be a string")
+
+    (d / "int-key-claims.yaml").write_text(
+        f"apiVersion: {API_VERSION}\nname: demo\nversion: 1.0.0\n"
+        "label: Demo\ntier: userspace\nclaims:\n  1: exclusive\n")
+    check_raises("integer claims key refused",
+                 lambda: load_manifest(str(d / "int-key-claims.yaml")),
+                 "must be a string")
+
+    (d / "list-hook-value.yaml").write_text(
+        f"apiVersion: {API_VERSION}\nname: demo\nversion: 1.0.0\n"
+        "label: Demo\ntier: userspace\nhooks:\n  install: [a, b]\n")
+    check_raises("list hook value refused",
+                 lambda: load_manifest(str(d / "list-hook-value.yaml")),
+                 "must be a string")
+
+    (d / "int-questions.yaml").write_text(
+        f"apiVersion: {API_VERSION}\nname: demo\nversion: 1.0.0\n"
+        "label: Demo\ntier: userspace\nwizard:\n  questions: 123\n")
+    check_raises("integer wizard.questions value refused",
+                 lambda: load_manifest(str(d / "int-questions.yaml")),
+                 "must be a string")
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
