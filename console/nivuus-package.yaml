@@ -1,0 +1,33 @@
+apiVersion: nivuus.dev/v1
+name: console
+version: 1.0.0
+label: "Console de jeu Windows"
+tier: platform
+
+requires:
+  capabilities: [iommu, gpu-discrete, nvme-dedicated]
+  features: [networking]
+
+claims:
+  gpu: exclusive
+  nvme: exclusive
+
+platform:
+  modules: [vfio, vfio_pci, vfio_iommu_type1]
+  kernel-cmdline: ["intel_iommu=on", "iommu=pt"]
+
+apt:
+  - qemu-kvm
+  - libvirt-daemon-system
+  - libvirt-clients
+  - ovmf
+  - virtiofsd
+  - bridge-utils
+
+wizard:
+  questions: wizard.yaml
+
+hooks:
+  resolve: hooks/resolve.py
+  install: hooks/install.py
+  activate: hooks/activate.py
