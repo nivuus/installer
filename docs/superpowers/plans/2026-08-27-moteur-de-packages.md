@@ -2999,6 +2999,59 @@ check_raises("a package refusal stops the plan",
                  {**config, "packages": {"refuser": {}}}, HW, FakeEmit()),
              "NVMe")
 
+# --- config['packages'] shape validation ------------------------------------ #
+# A plausible authoring slip in a hand-written config.json (the engine is
+# documented as runnable standalone against a loopback disk - not every
+# caller went through the portal's Pydantic model) must surface as a
+# StepError naming the field, never as a raw Python TypeError from deep
+# inside a dict lookup.
+check_raises("packages as a list is refused by shape, not TypeError",
+             lambda: steps_packages.plan_packages(
+                 {**config, "packages": ["demo"]}, HW, FakeEmit()),
+             "packages")
+
+check_raises("packages as a bare string is refused the same way",
+             lambda: steps_packages.plan_packages(
+                 {**config, "packages": "demo"}, HW, FakeEmit()),
+             "packages")
+
+check_raises("a package's answers must themselves be a mapping",
+             lambda: steps_packages.plan_packages(
+                 {**config, "packages": {"demo": ["not", "a", "mapping"]}},
+                 HW, FakeEmit()),
+             "demo")
+
+# --- name-collision cross-referencing ---------------------------------------- #
+# When discover() excludes every manifest sharing a colliding name, a
+# selected-but-missing package must not be reported as merely "introuvable" -
+# that reads as "you asked for something that isn't here" when the truth is
+# "it's here twice and both were refused". The collision detail discover()
+# put in the warn stream must also reach the StepError itself.
+with tempfile.TemporaryDirectory() as collision_root:
+    for variant, label in (("pkg-a", "Doublon A"), ("pkg-b", "Doublon B")):
+        pkg_dir = pathlib.Path(collision_root) / variant
+        pkg_dir.mkdir()
+        (pkg_dir / "nivuus-package.yaml").write_text(
+            "apiVersion: nivuus.dev/v1\n"
+            "name: dupe\n"
+            "version: 1.0.0\n"
+            f"label: \"{label}\"\n"
+            "tier: userspace\n")
+
+    from packages.discovery import discover as _real_discover  # noqa: E402
+
+    real_discover = steps_packages.discover
+    steps_packages.discover = lambda: _real_discover(root=collision_root)
+    try:
+        check_raises(
+            "a selected package excluded by a name collision names the "
+            "collision, not just 'introuvable'",
+            lambda: steps_packages.plan_packages(
+                {**config, "packages": {"dupe": {}}}, HW, FakeEmit()),
+            "deux packages ou plus déclarent le nom")
+    finally:
+        steps_packages.discover = real_discover
+
 # --- apply_packages -------------------------------------------------------- #
 calls = []
 
@@ -3214,13 +3267,43 @@ MODULES_REL_PATH = "etc/modules"
 HUGEPAGE_MIB = 2
 
 
+def _validate_selection(raw) -> dict:
+    """Validate the shape of config['packages'] before anything else uses it.
+
+    plan_packages is not only reached behind the portal's Pydantic-validated
+    config: the engine is documented as runnable standalone against a
+    loopback disk from a hand-written config.json (see run.py's docstring),
+    so it cannot assume a validated caller. A non-mapping value here must not
+    surface as a raw Python TypeError from deep inside a dict lookup - that
+    reads as an installer bug, not something an operator can act on. It must
+    be a mapping of package name -> mapping of answers (or no answers at
+    all), refused by field name and shape otherwise.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise StepError(
+            "config « packages » doit être un mapping nom de package → "
+            f"réponses ; reçu {type(raw).__name__}")
+    for name, answers in raw.items():
+        if not isinstance(name, str):
+            raise StepError(
+                f"config « packages » : la clé {name!r} doit être une chaîne "
+                "(nom de package)")
+        if answers is not None and not isinstance(answers, dict):
+            raise StepError(
+                f"config « packages » : les réponses de {name!r} doivent "
+                f"être un mapping ; reçu {type(answers).__name__}")
+    return raw
+
+
 def plan_packages(config: dict, hw: dict, emit):
     """Decide everything, write nothing. Raises StepError on any refusal.
 
     Returns (plan, kernel_cmdline) where plan is a list of
     (manifest, validated answers, resolution).
     """
-    selected = config.get("packages") or {}
+    selected = _validate_selection(config.get("packages"))
     if not selected:
         return [], ()
 
@@ -3232,9 +3315,19 @@ def plan_packages(config: dict, hw: dict, emit):
     by_name = {m.name: m for m in manifests}
     unknown = sorted(set(selected) - set(by_name))
     if unknown:
+        # A name missing from by_name is either simply absent, or it is
+        # exactly the name discover() just refused because two or more
+        # manifests declared it - discover()'s own contract is that a
+        # collision's `source` IS the package name, not a path (see its
+        # docstring). Without this cross-reference the real cause is
+        # stranded in the warn stream above, and an operator on a
+        # screenless machine reads the failure, not the log.
+        collisions = {source: message for source, message in errors
+                      if source in unknown}
+        details = [collisions.get(name, name) for name in unknown]
         raise StepError(
             "packages sélectionnés mais introuvables sur ce support : "
-            + ", ".join(unknown))
+            + "; ".join(details))
 
     chosen = [by_name[name] for name in sorted(selected)]
 

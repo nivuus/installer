@@ -31,27 +31,67 @@ MODULES_REL_PATH = "etc/modules"
 HUGEPAGE_MIB = 2
 
 
+def _validate_selection(raw) -> dict:
+    """Validate the shape of config['packages'] before anything else uses it.
+
+    plan_packages is not only reached behind the portal's Pydantic-validated
+    config: the engine is documented as runnable standalone against a
+    loopback disk from a hand-written config.json (see run.py's docstring),
+    so it cannot assume a validated caller. A non-mapping value here must not
+    surface as a raw Python TypeError from deep inside a dict lookup - that
+    reads as an installer bug, not something an operator can act on. It must
+    be a mapping of package name -> mapping of answers (or no answers at
+    all), refused by field name and shape otherwise.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise StepError(
+            "config « packages » doit être un mapping nom de package → "
+            f"réponses ; reçu {type(raw).__name__}")
+    for name, answers in raw.items():
+        if not isinstance(name, str):
+            raise StepError(
+                f"config « packages » : la clé {name!r} doit être une chaîne "
+                "(nom de package)")
+        if answers is not None and not isinstance(answers, dict):
+            raise StepError(
+                f"config « packages » : les réponses de {name!r} doivent "
+                f"être un mapping ; reçu {type(answers).__name__}")
+    return raw
+
+
 def plan_packages(config: dict, hw: dict, emit):
     """Decide everything, write nothing. Raises StepError on any refusal.
 
     Returns (plan, kernel_cmdline) where plan is a list of
     (manifest, validated answers, resolution).
     """
-    selected = config.get("packages") or {}
+    selected = _validate_selection(config.get("packages"))
     if not selected:
         return [], ()
 
     emit.info("packages", 60, f"Planning {len(selected)} package(s)…")
     manifests, errors = discover()
-    for path, message in errors:
-        emit.warn("packages", 60, f"Ignoring unreadable manifest {path}: {message}")
+    for source, message in errors:
+        emit.warn("packages", 60, f"Manifeste ignoré ({source}) : {message}")
 
     by_name = {m.name: m for m in manifests}
     unknown = sorted(set(selected) - set(by_name))
     if unknown:
+        # A name missing from by_name is either simply absent, or it is
+        # exactly the name discover() just refused because two or more
+        # manifests declared it - discover()'s own contract is that a
+        # collision's `source` IS the package name, not a path (see its
+        # docstring). Without this cross-reference the real cause is
+        # stranded in the warn stream above, and an operator on a
+        # screenless machine reads the failure, not the log.
+        collisions = {source: message for source, message in errors
+                      if source in unknown}
+        details = [collisions.get(name, name) for name in unknown]
         raise StepError(
             "packages sélectionnés mais introuvables sur ce support : "
-            + ", ".join(unknown))
+            + "; ".join(details))
 
     chosen = [by_name[name] for name in sorted(selected)]
 

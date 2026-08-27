@@ -104,6 +104,59 @@ check_raises("a package refusal stops the plan",
                  {**config, "packages": {"refuser": {}}}, HW, FakeEmit()),
              "NVMe")
 
+# --- config['packages'] shape validation ------------------------------------ #
+# A plausible authoring slip in a hand-written config.json (the engine is
+# documented as runnable standalone against a loopback disk - not every
+# caller went through the portal's Pydantic model) must surface as a
+# StepError naming the field, never as a raw Python TypeError from deep
+# inside a dict lookup.
+check_raises("packages as a list is refused by shape, not TypeError",
+             lambda: steps_packages.plan_packages(
+                 {**config, "packages": ["demo"]}, HW, FakeEmit()),
+             "packages")
+
+check_raises("packages as a bare string is refused the same way",
+             lambda: steps_packages.plan_packages(
+                 {**config, "packages": "demo"}, HW, FakeEmit()),
+             "packages")
+
+check_raises("a package's answers must themselves be a mapping",
+             lambda: steps_packages.plan_packages(
+                 {**config, "packages": {"demo": ["not", "a", "mapping"]}},
+                 HW, FakeEmit()),
+             "demo")
+
+# --- name-collision cross-referencing ---------------------------------------- #
+# When discover() excludes every manifest sharing a colliding name, a
+# selected-but-missing package must not be reported as merely "introuvable" -
+# that reads as "you asked for something that isn't here" when the truth is
+# "it's here twice and both were refused". The collision detail discover()
+# put in the warn stream must also reach the StepError itself.
+with tempfile.TemporaryDirectory() as collision_root:
+    for variant, label in (("pkg-a", "Doublon A"), ("pkg-b", "Doublon B")):
+        pkg_dir = pathlib.Path(collision_root) / variant
+        pkg_dir.mkdir()
+        (pkg_dir / "nivuus-package.yaml").write_text(
+            "apiVersion: nivuus.dev/v1\n"
+            "name: dupe\n"
+            "version: 1.0.0\n"
+            f"label: \"{label}\"\n"
+            "tier: userspace\n")
+
+    from packages.discovery import discover as _real_discover  # noqa: E402
+
+    real_discover = steps_packages.discover
+    steps_packages.discover = lambda: _real_discover(root=collision_root)
+    try:
+        check_raises(
+            "a selected package excluded by a name collision names the "
+            "collision, not just 'introuvable'",
+            lambda: steps_packages.plan_packages(
+                {**config, "packages": {"dupe": {}}}, HW, FakeEmit()),
+            "deux packages ou plus déclarent le nom")
+    finally:
+        steps_packages.discover = real_discover
+
 # --- apply_packages -------------------------------------------------------- #
 calls = []
 
