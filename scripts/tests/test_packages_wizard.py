@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""Tests for installer/packages/wizard.py - the restricted question vocabulary.
+
+A third-party package must not be able to draw arbitrary forms in the portal,
+so the vocabulary is closed at six types rather than open at JSON Schema. Two
+of them (disque, gpu) exist precisely because they need the ENGINE's hardware
+detection to render at all - a package cannot draw its own disk picker.
+
+Run: python3 scripts/tests/test_packages_wizard.py
+"""
+import pathlib
+import sys
+import tempfile
+
+REPO = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "installer"))
+
+from packages.wizard import (  # noqa: E402
+    QUESTION_TYPES, Question, WizardError, load_questions, validate_answers,
+)
+
+failures = []
+
+
+def check(label, got, want):
+    if got != want:
+        failures.append(f"{label}: got {got!r}, want {want!r}")
+
+
+def check_raises(label, fn, needle):
+    try:
+        fn()
+    except WizardError as exc:
+        if needle not in str(exc):
+            failures.append(f"{label}: message {str(exc)!r} lacks {needle!r}")
+        return
+    failures.append(f"{label}: expected WizardError, none raised")
+
+
+QUESTIONS_YAML = """- key: dedicated_disk
+  type: disque
+  label: "Disque dédié à la console"
+  required: true
+- key: admin_password
+  type: secret
+  label: "Mot de passe administrateur"
+  required: true
+- key: retro
+  type: bool
+  label: "Retrogaming"
+  default: false
+- key: edition
+  type: choix
+  label: "Édition"
+  choices: [ltsc, pro]
+  default: ltsc
+"""
+
+with tempfile.TemporaryDirectory() as tmp:
+    path = pathlib.Path(tmp) / "wizard.yaml"
+    path.write_text(QUESTIONS_YAML)
+    questions = load_questions(str(path))
+
+check("all questions loaded", len(questions), 4)
+check("keys preserved in order",
+      [q.key for q in questions],
+      ["dedicated_disk", "admin_password", "retro", "edition"])
+check("choices parsed", questions[3].choices, ("ltsc", "pro"))
+check("default parsed", questions[3].default, "ltsc")
+check("required defaults to false", questions[2].required, False)
+check("every type is a known one",
+      {q.type for q in questions} - set(QUESTION_TYPES), set())
+
+# A secret must never carry a default back to the browser.
+secret_dict = questions[1].to_dict()
+check("secret exposes no default", "default" in secret_dict, False)
+check("non-secret exposes its default", questions[2].to_dict()["default"], False)
+
+with tempfile.TemporaryDirectory() as tmp:
+    bad = pathlib.Path(tmp) / "w.yaml"
+    bad.write_text("- key: x\n  type: freeform\n  label: X\n")
+    check_raises("unknown question type refused",
+                 lambda: load_questions(str(bad)), "freeform")
+
+    dup = pathlib.Path(tmp) / "dup.yaml"
+    dup.write_text("- key: x\n  type: bool\n  label: A\n"
+                   "- key: x\n  type: bool\n  label: B\n")
+    check_raises("duplicate key refused", lambda: load_questions(str(dup)),
+                 "duplicate")
+
+    nochoice = pathlib.Path(tmp) / "nc.yaml"
+    nochoice.write_text("- key: x\n  type: choix\n  label: X\n")
+    check_raises("choix without choices refused",
+                 lambda: load_questions(str(nochoice)), "choices")
+
+# --- validate_answers ------------------------------------------------------ #
+answers = validate_answers(questions, {
+    "dedicated_disk": "/dev/nvme1n1",
+    "admin_password": "hunter2hunter2",
+    "edition": "pro",
+})
+check("answers pass through", answers["dedicated_disk"], "/dev/nvme1n1")
+check("an unanswered optional takes its default", answers["retro"], False)
+check("an answered optional wins over its default", answers["edition"], "pro")
+
+check_raises("a missing required answer is refused",
+             lambda: validate_answers(questions, {"admin_password": "x"}),
+             "dedicated_disk")
+check_raises("a choix outside its choices is refused",
+             lambda: validate_answers(questions, {
+                 "dedicated_disk": "/dev/nvme1n1", "admin_password": "x",
+                 "edition": "home"}),
+             "edition")
+check_raises("a non-bool for a bool question is refused",
+             lambda: validate_answers(questions, {
+                 "dedicated_disk": "/dev/nvme1n1", "admin_password": "x",
+                 "retro": "oui"}),
+             "retro")
+check_raises("an unknown key is refused",
+             lambda: validate_answers(questions, {
+                 "dedicated_disk": "/dev/nvme1n1", "admin_password": "x",
+                 "sournois": 1}),
+             "sournois")
+
+check("a package with no questions accepts nothing",
+      validate_answers([], {}), {})
+check_raises("a package with no questions refuses any answer",
+             lambda: validate_answers([], {"x": 1}), "x")
+
+check("Question is frozen and comparable",
+      Question("a", "bool", "A", False, (), False)
+      == Question("a", "bool", "A", False, (), False), True)
+
+if failures:
+    print(f"FAIL ({len(failures)})")
+    for f in failures:
+        print("  -", f)
+    sys.exit(1)
+print("OK - all wizard vocabulary tests passed")
