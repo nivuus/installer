@@ -139,9 +139,27 @@ root and does not survive the reboot). Enablement is a **direct symlink** into
 `multi-user.target.wants/`, which is precisely what `systemctl enable` does for
 a `WantedBy=multi-user.target` template unit — chosen over shelling into the
 chroot because `systemctl` fails silently in constrained environments (see the
-PID-namespace note below) and a symlink either exists or raises. The target
-also gets `python3-yaml`: `activate_cli.py` re-parses the manifest at first
-boot and nothing else pulls PyYAML in.
+PID-namespace note below) and a symlink either exists or raises.
+
+**A fourth broken link, found by re-review after the first three were fixed:
+`python3` itself was never guaranteed on the target.** `debootstrap.py`'s
+`BASE_INCLUDE` has no `python3`, and the only other installer of it
+(`install.sh`'s `python3-pip`) runs only behind the optional `kvm-vfio`/
+`thermal` features — so a minimal install that selects a package but neither
+feature reached first boot with no interpreter for the unit's own
+`ExecStart`, silently, forever (the apt call was `check=False`, and the
+stamp file is only written on success, so it retried every boot with no
+error surfaced anywhere). Fixed by splitting the one apt call into two:
+`ACTIVATE_APT = ["python3", "python3-yaml"]` (the activate phase's own hard
+requirements — `activate_cli.py` needs an interpreter to run at all and
+re-parses the manifest with PyYAML at first boot, and nothing else pulls
+either in) is installed in its own `apt-get` call whose failure raises
+`StepError` and stops the install; the packages' own declared `apt`
+(`manifest.apt`) stays a separate, deliberately lenient `check=False` call
+— a package may still be usable without an optional dependency, so only a
+warning is emitted. The two must never be merged back into one call: that
+is exactly the "armed, advertised, and silently inert" failure class this
+whole area exists to prevent.
 
 **Kernel parameters are validated in `plan_packages`, not in `bootloader`.**
 The allowlist lives in `bootloader.py::grub_defaults`, which runs at step 7 —

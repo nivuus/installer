@@ -44,10 +44,17 @@ WANTS_REL_DIR = "etc/systemd/system/multi-user.target.wants"
 PACKAGES_REL_DIR = "opt/nivuus-packages"
 CLI_REL_PATH = "installer/packages/activate_cli.py"
 UNIT_SRC_REL_PATH = "configs/systemd/" + UNIT_NAME
-# activate_cli.py parses the manifest again at first boot, and manifest.py
-# imports PyYAML. Nothing else in the target's package list pulls it in, so a
-# package with an activate phase would fail on every boot with ImportError.
-ACTIVATE_APT = ["python3-yaml"]
+# The activate phase's own hard requirements - NOT the packages' declared apt
+# (that is `manifest.apt`, installed separately below with a lenient policy).
+# activate_cli.py is the ExecStart of a systemd unit, so it needs an
+# interpreter; nothing else on a minimal target guarantees one, since
+# debootstrap.py's BASE_INCLUDE has no python3 and the kvm-vfio/thermal
+# features that pull it in via install.sh are both optional. It also
+# re-parses the manifest at first boot, and manifest.py imports PyYAML,
+# which nothing else in a minimal target's package list pulls in. Without
+# either, the activation unit armed for first boot has no interpreter to run
+# it at all - fails on every boot with no operator-visible cause.
+ACTIVATE_APT = ["python3", "python3-yaml"]
 # A 2 MiB hugepage is the x86-64 default; the manifest speaks MiB because
 # "how much memory does the guest need" is the question an author can answer.
 HUGEPAGE_MIB = 2
@@ -244,7 +251,7 @@ def apply_packages(plan, target: str, nivuus_dir: str, hw: dict, emit) -> None:
 
     modules: list[str] = []
     hugepages_mib = 0
-    apt: list[str] = list(ACTIVATE_APT)
+    apt: list[str] = []
     for manifest, _, resolution in plan:
         for module in resolution.platform.modules:
             if module not in modules:
@@ -273,13 +280,39 @@ def apply_packages(plan, target: str, nivuus_dir: str, hw: dict, emit) -> None:
                    "# Written by the Nivuus package engine.\n"
                    f"vm.nr_hugepages = {pages}\n")
 
+    # The activate phase's own hard requirements, installed separately from -
+    # and before - the packages' own apt below. It is not the same kind of
+    # call: activate_cli.py's ExecStart has no interpreter to run without
+    # python3, and cannot re-parse the manifest without python3-yaml. Merging
+    # this into the packages' lenient call below would let a transient apt
+    # failure sail through as a mere warning while quietly disarming the
+    # whole first-boot activation - the exact "armed, advertised, and
+    # silently inert" failure class this module exists to prevent. check=True
+    # (the chroot_run default) means a failure raises StepError from inside
+    # steps.util.run() and stops the install right here; the explicit check
+    # below is a second line of defense, so the message names exactly what
+    # is missing rather than surfacing as a bare subprocess error.
+    emit.info("packages", 94,
+              "Installing activate phase requirements: "
+              f"{' '.join(ACTIVATE_APT)}")
+    proc = chroot_run(target, ["apt-get", "install", "-y", *ACTIVATE_APT])
+    if proc.returncode != 0:
+        raise StepError(
+            "installation des dépendances de la phase d'activation en échec "
+            f"(code {proc.returncode}) pour : {' '.join(ACTIVATE_APT)} — "
+            "l'unité d'activation du premier boot n'aurait pas "
+            "d'interpréteur pour s'exécuter")
+
     if apt:
-        emit.info("packages", 94, f"Installing: {' '.join(apt)}")
+        emit.info("packages", 94,
+                  f"Installing package apt dependencies: {' '.join(apt)}")
         # Not fatal - a package may still be usable without an optional
         # dependency, and failing the whole install here would be worse than
-        # the risk. But it must never be silent: the install hook is about to
-        # run against a system that does not have what it asked for, and the
-        # operator has to be able to connect the two.
+        # the risk. This leniency covers only the PACKAGES' OWN declared apt
+        # (manifest.apt) - the activate phase's own requirements above are
+        # fatal on purpose. It must never be silent: the install hook is
+        # about to run against a system that does not have what it asked
+        # for, and the operator has to be able to connect the two.
         proc = chroot_run(target, ["apt-get", "install", "-y", *apt],
                           check=False)
         if proc.returncode != 0:

@@ -3090,6 +3090,22 @@ def fake_chroot_run(target, cmd, **kwargs):
     return R()
 
 
+def make_failing_chroot_run(needle):
+    """A fake chroot_run whose call containing `needle` reports failure.
+
+    Mirrors real chroot_run's contract (a CompletedProcess-like object with
+    a returncode) without raising itself - apply_packages is the one that
+    must turn a non-zero returncode into a StepError, exactly as it has to
+    do against the real subprocess wrapper.
+    """
+    def fake(target, cmd, **kwargs):
+        calls.append(cmd)
+        class R:
+            returncode = 1 if any(needle in part for part in cmd) else 0
+        return R()
+    return fake
+
+
 def seed_payload(target: pathlib.Path) -> str:
     """Reproduce what copy_payload() leaves at /opt/nivuus on the target.
 
@@ -3126,6 +3142,28 @@ with tempfile.TemporaryDirectory() as tmp:
           any("cowsay" in c for c in calls), True)
     check("apt was asked for the YAML parser the activate phase needs",
           any("python3-yaml" in c for c in calls), True)
+    # python3 itself must be named explicitly, not merely pulled in as a
+    # transitive dependency of python3-yaml - relying on a transitive pull
+    # for the interpreter the unit's own ExecStart needs is the bug this
+    # fix closes.
+    check("apt was asked for python3 explicitly",
+          any("python3" in c for c in calls), True)
+
+    # The activate phase's own hard requirements must be a SEPARATE apt-get
+    # invocation from the packages' declared (lenient) apt - never merged
+    # into one call, or the two failure policies collapse into one.
+    activate_calls = [c for c in calls
+                       if "apt-get" in c and "install" in c and "python3" in c]
+    package_apt_calls = [c for c in calls
+                          if "apt-get" in c and "install" in c and "cowsay" in c]
+    check("the activate requirements are installed in their own apt-get call",
+          len(activate_calls), 1)
+    check("that call does not also carry the packages' own apt",
+          any("cowsay" in c for c in activate_calls), False)
+    check("the packages' own apt is installed in a separate apt-get call",
+          len(package_apt_calls), 1)
+    check("that call does not also carry the activate requirements",
+          any("python3-yaml" in c for c in package_apt_calls), False)
 
     # --- the activate phase must be able to run on the installed system ----- #
     unit = target / "etc/systemd/system/nivuus-package-activate@.service"
@@ -3166,6 +3204,45 @@ with tempfile.TemporaryDirectory() as tmp:
           state["demo"]["answers"]["greeting"], "salut")
     check("the recorded version matches the manifest",
           state["demo"]["version"], "1.0.0")
+
+# --- the activate phase's own apt requirements are fatal, unlike the ------- #
+# --- packages' own declared apt --------------------------------------------- #
+# If installing python3/python3-yaml fails, the activation unit armed for
+# first boot has no interpreter to run it - the install must stop here
+# rather than report success over a broken chain. This is the residual
+# finding this fix closes.
+with tempfile.TemporaryDirectory() as tmp:
+    steps_packages.chroot_run = make_failing_chroot_run("python3")
+    target = pathlib.Path(tmp)
+    nivuus_dir = seed_payload(target)
+    plan, _ = steps_packages.plan_packages(config, HW, FakeEmit())
+    check_raises(
+        "a failing activate-requirements install raises StepError and "
+        "names what failed",
+        lambda: steps_packages.apply_packages(plan, tmp, nivuus_dir, HW,
+                                              FakeEmit()),
+        "python3-yaml")
+    check("the failed apt-get call did name python3 explicitly",
+          any("python3" in c for c in calls[-1:]), True)
+
+# A failing PACKAGES' apt call, by contrast, must remain a warning: a
+# package may still be usable without an optional dependency, and this
+# leniency is deliberate. Regression guard on that deliberate choice.
+with tempfile.TemporaryDirectory() as tmp:
+    steps_packages.chroot_run = make_failing_chroot_run("cowsay")
+    target = pathlib.Path(tmp)
+    nivuus_dir = seed_payload(target)
+    plan, _ = steps_packages.plan_packages(config, HW, FakeEmit())
+    emit = FakeEmit()
+    # Must not raise: apply_packages() completing normally IS the assertion.
+    steps_packages.apply_packages(plan, tmp, nivuus_dir, HW, emit)
+    warnings = [msg for level, msg in emit.lines if level == "warn"]
+    check("a failing packages' apt call only warns, it does not raise",
+          any("cowsay" in w for w in warnings), True)
+    check("the activation unit still reached the target despite the "
+          "packages' apt failure",
+          (target / "etc/systemd/system"
+           / "nivuus-package-activate@.service").is_file(), True)
 
 # A payload with no activation unit must fail the install, not report success:
 # an install that cannot activate anything at first boot has not done what it
@@ -3439,10 +3516,17 @@ WANTS_REL_DIR = "etc/systemd/system/multi-user.target.wants"
 PACKAGES_REL_DIR = "opt/nivuus-packages"
 CLI_REL_PATH = "installer/packages/activate_cli.py"
 UNIT_SRC_REL_PATH = "configs/systemd/" + UNIT_NAME
-# activate_cli.py parses the manifest again at first boot, and manifest.py
-# imports PyYAML. Nothing else in the target's package list pulls it in, so a
-# package with an activate phase would fail on every boot with ImportError.
-ACTIVATE_APT = ["python3-yaml"]
+# The activate phase's own hard requirements - NOT the packages' declared apt
+# (that is `manifest.apt`, installed separately below with a lenient policy).
+# activate_cli.py is the ExecStart of a systemd unit, so it needs an
+# interpreter; nothing else on a minimal target guarantees one, since
+# debootstrap.py's BASE_INCLUDE has no python3 and the kvm-vfio/thermal
+# features that pull it in via install.sh are both optional. It also
+# re-parses the manifest at first boot, and manifest.py imports PyYAML,
+# which nothing else in a minimal target's package list pulls in. Without
+# either, the activation unit armed for first boot has no interpreter to run
+# it at all - fails on every boot with no operator-visible cause.
+ACTIVATE_APT = ["python3", "python3-yaml"]
 # A 2 MiB hugepage is the x86-64 default; the manifest speaks MiB because
 # "how much memory does the guest need" is the question an author can answer.
 HUGEPAGE_MIB = 2
@@ -3639,7 +3723,7 @@ def apply_packages(plan, target: str, nivuus_dir: str, hw: dict, emit) -> None:
 
     modules: list[str] = []
     hugepages_mib = 0
-    apt: list[str] = list(ACTIVATE_APT)
+    apt: list[str] = []
     for manifest, _, resolution in plan:
         for module in resolution.platform.modules:
             if module not in modules:
@@ -3668,13 +3752,39 @@ def apply_packages(plan, target: str, nivuus_dir: str, hw: dict, emit) -> None:
                    "# Written by the Nivuus package engine.\n"
                    f"vm.nr_hugepages = {pages}\n")
 
+    # The activate phase's own hard requirements, installed separately from -
+    # and before - the packages' own apt below. It is not the same kind of
+    # call: activate_cli.py's ExecStart has no interpreter to run without
+    # python3, and cannot re-parse the manifest without python3-yaml. Merging
+    # this into the packages' lenient call below would let a transient apt
+    # failure sail through as a mere warning while quietly disarming the
+    # whole first-boot activation - the exact "armed, advertised, and
+    # silently inert" failure class this module exists to prevent. check=True
+    # (the chroot_run default) means a failure raises StepError from inside
+    # steps.util.run() and stops the install right here; the explicit check
+    # below is a second line of defense, so the message names exactly what
+    # is missing rather than surfacing as a bare subprocess error.
+    emit.info("packages", 94,
+              "Installing activate phase requirements: "
+              f"{' '.join(ACTIVATE_APT)}")
+    proc = chroot_run(target, ["apt-get", "install", "-y", *ACTIVATE_APT])
+    if proc.returncode != 0:
+        raise StepError(
+            "installation des dépendances de la phase d'activation en échec "
+            f"(code {proc.returncode}) pour : {' '.join(ACTIVATE_APT)} — "
+            "l'unité d'activation du premier boot n'aurait pas "
+            "d'interpréteur pour s'exécuter")
+
     if apt:
-        emit.info("packages", 94, f"Installing: {' '.join(apt)}")
+        emit.info("packages", 94,
+                  f"Installing package apt dependencies: {' '.join(apt)}")
         # Not fatal - a package may still be usable without an optional
         # dependency, and failing the whole install here would be worse than
-        # the risk. But it must never be silent: the install hook is about to
-        # run against a system that does not have what it asked for, and the
-        # operator has to be able to connect the two.
+        # the risk. This leniency covers only the PACKAGES' OWN declared apt
+        # (manifest.apt) - the activate phase's own requirements above are
+        # fatal on purpose. It must never be silent: the install hook is
+        # about to run against a system that does not have what it asked
+        # for, and the operator has to be able to connect the two.
         proc = chroot_run(target, ["apt-get", "install", "-y", *apt],
                           check=False)
         if proc.returncode != 0:
