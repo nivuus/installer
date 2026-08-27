@@ -75,6 +75,28 @@ cfg_default = models.InstallConfig(**base_kwargs([]))
 check("the default feature list carries no retro",
       "retro" not in cfg_default.features, True)
 
+# --- packages ------------------------------------------------------------- #
+# The wizard carries package answers as an opaque mapping: validating them
+# against each package's own question vocabulary is the engine's job - it is
+# the only side that can read the manifests - so the model checks the shape
+# and nothing else.
+cfg_pkg = models.InstallConfig(**base_kwargs(["os-base"]),
+                               packages={"console": {"retro": True}})
+check("packages are carried through", cfg_pkg.packages["console"]["retro"], True)
+check("packages default to empty",
+      models.InstallConfig(**base_kwargs(["os-base"])).packages, {})
+
+check_raises(
+    "an invalid package name is refused",
+    lambda: models.InstallConfig(**base_kwargs(["os-base"]),
+                                 packages={"Console!": {}}),
+)
+check_raises(
+    "a non-mapping answer set is refused",
+    lambda: models.InstallConfig(**base_kwargs(["os-base"]),
+                                 packages={"console": "oui"}),
+)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

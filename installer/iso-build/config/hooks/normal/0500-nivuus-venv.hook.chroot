@@ -18,7 +18,7 @@ python3 -m venv "$VENV"
 
 # Sanity check the critical imports so a broken venv fails the build, not boot.
 "$VENV/bin/python3" - <<'PY'
-import fastapi, uvicorn, pydantic, jinja2
+import fastapi, uvicorn, pydantic, jinja2, yaml
 assert pydantic.VERSION.startswith("2"), f"need pydantic v2, got {pydantic.VERSION}"
-print("venv OK:", fastapi.__version__, pydantic.VERSION)
+print("venv OK:", fastapi.__version__, pydantic.VERSION, "pyyaml", yaml.__version__)
 PY

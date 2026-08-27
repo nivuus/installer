@@ -1,0 +1,24 @@
+apiVersion: nivuus.dev/v1
+name: demo
+version: 1.0.0
+label: "Package de démonstration"
+tier: platform
+
+requires:
+  capabilities: [iommu]
+
+claims:
+  gpu: exclusive
+
+platform:
+  modules: [vfio_pci]
+  kernel-cmdline: ["intel_iommu=on"]
+
+apt: [cowsay]
+
+wizard:
+  questions: wizard.yaml
+
+hooks:
+  resolve: hooks/resolve.py
+  install: hooks/install.py

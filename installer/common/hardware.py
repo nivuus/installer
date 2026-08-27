@@ -526,6 +526,42 @@ def _clean_lspci_desc(line: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Platform capabilities                                                       #
+# --------------------------------------------------------------------------- #
+# Firmware tables that advertise an IOMMU: DMAR is Intel VT-d, IVRS is AMD-Vi.
+IOMMU_TABLES = {"DMAR": "intel", "IVRS": "amd"}
+
+
+def iommu_support(acpi_dir: str = "/sys/firmware/acpi/tables") -> dict:
+    """Report whether the PLATFORM has an IOMMU, not whether it is enabled.
+
+    The live installer boots without intel_iommu=on - turning it on is exactly
+    what a passthrough package asks the engine to add to the kernel command
+    line. So a check based on /sys/kernel/iommu_groups would answer "no" on
+    every machine that is in fact capable, and no such package would ever be
+    offered. The firmware tables answer the right question: they are present
+    whenever the chipset advertises an IOMMU, whatever the kernel was told.
+
+    `active` is reported separately, for diagnostics only. Never gate on it.
+    """
+    vendor = ""
+    try:
+        present = set(os.listdir(acpi_dir))
+    except OSError:
+        present = set()
+    for table, table_vendor in IOMMU_TABLES.items():
+        if table in present:
+            vendor = table_vendor
+            break
+    active = False
+    try:
+        active = bool(os.listdir("/sys/kernel/iommu_groups"))
+    except OSError:
+        pass
+    return {"supported": bool(vendor), "vendor": vendor, "active": active}
+
+
+# --------------------------------------------------------------------------- #
 # CPU topology (for isolcpus / nohz_full)                                     #
 # --------------------------------------------------------------------------- #
 def cpu_topology() -> dict:
@@ -629,6 +665,7 @@ def detect_all() -> dict:
         "wifi": list_wifi(),
         "gpus": gpus,
         "cpu": cpu_topology(),
+        "iommu": iommu_support(),
         "passthrough_candidates": [g for g in gpus if g.get("discrete")],
     }
 

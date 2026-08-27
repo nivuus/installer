@@ -1,0 +1,4 @@
+- key: greeting
+  type: texte
+  label: "Message"
+  default: "bonjour"

@@ -14,7 +14,7 @@ TARGET_IMG    ?= /tmp/nivuus-target.img
 TARGET_SIZE   ?= 16G
 OVMF          ?= /usr/share/OVMF/OVMF_CODE.fd
 
-.PHONY: build-iso test-engine test-portal test-vm windows-unattend clean help
+.PHONY: build-iso test-engine test-portal test-vm windows-unattend test-packages clean help
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*' $(MAKEFILE_LIST) | sed 's/:.*//' | sort
@@ -50,6 +50,25 @@ test-vm:
 	  -drive file=$(TARGET_IMG),format=raw,if=virtio \
 	  -netdev user,id=n0,hostfwd=tcp::8080-:80 \
 	  -device virtio-net,netdev=n0
+
+# Run the package-engine test suite (no root, no chroot, no ISO).
+#
+# PYTHON is overridable because three of these suites import pydantic, which is
+# NOT in the Debian base: `make test-packages PYTHON=/path/to/venv/bin/python3`.
+# The CI runs no Python tests at all (ci.yml sets test-paths: ""), so this target
+# is the only aggregator there is - and an aggregator that fails for a missing
+# dependency reads as "the engine is broken", which is the wrong thing to learn.
+PYTHON ?= python3
+
+test-packages:
+	@for t in test_packages_manifest test_packages_capabilities \
+	          test_packages_discovery test_packages_conflicts \
+	          test_packages_wizard test_packages_runner \
+	          test_install_engine_bootloader test_install_engine_packages \
+	          test_webapp_models; do \
+	    echo "--- $$t"; \
+	    $(PYTHON) $(dir $(INSTALLER_DIR))scripts/tests/$$t.py || exit 1; \
+	done
 
 # Build the secondary ISO that unattends the Windows guest install (root:
 # inspecting the LTSC medium needs a loop mount).

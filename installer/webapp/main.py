@@ -27,6 +27,10 @@ if INSTALLER_ROOT not in sys.path:
 from common import hardware  # noqa: E402
 from models import InstallConfig  # noqa: E402
 from installer_runner import InstallRunner, events_since  # noqa: E402
+from packages.capabilities import detect_capabilities  # noqa: E402
+from packages.conflicts import check_conflicts  # noqa: E402
+from packages.discovery import discover, partition  # noqa: E402
+from packages.wizard import WizardError, load_questions  # noqa: E402
 
 app = FastAPI(title="Nivuus Installer", docs_url=None, redoc_url=None)
 runner = InstallRunner()
@@ -56,6 +60,48 @@ async def api_hardware() -> JSONResponse:
     # Detection touches sysfs/CLI tools; run it off the event loop.
     data = await asyncio.to_thread(hardware.detect_all)
     return JSONResponse(data)
+
+
+@app.get("/api/packages")
+async def api_packages(target_disk: str = "", features: str = "") -> JSONResponse:
+    """Packages available on this medium, with the reason for each exclusion.
+
+    The reason matters more than the list. A package that is simply absent
+    from the wizard is indistinguishable from one that was never installed,
+    and this machine has no screen to explain the difference on.
+    """
+    hw = await asyncio.to_thread(hardware.detect_all)
+    manifests, errors = await asyncio.to_thread(discover)
+    capabilities = detect_capabilities(hw, target_disk)
+    selected_features = {f for f in features.split(",") if f}
+    eligible, rejected = partition(manifests, capabilities, selected_features)
+
+    def describe(manifest) -> dict:
+        payload = {
+            "name": manifest.name, "label": manifest.label,
+            "version": manifest.version, "tier": manifest.tier,
+            "claims": [r for r, _ in manifest.claims],
+            "questions": [],
+        }
+        if manifest.questions_file:
+            try:
+                payload["questions"] = [
+                    q.to_dict() for q in load_questions(
+                        os.path.join(manifest.root, manifest.questions_file))
+                ]
+            except WizardError as exc:
+                payload["questions_error"] = str(exc)
+        return payload
+
+    return JSONResponse({
+        "eligible": [describe(m) for m in eligible],
+        "ineligible": [{**describe(m), "reason": reason}
+                       for m, reason in rejected],
+        "errors": [{"source": s, "message": msg} for s, msg in errors],
+        "conflicts": [{"resource": c.resource, "packages": list(c.packages),
+                       "message": c.message()}
+                      for c in check_conflicts(eligible)],
+    })
 
 
 @app.post("/api/install/start")

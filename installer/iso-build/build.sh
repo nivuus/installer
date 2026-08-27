@@ -73,6 +73,28 @@ if [ "${BUILD_MQTT_DEB:-0}" = "1" ]; then
     fi
 fi
 
+# Nivuus packages: sibling repositories embedded as payload, discovered at
+# install time from /opt/nivuus-packages/*/nivuus-package.yaml. Same mechanism
+# as the MQTT .deb above - a sibling repo, exported from its TRACKED files
+# only, never the raw working tree.
+PAYLOAD_PACKAGES="${INCLUDES}/opt/nivuus-packages"
+rm -rf "$PAYLOAD_PACKAGES"
+for pkg_repo in ${PACKAGE_REPOS:-}; do
+    if [ ! -f "${pkg_repo}/nivuus-package.yaml" ]; then
+        echo "W: ${pkg_repo} has no nivuus-package.yaml; skipping" >&2
+        continue
+    fi
+    pkg_name=$(basename "$pkg_repo")
+    echo "==> Exporting package ${pkg_name} -> opt/nivuus-packages/${pkg_name}"
+    mkdir -p "${PAYLOAD_PACKAGES}/${pkg_name}"
+    if git -C "$pkg_repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git -C "$pkg_repo" archive HEAD | tar -x -C "${PAYLOAD_PACKAGES}/${pkg_name}"
+    else
+        rsync -a --exclude '.git' --exclude '__pycache__' \
+            "${pkg_repo}/" "${PAYLOAD_PACKAGES}/${pkg_name}/"
+    fi
+done
+
 echo "==> Configuring live-build"
 ./auto/config
 

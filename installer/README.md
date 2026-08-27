@@ -46,6 +46,62 @@ The installer **reuses the repo's own scripts** rather than duplicating logic:
 `scripts/optimize-cpu-thermal.sh`, `scripts/validate-install.sh`. The whole repo
 is copied into the target at `/opt/nivuus`.
 
+## Packages
+
+A **package** extends the installer with host-side features it does not ship
+itself. It is a directory carrying a `nivuus-package.yaml`, discovered at
+install time under `/opt/nivuus-packages/*/`, and embedded into the ISO from a
+sibling repository:
+
+```bash
+PACKAGE_REPOS="$HOME/Projects/Nivuus/packages/console" sudo -E make build-iso
+```
+
+### Three phases, named relative to the reboot
+
+| Phase | When | Receives | May |
+|---|---|---|---|
+| `resolve` | Before any write | `hw` + wizard answers on stdin | **Read only.** Return the resolved platform block, or refuse with a reason |
+| `install` | On a target filesystem | `--root` (`/mnt/target` in the ISO, `/` standalone) | Write under that root |
+| `activate` | After the reboot, network up | — | Anything |
+
+A hook reads a JSON context on **stdin** and emits jsonl events on **stdout**:
+`{"event":"progress","pct":N,"msg":"…"}`, `{"event":"platform","kernel-cmdline":[…],"modules":[…],"hugepages-mib":N}`,
+`{"event":"refuse","reason":"…"}`, `{"event":"done"}`. A non-zero exit fails the install.
+
+### Two tiers
+
+`userspace` may declare `apt`, questions and hooks. `platform` may additionally
+declare `kernel-cmdline`, `modules` and `hugepages-mib` — and the wizard then
+shows the resolved kernel command line verbatim and asks for its own
+confirmation. A `userspace` manifest declaring any of the three is **refused**,
+not silently stripped.
+
+See `scripts/tests/fixtures/packages/demo/` for a complete working example.
+
+### How `activate` reaches the installed system
+
+Nothing about the live medium survives the reboot, so the install step puts
+all three moving parts on the target itself:
+
+| On the target | Copied from | By |
+|---|---|---|
+| `/etc/systemd/system/nivuus-package-activate@.service` | `/opt/nivuus/configs/systemd/` (the payload) | `apply_packages()` |
+| `/opt/nivuus/installer/packages/activate_cli.py` | the repo payload | `copy_payload()`, made executable by `apply_packages()` |
+| `/opt/nivuus-packages/<name>/` | the live medium, **selected packages only** | `apply_packages()` |
+
+The unit's `ExecStart` points at `activate_cli.py` **where the payload already
+puts it** rather than at a copy under `/usr/local/sbin`: the script derives its
+own `sys.path` from `__file__`, so moving it would break its imports.
+
+Activation is armed by creating
+`etc/systemd/system/multi-user.target.wants/nivuus-package-activate@<name>.service`
+directly — that is exactly what `systemctl enable` does for a template unit
+with `WantedBy=multi-user.target`, without needing a working `systemctl`
+inside the chroot. Any of these failing fails the install: an install that
+reports success while first-boot activation cannot run is the failure mode
+this replaced.
+
 ## Build the ISO
 
 ```bash

@@ -77,19 +77,9 @@ Vous devriez voir:
 ### Créer la VM Windows
 
 ```bash
-# 1. Créer le disque virtuel (100GB example)
-sudo qemu-img create -f qcow2 /var/lib/libvirt/images/Windows.qcow2 100G
-
-# 2. Éditer le template VM
-sudo nano configs/vm-template.xml
-
-# 3. Ajuster:
-#    - GPU PCI addresses (voir ci-dessous)
-#    - Taille RAM (si besoin)
-#    - Chemin disque
-
-# 4. Importer la VM
-sudo virsh define configs/vm-template.xml
+# Générer et définir le domaine depuis le matériel détecté
+python3 installer/windows-guest/domain.py xml     # inspecter
+sudo python3 installer/windows-guest/domain.py define
 ```
 
 #### Trouver les Adresses PCI du GPU
