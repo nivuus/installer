@@ -22,3 +22,9 @@ jobs:
     with:
       test-dirs: ""
       shellcheck-paths: "."
+  codeql:
+    uses: nivuus/.github/.github/workflows/codeql.yml@main
+    with:
+      # Python only: CodeQL supports neither Bash nor Zsh, so the shell
+      # scripts here are covered by shellcheck instead.
+      languages: python
