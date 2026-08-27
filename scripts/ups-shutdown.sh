@@ -38,7 +38,10 @@ fi
 
 # Phase 2: Stop Docker containers (15s timeout)
 log "Phase 2: Stopping Docker containers..."
-docker stop --time 15 $(docker ps -q) 2>/dev/null || true
+mapfile -t running_containers < <(docker ps -q)
+if [ "${#running_containers[@]}" -gt 0 ]; then
+  docker stop --time 15 "${running_containers[@]}" 2>/dev/null || true
+fi
 log "Docker containers stopped"
 
 # Phase 3: System shutdown

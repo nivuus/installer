@@ -1,0 +1,9 @@
+# The line flagged in docs/homeassistant-cli.md is `Bearer YOUR_TOKEN`, a
+# documentation placeholder. Allowlist the placeholder itself, never a path: a
+# path allowlist would silence real findings in a whole directory.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Documentation placeholders, not credentials"
+regexes = ['''YOUR_TOKEN''']
