@@ -48,8 +48,10 @@ UNIT_SRC_REL_PATH = "configs/systemd/" + UNIT_NAME
 # (that is `manifest.apt`, installed separately below with a lenient policy).
 # activate_cli.py is the ExecStart of a systemd unit, so it needs an
 # interpreter; nothing else on a minimal target guarantees one, since
-# debootstrap.py's BASE_INCLUDE has no python3 and the kvm-vfio/thermal
-# features that pull it in via install.sh are both optional. It also
+# debootstrap.py's BASE_INCLUDE has no python3, install.sh is gone
+# (2026-08-27, dissolved into install-engine features and the `console`
+# package), and no install-engine feature or package apt list (e.g.
+# console/nivuus-package.yaml's) happens to pull python3 in either. It also
 # re-parses the manifest at first boot, and manifest.py imports PyYAML,
 # which nothing else in a minimal target's package list pulls in. Without
 # either, the activation unit armed for first boot has no interpreter to run

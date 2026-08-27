@@ -67,14 +67,54 @@ the live image to disk. Full docs: `installer/README.md`.
 - `installer/iso-build/` — live-build config; hook `0500-nivuus-venv` builds a
   pydantic-v2 venv (bookworm ships v1), hook `9000` enables the services.
 
-**Reuse, don't duplicate:** the engine copies the whole repo to `/opt/nivuus` in
-the target and **calls** `install.sh` inside the chroot. `install.sh` was made
-installer-aware (backward-compatible): `NIVUUS_DIR` now resolves to the script's
-own dir; env hooks `NIVUUS_ASSUME_YES`/`--non-interactive`, `NIVUUS_IN_CHROOT`
-(skip runtime thermal apply), `NIVUUS_ISOLCPUS`, `NIVUUS_IOMMU`, `NIVUUS_VFIO_IDS`
-(generic kernel params instead of the hardcoded `isolcpus=0-15`). `NIVUUS_ISOLCPUS`
-now names the CPUs the VM will pin and is emitted as **`nohz_full=` only, never
-`isolcpus=`** — see "Dynamic host/VM CPU partitioning" below.
+**`install.sh` is gone (2026-08-27).** Five of its seven blocks were VM
+setup and now live in the `console` package (`console/nivuus-package.yaml`
+plus `console/hooks/`); the thermal block became an ordinary
+`install-engine` feature. The `NIVUUS_DIR` / `NIVUUS_IN_CHROOT` /
+`NIVUUS_ISOLCPUS` / `NIVUUS_VFIO_IDS` env plumbing existed only to make that
+script runnable inside a chroot and went with it.
+
+**`console/` is the first Nivuus package, and it is deliberately ordinary.**
+It declares `tier: platform`, claims `gpu` and `nvme` exclusively, and
+requires the `iommu`, `gpu-discrete` and `nvme-dedicated` capabilities. Two
+things about it are easy to break:
+
+* **`vm-cpu-partition.sh` MUST be deployed under `/etc/libvirt/hooks/`**, and
+  `console/hooks/install.py` does so. The libvirtd AppArmor profile grants
+  `/etc/libvirt/hooks/** rmix`, so hooks run *inheriting* that profile, which
+  allows exec of `/bin`, `/sbin`, `/usr/bin` and `/usr/sbin` — but **not**
+  `/usr/local/sbin`. Installed there instead it dies at VM start with a
+  misleading `bad interpreter: Permission denied` and no DENIED line in dmesg.
+* **`nivuus-cpu-mode@{gaming,idle}.service` is a public contract of this
+  repository.** The thermal policy stays here (it is a host policy), but its
+  modes are driven by the package's libvirt hooks. The package calls the unit
+  if it exists and does nothing if it does not — which is what lets it install
+  on a Debian that has never seen this installer.
+
+`hardware.py` is now split by that same principle: `installer/common/hardware.py`
+detects **capabilities** (coarse: is there an IOMMU, a discrete GPU, a spare
+NVMe — `list_gpus` no longer carries `ids`, `cpu_topology` no longer carries
+`isolcpus`), and `console/hardware.py` detects the **details** in its resolve
+phase.
+
+**Known coverage gap, dated 2026-08-27, do not let a green run hide it:**
+`installer/windows-guest/domain.py::build_domain_xml()` raises
+`AttributeError: module 'common.hardware' has no attribute 'passthrough_nvme'`
+the moment it is actually called — `passthrough_nvme()` and
+`pci_slot_functions()` moved to `console/hardware.py` in this same phase, and
+`domain.py` still imports them from `common.hardware` (lazily, inside the
+function, `domain.py:224`/`:263` — which is *why* merely importing the module
+does not fail). **No test in the aggregator catches this.**
+`test_windows_guest_domain.py` imports `testdomain.py` (the throwaway LTSC
+test-domain generator), not `domain.py`, and never goes near `common.hardware`.
+`test_windows_guest_production_domain.py` does import `domain.py`, but calls
+`domain_xml()` directly with explicit keyword arguments, bypassing
+`build_domain_xml()` and hardware detection entirely — so both suites, and the
+whole 26-suite aggregator, stay green while this path is broken. Fixed in
+phase 2b, when `windows-guest/` moves into the package and stops depending on
+the coarse half of `hardware.py`. Until then: a green `make test-packages` is
+not evidence about `domain.py define`/`domain.py xml` — check that path by
+hand if you touch it.
 
 **Package engine (2026-08-27)**: `installer/packages/` implements the
 `nivuus.dev/v1` contract — a declarative `nivuus-package.yaml` plus three hooks
@@ -169,8 +209,20 @@ untouched. Same reason the package state file (`etc/nivuus/packages.json`) is
 written **after each package**, not once at the end: a residue that describes
 itself beats a partially applied install with no record.
 
+**The wizard does not offer packages yet (2026-08-27, a named gap, not a footnote).**
+`webapp/static/js/app.js` and `webapp/templates/wizard.html` call no
+`/api/packages` route — packages exist in the engine and in `discover()`, but
+nothing renders them for a human to pick. The only way to install one today is
+a config carrying `packages: {"console": {...}}` directly (the engine path,
+exercised by `test_install_engine_packages.py` and the end-to-end proof in the
+console-package-hote plan's Task 7), never through the portal. Wiring the
+wizard is deliberately deferred, not forgotten.
+
 Tests: `cd installer && make test-packages`
-(9 files). Spec: `docs/superpowers/specs/2026-08-27-decoupage-installer-console-design.md`.
+(26 files: 9 original + 6 from the console-package phase + all 11
+`test_windows_guest_*` suites, newly wired into an aggregator for the first
+time since the CI runs no Python tests at all). Spec:
+`docs/superpowers/specs/2026-08-27-decoupage-installer-console-design.md`.
 
 **Build & test:** `cd installer && sudo make build-iso` (needs `live-build`).
 `make test-portal` (portal on :8080), `make test-vm` (QEMU UEFI, portal via
@@ -216,7 +268,7 @@ scripts/disk-maintenance.sh --dry-run       # ALWAYS this first when / fills up
 
 ### Host Shell Gotchas (sessions run as root on the live server)
 
-- The interactive zsh profile fetches the public IP at startup and ships broken `localip`/`grep`/`ip` shell functions (`FUNCNEST` errors): shell commands intermittently hang ~2 min, get killed (exit 137/143), or have their output silently eaten. **Workaround: wrap commands in `bash -c '...'`** (bash doesn't inherit the zsh functions), or read `/sys`/files directly (e.g. bridge members via `/sys/class/net/<bridge>/brif/`).
+- The interactive zsh profile fetches the public IP at startup and ships broken `localip`/`grep`/`ip` shell functions (`FUNCNEST` errors): shell commands intermittently hang ~2 min, get killed (exit 137/143), or have their output silently eaten. **Workaround: wrap commands in `bash -c '...'`** (bash doesn't inherit the zsh functions), or read `/sys`/files directly (e.g. bridge members via `/sys/class/net/<bridge>/brif/`). **The `grep` function's precise failure mode: it does NOT prefix recursive matches with `./`** the way real `grep -r`/`grep -rn` does. Any exclusion filter written as `grep -v '^./…'` therefore matches nothing and silently passes everything through unfiltered, and any count derived from its output (`wc -l` on filtered results) comes out wrong in the same silent way — there is no error, just a clean-looking result that is not clean. This produced a false "no dead references" verification in an earlier phase and two wrong suite counts during the console-package-hote plan. **Use `command grep`, or wrap the whole pipeline in `bash -c '...'`** — the zsh function only shadows the bare `grep` invocation.
 - `ot-ctl` (OTBR) output lines end with `\r` (CRLF) — strip it before string comparisons in scripts, or `case "leader"` never matches.
 - **`systemctl` does NOT work from a Claude session (found 2026-08-05).** The session runs in its own **PID namespace** (`readlink /proc/self/ns/pid` ≠ `/proc/1/ns/pid`; `systemd-detect-virt` → `container-other`) while sharing the host mount namespace. systemd authenticates peers with `SO_PEERCRED`, which is meaningless across PID namespaces, so every call fails with **`Failed to connect to system scope bus via local transport: No data available`** — including `env -i` and with the sandbox disabled. **This fails silently for query subcommands** (`systemctl show -p X` just prints nothing), so a check that "returns empty" may mean *unreachable*, not *unset*. Everything else is the real host: `journalctl`, `/sys`, `/proc`, `/dev/mem`, `lspci`, and **writes to `/sys` all work**.
 

@@ -58,6 +58,13 @@ test-vm:
 # The CI runs no Python tests at all (ci.yml sets test-paths: ""), so this target
 # is the only aggregator there is - and an aggregator that fails for a missing
 # dependency reads as "the engine is broken", which is the wrong thing to learn.
+#
+# 26 suites (2026-08-27): the original 9, the 6 the console-package phase
+# created or touched, and all 11 test_windows_guest_* suites, which run clean
+# standalone (no root, no network, no mounted Windows medium) and were simply
+# never wired into any aggregator before. NOTE: a green run here is not proof
+# that installer/windows-guest/domain.py works - see CLAUDE.md, Installer
+# Architecture, for the coverage gap both domain suites share.
 PYTHON ?= python3
 
 test-packages:
@@ -65,7 +72,16 @@ test-packages:
 	          test_packages_discovery test_packages_conflicts \
 	          test_packages_wizard test_packages_runner \
 	          test_install_engine_bootloader test_install_engine_packages \
-	          test_webapp_models; do \
+	          test_webapp_models \
+	          test_common_hardware test_console_hardware test_console_resolve \
+	          test_console_install test_install_engine_features \
+	          test_retro_marker_bridge \
+	          test_windows_guest_apollo test_windows_guest_autounattend \
+	          test_windows_guest_build test_windows_guest_domain \
+	          test_windows_guest_fetch_payload test_windows_guest_iso \
+	          test_windows_guest_media test_windows_guest_payload \
+	          test_windows_guest_production_domain test_windows_guest_provision \
+	          test_windows_guest_retro_sync; do \
 	    echo "--- $$t"; \
 	    $(PYTHON) $(dir $(INSTALLER_DIR))scripts/tests/$$t.py || exit 1; \
 	done
