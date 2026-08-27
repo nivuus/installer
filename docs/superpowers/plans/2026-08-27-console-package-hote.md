@@ -479,11 +479,13 @@ Run: python3 scripts/tests/test_console_resolve.py
 """
 import json
 import pathlib
+import subprocess
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "installer"))
 CONSOLE = REPO / "console"
+RESOLVE_HOOK = CONSOLE / "hooks" / "resolve.py"
 
 from packages.manifest import load_manifest  # noqa: E402
 from packages.runner import run_resolve  # noqa: E402
@@ -495,6 +497,51 @@ failures = []
 def check(label, got, want):
     if got != want:
         failures.append(f"{label}: got {got!r}, want {want!r}")
+
+
+def call_hook(hw=None, answers=None):
+    """Invoke console/hooks/resolve.py exactly as the engine does: a
+    subprocess fed the {"hw":..., "answers":...} context on stdin, jsonl
+    events on stdout. This is the hook's REAL interface - going through
+    run_resolve() alone would only ever exercise the happy subset of
+    contexts run_resolve() itself knows how to build; a malformed hw dict
+    reaching the hook as-is is exactly what a broken detection layer would
+    produce.
+
+    Returns (exit_code, events). Never raises on a hook crash: a traceback
+    on stderr with a non-zero exit and zero 'refuse' events is precisely the
+    defect this is here to catch, so it must be observable as data, not as
+    a pytest-style exception out of this helper.
+    """
+    ctx = {}
+    if hw is not None:
+        ctx["hw"] = hw
+    if answers is not None:
+        ctx["answers"] = answers
+    proc = subprocess.run(
+        [sys.executable, str(RESOLVE_HOOK), "--phase", "resolve"],
+        input=json.dumps(ctx), capture_output=True, text=True, timeout=30)
+    events = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        events.append(json.loads(line))
+    return proc.returncode, events
+
+
+def refusal_reason(events):
+    for event in events:
+        if event.get("event") == "refuse":
+            return event.get("reason") or ""
+    return None
+
+
+def platform_event(events):
+    for event in events:
+        if event.get("event") == "platform":
+            return event
+    return None
 
 
 # --- le manifeste est valide au sens du contrat -------------------------- #
@@ -591,6 +638,115 @@ else:
           "NVMe" in res.reason or "nvme" in res.reason, True)
     print(f"  (note: cette machine ne convient pas, refus exerce : {res.reason[:60]})")
 
+# --- resolve refuse plutot que crasher sur un snapshot casse ------------- #
+# Ces cas visent le hook directement, en subprocess, via son interface
+# reelle (le JSON sur stdin) - pas run_resolve(), qui ne construit que des
+# contextes bien formes. Un hook qui plante ici sortirait non-nul avec une
+# trace, sans le moindre evenement 'refuse' : c'est exactement le defaut
+# constate en revue, donc chaque cas verifie a la fois le code de sortie ET
+# la presence d'un refus motive.
+
+GPU_OK = {"slot": "01:00.0", "vendor": "nvidia", "discrete": True}
+CPU_OK = {"hybrid": True, "performance_cpus": [0, 1, 2, 3], "total_cpus": 8}
+
+# Un GPU discret sans cle 'slot' : ligne ~60 du hook faisait
+# discrete[0]["slot"], KeyError direct.
+rc, events = call_hook(
+    hw={"gpus": [{"vendor": "nvidia", "discrete": True}], "memory_mib": 65536},
+    answers={})
+check("GPU sans slot : code de sortie 0", rc, 0)
+reason = refusal_reason(events)
+check("GPU sans slot : un refus est emis", reason is not None, True)
+check("GPU sans slot : le refus parle du GPU",
+      bool(reason) and "GPU" in reason, True)
+
+# memory_mib non numerique : guest_memory_mib faisait total // 2 sur une str.
+rc, events = call_hook(hw={"gpus": [GPU_OK], "memory_mib": "lots"}, answers={})
+check("memoire non numerique : code de sortie 0", rc, 0)
+reason = refusal_reason(events)
+check("memoire non numerique : un refus est emis", reason is not None, True)
+
+# memory_mib negatif : refuse (choix documente dans le rapport - un chiffre
+# negatif est traite comme un snapshot malforme, pas comme "hote minuscule").
+rc, events = call_hook(hw={"gpus": [GPU_OK], "memory_mib": -100}, answers={})
+check("memoire negative : code de sortie 0", rc, 0)
+reason = refusal_reason(events)
+check("memoire negative : un refus est emis", reason is not None, True)
+
+# 8 GiB hote : la moitie (4096) est sous le plancher (8192) - refuse, et la
+# raison doit nommer la RAM reelle de l hote pour que l operateur comprenne
+# pourquoi (pas juste "trop petit").
+rc, events = call_hook(hw={"gpus": [GPU_OK], "memory_mib": 8192}, answers={})
+check("hote 8 GiB : code de sortie 0", rc, 0)
+reason = refusal_reason(events)
+check("hote 8 GiB : un refus est emis", reason is not None, True)
+check("hote 8 GiB : le refus nomme la RAM",
+      bool(reason) and "8192" in reason, True)
+
+# 16 GiB hote : la moitie (8192) egale exactement le plancher - la frontiere
+# ne doit PAS refuser une machine qui fonctionne reellement.
+rc, events = call_hook(
+    hw={"gpus": [GPU_OK], "cpu": CPU_OK, "memory_mib": 16384},
+    answers={"dedicated_nvme": ""})
+check("hote 16 GiB : code de sortie 0", rc, 0)
+plat = platform_event(events)
+if plat is None:
+    check("hote 16 GiB : un plan platform est emis (pas de refus)",
+          refusal_reason(events), None)
+else:
+    check("hote 16 GiB : l invite recoit exactement le plancher",
+          plat.get("hugepages-mib"), 8192)
+
+# 64 GiB hote (cette machine) : inchange par rapport a avant le correctif -
+# garde-fou de non-regression sur le cas reel de cette machine.
+rc, events = call_hook(
+    hw={"gpus": [GPU_OK], "cpu": CPU_OK, "memory_mib": 65536},
+    answers={"dedicated_nvme": ""})
+check("hote 64 GiB : code de sortie 0", rc, 0)
+plat = platform_event(events)
+if plat is None:
+    check("hote 64 GiB : un plan platform est emis (pas de refus)",
+          refusal_reason(events), None)
+else:
+    check("hote 64 GiB : l invite recoit 32768 MiB", plat.get("hugepages-mib"),
+          32768)
+
+# --- non-regression : les refus deja verifies plus haut restent verts ---- #
+rc, events = call_hook(
+    hw={"gpus": [{"slot": "00:02.0", "vendor": "intel", "discrete": False}],
+        "memory_mib": 65536},
+    answers={})
+check("regression sans GPU dedie : code de sortie 0", rc, 0)
+reason = refusal_reason(events)
+check("regression sans GPU dedie : le refus parle du GPU",
+      bool(reason) and "GPU" in reason, True)
+
+rc, events = call_hook(
+    hw={"gpus": [GPU_OK],
+        "cpu": {"hybrid": True, "performance_cpus": [-1, 0], "total_cpus": 8},
+        "memory_mib": 65536},
+    answers={"dedicated_nvme": ""})
+check("regression CPU casse : code de sortie 0", rc, 0)
+reason = refusal_reason(events)
+check("regression CPU casse : le refus nomme le CPU",
+      bool(reason) and ("CPU" in reason or "cpu" in reason), True)
+
+# --- probes supplementaires, non assertees une a une : voir le rapport --- #
+# hw entierement absent ; hw.gpus present mais vide ; answers absent ;
+# dedicated_nvme vers un peripherique inexistant. Chacun doit refuser (ou,
+# pour un hw minimal, refuser faute de GPU) - jamais planter.
+for label, ctx_hw, ctx_answers in [
+    ("hw absent", None, {}),
+    ("gpus vide", {"gpus": [], "memory_mib": 65536}, {}),
+    ("answers absent", {"gpus": [GPU_OK], "cpu": CPU_OK, "memory_mib": 65536},
+     None),
+    ("nvme demande inexistant",
+     {"gpus": [GPU_OK], "cpu": CPU_OK, "memory_mib": 65536},
+     {"dedicated_nvme": "/dev/does-not-exist-at-all"}),
+]:
+    rc, events = call_hook(hw=ctx_hw, answers=ctx_answers)
+    check(f"probe '{label}' : code de sortie 0", rc, 0)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
@@ -621,6 +777,13 @@ needs. Or it REFUSES, with a sentence - and that refusal reaches the
 operator before a single byte is written to their disk, because the engine
 runs this before partition().
 
+A REFUSAL IS DATA, NOT AN EXCEPTION. Every path through this hook that can
+fail - a GPU snapshot missing its slot, a memory figure that is not a
+number, a host too small to host a guest - must end in a `refuse` event,
+never an uncaught exception. An uncaught exception gives the operator a
+non-zero exit and a traceback they cannot act on; a `refuse` event gives
+them a sentence, before their disk is touched.
+
 READ-ONLY IS A CONVENTION HERE, NOT A SANDBOX. Nothing stops this process
 from writing; what the pipeline depends on is that it does not, and that the
 engine never uses anything it might write. Since this runs before
@@ -647,11 +810,47 @@ def emit(event: dict) -> None:
     print(json.dumps(event), flush=True)
 
 
-def guest_memory_mib(hw: dict) -> int:
-    total = hw.get("memory_mib") or 0
-    if not total:
-        return GUEST_MIB_MIN
-    return max(GUEST_MIB_MIN, min(GUEST_MIB_MAX, total // 2))
+def guest_memory_mib(hw: dict):
+    """Half of host RAM, clamped to [GUEST_MIB_MIN, GUEST_MIB_MAX].
+
+    Returns (mib, reason). On success `reason` is None. On failure `mib` is
+    None and `reason` names precisely what disqualifies this host - main()
+    turns that straight into a `refuse` event instead of doing arithmetic
+    that can raise.
+
+    Two distinct failure classes, refused for two distinct reasons:
+
+    - The figure itself is unusable (not a number, or negative) - a
+      malformed snapshot, the same class of problem passthrough_nvme() and
+      isolation_plan() already refuse rather than guess through.
+    - The figure is a real number but the host is too small: hugepages are
+      reserved at BOOT and NEVER handed back (see CLAUDE.md), so
+      unconditionally applying GUEST_MIB_MIN regardless of host size would
+      let a 4 or 8 GiB host reserve all - or more than all - of its RAM for
+      a guest, leaving nothing for the host itself. That is the same
+      mistake "PCI passthrough only" already exists to prevent: a console
+      that boots but performs unusably is worse than one that explains why
+      it cannot be installed on this machine. So this refuses rather than
+      shrinking the floor.
+    """
+    total = hw.get("memory_mib")
+    if total is None or total == 0:
+        # No RAM figure at all: there is nothing to strand-check against,
+        # so fall back to the floor as a best effort rather than refuse on
+        # missing data the detection layer should have supplied.
+        return GUEST_MIB_MIN, None
+    if isinstance(total, bool) or not isinstance(total, (int, float)):
+        return None, f"quantite de memoire hote illisible : {total!r}"
+    if total < 0:
+        return None, f"quantite de memoire hote negative : {total!r}"
+    half = total // 2
+    if half < GUEST_MIB_MIN:
+        return None, (
+            f"cet hote n'a que {int(total)} MiB de RAM ; il en faut au moins "
+            f"{GUEST_MIB_MIN * 2} MiB pour heberger la console sans priver "
+            "l'hote de toute sa memoire (les hugepages sont reserves au "
+            "demarrage et ne sont jamais rendus)")
+    return max(GUEST_MIB_MIN, min(GUEST_MIB_MAX, int(half))), None
 
 
 def main() -> int:
@@ -664,6 +863,15 @@ def main() -> int:
 
     emit({"event": "progress", "pct": 10, "msg": "Analyse du materiel"})
 
+    # Checked first and independently of the GPU/NVMe/CPU detection below: a
+    # malformed or insufficient memory figure disqualifies the machine on
+    # its own, and failing fast here avoids emitting GPU-detection progress
+    # for a machine that is going to be refused anyway.
+    guest_mib, mem_reason = guest_memory_mib(hw)
+    if mem_reason:
+        emit({"event": "refuse", "reason": mem_reason})
+        return 0
+
     discrete = [g for g in hw.get("gpus") or [] if g.get("discrete")]
     if not discrete:
         emit({"event": "refuse",
@@ -671,7 +879,16 @@ def main() -> int:
                         "carte graphique a passer entierement a la VM"})
         return 0
 
-    slot = discrete[0]["slot"]
+    # A discrete GPU entry with no 'slot' key is a malformed snapshot, not a
+    # machine to crash on: .get() rather than [...] so this refuses like any
+    # other bad-detection path instead of raising KeyError.
+    slot = discrete[0].get("slot") or ""
+    if not slot:
+        emit({"event": "refuse",
+              "reason": "le GPU discret detecte n'a pas d'emplacement PCI "
+                        "(slot) connu"})
+        return 0
+
     ids = hardware.vfio_ids_for_slot(slot)
     if not ids:
         emit({"event": "refuse",
@@ -736,7 +953,7 @@ def main() -> int:
     emit({"event": "platform",
           "kernel-cmdline": cmdline,
           "modules": [],
-          "hugepages-mib": guest_memory_mib(hw)})
+          "hugepages-mib": guest_mib})
     emit({"event": "done"})
     return 0
 

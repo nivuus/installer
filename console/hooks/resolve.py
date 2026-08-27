@@ -7,6 +7,13 @@ needs. Or it REFUSES, with a sentence - and that refusal reaches the
 operator before a single byte is written to their disk, because the engine
 runs this before partition().
 
+A REFUSAL IS DATA, NOT AN EXCEPTION. Every path through this hook that can
+fail - a GPU snapshot missing its slot, a memory figure that is not a
+number, a host too small to host a guest - must end in a `refuse` event,
+never an uncaught exception. An uncaught exception gives the operator a
+non-zero exit and a traceback they cannot act on; a `refuse` event gives
+them a sentence, before their disk is touched.
+
 READ-ONLY IS A CONVENTION HERE, NOT A SANDBOX. Nothing stops this process
 from writing; what the pipeline depends on is that it does not, and that the
 engine never uses anything it might write. Since this runs before
@@ -33,11 +40,47 @@ def emit(event: dict) -> None:
     print(json.dumps(event), flush=True)
 
 
-def guest_memory_mib(hw: dict) -> int:
-    total = hw.get("memory_mib") or 0
-    if not total:
-        return GUEST_MIB_MIN
-    return max(GUEST_MIB_MIN, min(GUEST_MIB_MAX, total // 2))
+def guest_memory_mib(hw: dict):
+    """Half of host RAM, clamped to [GUEST_MIB_MIN, GUEST_MIB_MAX].
+
+    Returns (mib, reason). On success `reason` is None. On failure `mib` is
+    None and `reason` names precisely what disqualifies this host - main()
+    turns that straight into a `refuse` event instead of doing arithmetic
+    that can raise.
+
+    Two distinct failure classes, refused for two distinct reasons:
+
+    - The figure itself is unusable (not a number, or negative) - a
+      malformed snapshot, the same class of problem passthrough_nvme() and
+      isolation_plan() already refuse rather than guess through.
+    - The figure is a real number but the host is too small: hugepages are
+      reserved at BOOT and NEVER handed back (see CLAUDE.md), so
+      unconditionally applying GUEST_MIB_MIN regardless of host size would
+      let a 4 or 8 GiB host reserve all - or more than all - of its RAM for
+      a guest, leaving nothing for the host itself. That is the same
+      mistake "PCI passthrough only" already exists to prevent: a console
+      that boots but performs unusably is worse than one that explains why
+      it cannot be installed on this machine. So this refuses rather than
+      shrinking the floor.
+    """
+    total = hw.get("memory_mib")
+    if total is None or total == 0:
+        # No RAM figure at all: there is nothing to strand-check against,
+        # so fall back to the floor as a best effort rather than refuse on
+        # missing data the detection layer should have supplied.
+        return GUEST_MIB_MIN, None
+    if isinstance(total, bool) or not isinstance(total, (int, float)):
+        return None, f"quantite de memoire hote illisible : {total!r}"
+    if total < 0:
+        return None, f"quantite de memoire hote negative : {total!r}"
+    half = total // 2
+    if half < GUEST_MIB_MIN:
+        return None, (
+            f"cet hote n'a que {int(total)} MiB de RAM ; il en faut au moins "
+            f"{GUEST_MIB_MIN * 2} MiB pour heberger la console sans priver "
+            "l'hote de toute sa memoire (les hugepages sont reserves au "
+            "demarrage et ne sont jamais rendus)")
+    return max(GUEST_MIB_MIN, min(GUEST_MIB_MAX, int(half))), None
 
 
 def main() -> int:
@@ -50,6 +93,15 @@ def main() -> int:
 
     emit({"event": "progress", "pct": 10, "msg": "Analyse du materiel"})
 
+    # Checked first and independently of the GPU/NVMe/CPU detection below: a
+    # malformed or insufficient memory figure disqualifies the machine on
+    # its own, and failing fast here avoids emitting GPU-detection progress
+    # for a machine that is going to be refused anyway.
+    guest_mib, mem_reason = guest_memory_mib(hw)
+    if mem_reason:
+        emit({"event": "refuse", "reason": mem_reason})
+        return 0
+
     discrete = [g for g in hw.get("gpus") or [] if g.get("discrete")]
     if not discrete:
         emit({"event": "refuse",
@@ -57,7 +109,16 @@ def main() -> int:
                         "carte graphique a passer entierement a la VM"})
         return 0
 
-    slot = discrete[0]["slot"]
+    # A discrete GPU entry with no 'slot' key is a malformed snapshot, not a
+    # machine to crash on: .get() rather than [...] so this refuses like any
+    # other bad-detection path instead of raising KeyError.
+    slot = discrete[0].get("slot") or ""
+    if not slot:
+        emit({"event": "refuse",
+              "reason": "le GPU discret detecte n'a pas d'emplacement PCI "
+                        "(slot) connu"})
+        return 0
+
     ids = hardware.vfio_ids_for_slot(slot)
     if not ids:
         emit({"event": "refuse",
@@ -122,7 +183,7 @@ def main() -> int:
     emit({"event": "platform",
           "kernel-cmdline": cmdline,
           "modules": [],
-          "hugepages-mib": guest_memory_mib(hw)})
+          "hugepages-mib": guest_mib})
     emit({"event": "done"})
     return 0
 
