@@ -25,7 +25,11 @@ PACKAGES_DIR = os.environ.get("NIVUUS_PACKAGES_DIR", "/opt/nivuus-packages")
 def discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, str]]]:
     """Load every manifest under `root`.
 
-    Returns (valid manifests sorted by name, [(path, error message)]).
+    Returns (valid manifests sorted by name, [(source, error message)]).
+    `source` is NOT always a path: for a manifest that failed to parse it is
+    that manifest's path, but for a name collision (see below) it is the
+    colliding package name, because a collision has no single path to point
+    at - it involves several, and those are listed in the message itself.
     A directory with no manifest is not a package and is skipped in silence;
     a directory WITH a manifest that does not parse is an error worth showing.
 
@@ -46,13 +50,13 @@ def discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, 
         return [], []
 
     for entry in entries:
-        path = os.path.join(root, entry, MANIFEST_NAME)
-        if not os.path.isfile(path):
+        source = os.path.join(root, entry, MANIFEST_NAME)
+        if not os.path.isfile(source):
             continue
         try:
-            manifests.append(load_manifest(path))
+            manifests.append(load_manifest(source))
         except ManifestError as exc:
-            errors.append((path, str(exc)))
+            errors.append((source, str(exc)))
 
     by_name: dict[str, list[Manifest]] = {}
     for manifest in manifests:
@@ -63,7 +67,7 @@ def discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, 
         if len(group) > 1:
             paths = ", ".join(os.path.join(m.root, MANIFEST_NAME) for m in group)
             errors.append((
-                name,
+                name,  # source: the collision has no single path, only a name
                 f"deux packages ou plus déclarent le nom {name!r} : {paths} "
                 "— aucun n'est proposé, renommez-en un",
             ))

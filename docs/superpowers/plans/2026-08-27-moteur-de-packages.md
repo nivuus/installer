@@ -947,7 +947,7 @@ au noyau."
 - Consumes: `manifest.load_manifest`, `manifest.Manifest`, `manifest.MANIFEST_NAME`, `manifest.ManifestError`
 - Produces:
   - `PACKAGES_DIR: str` (depuis `NIVUUS_PACKAGES_DIR`, défaut `/opt/nivuus-packages`)
-  - `discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, str]]]` → `(manifestes valides triés par nom, [(chemin, message d'erreur)])`
+  - `discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, str]]]` → `(manifestes valides triés par nom, [(source, message d'erreur)])` — `source` est le chemin d'un manifeste illisible, ou le nom du package pour une collision de noms (qui n'a pas un chemin unique à désigner)
   - `eligibility(m: Manifest, capabilities: set[str], features: set[str]) -> str` → `""` si éligible, sinon la raison
   - `partition(manifests, capabilities, features) -> tuple[list[Manifest], list[tuple[Manifest, str]]]`
 
@@ -1124,7 +1124,11 @@ PACKAGES_DIR = os.environ.get("NIVUUS_PACKAGES_DIR", "/opt/nivuus-packages")
 def discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, str]]]:
     """Load every manifest under `root`.
 
-    Returns (valid manifests sorted by name, [(path, error message)]).
+    Returns (valid manifests sorted by name, [(source, error message)]).
+    `source` is NOT always a path: for a manifest that failed to parse it is
+    that manifest's path, but for a name collision (see below) it is the
+    colliding package name, because a collision has no single path to point
+    at - it involves several, and those are listed in the message itself.
     A directory with no manifest is not a package and is skipped in silence;
     a directory WITH a manifest that does not parse is an error worth showing.
 
@@ -1145,13 +1149,13 @@ def discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, 
         return [], []
 
     for entry in entries:
-        path = os.path.join(root, entry, MANIFEST_NAME)
-        if not os.path.isfile(path):
+        source = os.path.join(root, entry, MANIFEST_NAME)
+        if not os.path.isfile(source):
             continue
         try:
-            manifests.append(load_manifest(path))
+            manifests.append(load_manifest(source))
         except ManifestError as exc:
-            errors.append((path, str(exc)))
+            errors.append((source, str(exc)))
 
     by_name: dict[str, list[Manifest]] = {}
     for manifest in manifests:
@@ -1162,7 +1166,7 @@ def discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, 
         if len(group) > 1:
             paths = ", ".join(os.path.join(m.root, MANIFEST_NAME) for m in group)
             errors.append((
-                name,
+                name,  # source: the collision has no single path, only a name
                 f"deux packages ou plus déclarent le nom {name!r} : {paths} "
                 "— aucun n'est proposé, renommez-en un",
             ))
@@ -2786,8 +2790,8 @@ def plan_packages(config: dict, hw: dict, emit):
 
     emit.info("packages", 60, f"Planning {len(selected)} package(s)…")
     manifests, errors = discover()
-    for path, message in errors:
-        emit.warn("packages", 60, f"Ignoring unreadable manifest {path}: {message}")
+    for source, message in errors:
+        emit.warn("packages", 60, f"Manifeste ignoré ({source}) : {message}")
 
     by_name = {m.name: m for m in manifests}
     unknown = sorted(set(selected) - set(by_name))
@@ -3122,7 +3126,7 @@ async def api_packages(target_disk: str = "", features: str = "") -> JSONRespons
         "eligible": [describe(m) for m in eligible],
         "ineligible": [{**describe(m), "reason": reason}
                        for m, reason in rejected],
-        "errors": [{"path": p, "message": msg} for p, msg in errors],
+        "errors": [{"source": s, "message": msg} for s, msg in errors],
         "conflicts": [{"resource": c.resource, "packages": list(c.packages),
                        "message": c.message()}
                       for c in check_conflicts(eligible)],
