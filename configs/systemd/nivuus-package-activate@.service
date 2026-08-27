@@ -1,0 +1,20 @@
+[Unit]
+Description=Nivuus package activation: %i
+# The activate phase is the one that needs the network: it downloads what
+# could not travel in the ISO. Ordering after network-online is not a nicety.
+After=network-online.target
+Wants=network-online.target
+# A stamp rather than a self-disabling unit: if activation is interrupted
+# halfway, the unit must run again at the next boot rather than believe it
+# succeeded. systemctl disable inside ExecStartPost cannot tell the difference.
+ConditionPathExists=!/var/lib/nivuus/packages/%i.activated
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/nivuus-package-activate %i
+# Third-party code on first boot must never wedge the boot itself.
+TimeoutStartSec=7200
+
+[Install]
+WantedBy=multi-user.target

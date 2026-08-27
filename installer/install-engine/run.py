@@ -29,7 +29,8 @@ for path in (ENGINE_DIR, INSTALLER_ROOT):
 from common import hardware  # noqa: E402
 from common.progress import ProgressEmitter, CONFIG_FILE  # noqa: E402
 from steps import (  # noqa: E402
-    partition, debootstrap, chroot_base, bootloader, features, validate,
+    partition, debootstrap, chroot_base, bootloader, features, packages,
+    validate,
 )
 from steps.util import MountTracker, StepError  # noqa: E402
 
@@ -49,7 +50,7 @@ def main() -> int:
                         help="path to the Nivuus repo payload on the live system")
     parser.add_argument("--stop-after", default=None,
                         choices=["partition", "debootstrap", "base", "bootloader",
-                                 "features"],
+                                 "features", "packages"],
                         help="stop the pipeline after this step (for testing)")
     args = parser.parse_args()
 
@@ -65,6 +66,10 @@ def main() -> int:
     try:
         emit.info("start", 0, "Starting Nivuus installation…")
         hw = hardware.detect_all()
+
+        # Decide before writing: every package refusal, conflict and kernel
+        # parameter is known here, while the target disk is still untouched.
+        plan, package_cmdline = packages.plan_packages(config, hw, emit)
 
         def stop(step: str) -> bool:
             if args.stop_after == step:
@@ -88,11 +93,14 @@ def main() -> int:
         chroot_base.configure_base(config, target, emit)
         if stop("base"):
             return 0
-        bootloader.install_bootloader(config, target, fs, emit)
+        bootloader.install_bootloader(config, target, fs, emit, package_cmdline)
         if stop("bootloader"):
             return 0
         features.apply_features(config, target, nivuus_dir, hw, emit)
         if stop("features"):
+            return 0
+        packages.apply_packages(plan, target, hw, emit)
+        if stop("packages"):
             return 0
         validate.validate(config, target, nivuus_dir, emit)
 
