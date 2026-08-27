@@ -1348,6 +1348,40 @@ with tempfile.TemporaryDirectory() as tmp:
     marker = json.loads((root / "etc/nivuus/retro.json").read_text())
     check("le temoin retro dit non", marker["enabled"], False)
 
+# retro absente du contexte : meme regle - le temoin dit non, pas rien
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    ctx = json.loads(CTX)
+    del ctx["answers"]["retro"]
+    subprocess.run([sys.executable, str(HOOK), "--phase", "install",
+                    "--root", str(root)],
+                   input=json.dumps(ctx), capture_output=True, text=True,
+                   cwd=str(CONSOLE))
+    marker = json.loads((root / "etc/nivuus/retro.json").read_text())
+    check("le temoin retro dit non quand retro est absente", marker["enabled"],
+          False)
+
+# bool("false") est True en Python - le meme piege de coercion deja corrige
+# une fois sur 'required' dans packages/wizard.py. Une chaine, quel que soit
+# son sens de lecture, doit etre refusee, jamais interpretee ; un nombre de
+# meme. La refuser signifie : sortir non-zero, ne rien ecrire, et nommer la
+# cle en cause.
+for bad_value in ("false", "true", 1):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        ctx = json.loads(CTX)
+        ctx["answers"]["retro"] = bad_value
+        proc = subprocess.run(
+            [sys.executable, str(HOOK), "--phase", "install", "--root", str(root)],
+            input=json.dumps(ctx), capture_output=True, text=True,
+            cwd=str(CONSOLE))
+        check(f"retro={bad_value!r} : le hook sort non-zero",
+              proc.returncode != 0, True)
+        check(f"retro={bad_value!r} : erreur nomme 'retro'",
+              "retro" in proc.stderr, True)
+        check(f"retro={bad_value!r} : aucun temoin ecrit",
+              (root / "etc/nivuus/retro.json").exists(), False)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
@@ -1429,6 +1463,28 @@ def write(dest: str, content: str, mode: int = 0o644) -> None:
     os.chmod(dest, mode)
 
 
+def retro_choice(answers: dict) -> bool:
+    """The retrogaming checkbox, accepted only as a genuine boolean.
+
+    `bool("false")` is True in Python - the same coercion trap this project
+    already hit once, on `required: bool(item.get("required", False))` in
+    packages/wizard.py, and fixed there with an explicit isinstance check.
+    The wizard's own validator (_check_value in packages/wizard.py) already
+    refuses a non-boolean 'retro' answer - but this hook reads its context
+    from stdin, and a hand-written config.json driving the engine outside
+    the portal (the standalone path phase 2b exists to enable) never passes
+    through that validator. So the same rule is enforced again here,
+    independently: a value this hook cannot interpret means the caller and
+    the package disagree about the contract, and silently picking a reading
+    is exactly how the original bug happened. Raises ValueError naming the
+    key and the offending value; never coerces.
+    """
+    value = answers.get("retro", False)
+    if not isinstance(value, bool):
+        raise ValueError(f"answer 'retro' expects true/false, got {value!r}")
+    return value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", required=True)
@@ -1437,6 +1493,15 @@ def main() -> int:
     ctx = json.load(sys.stdin)
     answers = ctx.get("answers") or {}
     root = args.root.rstrip("/") or "/"
+
+    # Fail fast, before a single byte lands on the target: a caller and the
+    # package disagreeing about 'retro' is a contract error, not something
+    # to work around mid-placement.
+    try:
+        retro_enabled = retro_choice(answers)
+    except ValueError as exc:
+        print(f"console install: {exc}", file=sys.stderr)
+        return 1
 
     def under(rel: str) -> str:
         return os.path.join(root, rel.lstrip("/"))
@@ -1467,7 +1532,7 @@ def main() -> int:
     # "declined" would otherwise be indistinguishable to the reader.
     emit({"event": "progress", "pct": 80, "msg": "Choix retrogaming enregistre"})
     write(under("etc/nivuus/retro.json"),
-          json.dumps({"enabled": bool(answers.get("retro"))}, indent=2) + "\\n")
+          json.dumps({"enabled": retro_enabled}, indent=2) + "\\n")
 
     emit({"event": "done"})
     return 0

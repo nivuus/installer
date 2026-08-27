@@ -58,6 +58,28 @@ def write(dest: str, content: str, mode: int = 0o644) -> None:
     os.chmod(dest, mode)
 
 
+def retro_choice(answers: dict) -> bool:
+    """The retrogaming checkbox, accepted only as a genuine boolean.
+
+    `bool("false")` is True in Python - the same coercion trap this project
+    already hit once, on `required: bool(item.get("required", False))` in
+    packages/wizard.py, and fixed there with an explicit isinstance check.
+    The wizard's own validator (_check_value in packages/wizard.py) already
+    refuses a non-boolean 'retro' answer - but this hook reads its context
+    from stdin, and a hand-written config.json driving the engine outside
+    the portal (the standalone path phase 2b exists to enable) never passes
+    through that validator. So the same rule is enforced again here,
+    independently: a value this hook cannot interpret means the caller and
+    the package disagree about the contract, and silently picking a reading
+    is exactly how the original bug happened. Raises ValueError naming the
+    key and the offending value; never coerces.
+    """
+    value = answers.get("retro", False)
+    if not isinstance(value, bool):
+        raise ValueError(f"answer 'retro' expects true/false, got {value!r}")
+    return value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", required=True)
@@ -66,6 +88,15 @@ def main() -> int:
     ctx = json.load(sys.stdin)
     answers = ctx.get("answers") or {}
     root = args.root.rstrip("/") or "/"
+
+    # Fail fast, before a single byte lands on the target: a caller and the
+    # package disagreeing about 'retro' is a contract error, not something
+    # to work around mid-placement.
+    try:
+        retro_enabled = retro_choice(answers)
+    except ValueError as exc:
+        print(f"console install: {exc}", file=sys.stderr)
+        return 1
 
     def under(rel: str) -> str:
         return os.path.join(root, rel.lstrip("/"))
@@ -96,7 +127,7 @@ def main() -> int:
     # "declined" would otherwise be indistinguishable to the reader.
     emit({"event": "progress", "pct": 80, "msg": "Choix retrogaming enregistre"})
     write(under("etc/nivuus/retro.json"),
-          json.dumps({"enabled": bool(answers.get("retro"))}, indent=2) + "\n")
+          json.dumps({"enabled": retro_enabled}, indent=2) + "\n")
 
     emit({"event": "done"})
     return 0

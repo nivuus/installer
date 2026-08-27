@@ -83,6 +83,40 @@ with tempfile.TemporaryDirectory() as tmp:
     marker = json.loads((root / "etc/nivuus/retro.json").read_text())
     check("le temoin retro dit non", marker["enabled"], False)
 
+# retro absente du contexte : meme regle - le temoin dit non, pas rien
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    ctx = json.loads(CTX)
+    del ctx["answers"]["retro"]
+    subprocess.run([sys.executable, str(HOOK), "--phase", "install",
+                    "--root", str(root)],
+                   input=json.dumps(ctx), capture_output=True, text=True,
+                   cwd=str(CONSOLE))
+    marker = json.loads((root / "etc/nivuus/retro.json").read_text())
+    check("le temoin retro dit non quand retro est absente", marker["enabled"],
+          False)
+
+# bool("false") est True en Python - le meme piege de coercion deja corrige
+# une fois sur 'required' dans packages/wizard.py. Une chaine, quel que soit
+# son sens de lecture, doit etre refusee, jamais interpretee ; un nombre de
+# meme. La refuser signifie : sortir non-zero, ne rien ecrire, et nommer la
+# cle en cause.
+for bad_value in ("false", "true", 1):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        ctx = json.loads(CTX)
+        ctx["answers"]["retro"] = bad_value
+        proc = subprocess.run(
+            [sys.executable, str(HOOK), "--phase", "install", "--root", str(root)],
+            input=json.dumps(ctx), capture_output=True, text=True,
+            cwd=str(CONSOLE))
+        check(f"retro={bad_value!r} : le hook sort non-zero",
+              proc.returncode != 0, True)
+        check(f"retro={bad_value!r} : erreur nomme 'retro'",
+              "retro" in proc.stderr, True)
+        check(f"retro={bad_value!r} : aucun temoin ecrit",
+              (root / "etc/nivuus/retro.json").exists(), False)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
