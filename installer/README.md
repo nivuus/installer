@@ -46,6 +46,39 @@ The installer **reuses the repo's own scripts** rather than duplicating logic:
 `scripts/optimize-cpu-thermal.sh`, `scripts/validate-install.sh`. The whole repo
 is copied into the target at `/opt/nivuus`.
 
+## Packages
+
+A **package** extends the installer with host-side features it does not ship
+itself. It is a directory carrying a `nivuus-package.yaml`, discovered at
+install time under `/opt/nivuus-packages/*/`, and embedded into the ISO from a
+sibling repository:
+
+```bash
+PACKAGE_REPOS="$HOME/Projects/Nivuus/packages/console" sudo -E make build-iso
+```
+
+### Three phases, named relative to the reboot
+
+| Phase | When | Receives | May |
+|---|---|---|---|
+| `resolve` | Before any write | `hw` + wizard answers on stdin | **Read only.** Return the resolved platform block, or refuse with a reason |
+| `install` | On a target filesystem | `--root` (`/mnt/target` in the ISO, `/` standalone) | Write under that root |
+| `activate` | After the reboot, network up | — | Anything |
+
+A hook reads a JSON context on **stdin** and emits jsonl events on **stdout**:
+`{"event":"progress","pct":N,"msg":"…"}`, `{"event":"platform","kernel-cmdline":[…],"modules":[…],"hugepages-mib":N}`,
+`{"event":"refuse","reason":"…"}`, `{"event":"done"}`. A non-zero exit fails the install.
+
+### Two tiers
+
+`userspace` may declare `apt`, questions and hooks. `platform` may additionally
+declare `kernel-cmdline`, `modules` and `hugepages-mib` — and the wizard then
+shows the resolved kernel command line verbatim and asks for its own
+confirmation. A `userspace` manifest declaring any of the three is **refused**,
+not silently stripped.
+
+See `scripts/tests/fixtures/packages/demo/` for a complete working example.
+
 ## Build the ISO
 
 ```bash

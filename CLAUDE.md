@@ -76,6 +76,55 @@ own dir; env hooks `NIVUUS_ASSUME_YES`/`--non-interactive`, `NIVUUS_IN_CHROOT`
 now names the CPUs the VM will pin and is emitted as **`nohz_full=` only, never
 `isolcpus=`** — see "Dynamic host/VM CPU partitioning" below.
 
+**Package engine (2026-08-27)**: `installer/packages/` implements the
+`nivuus.dev/v1` contract — a declarative `nivuus-package.yaml` plus three hooks
+(`resolve`/`install`/`activate`). Packages are sibling repositories embedded
+into the ISO via `PACKAGE_REPOS=… make build-iso` and discovered at
+`/opt/nivuus-packages/*/` (override with `NIVUUS_PACKAGES_DIR`).
+
+Three properties carry the design and are easy to break by accident:
+* **`resolve` is read-only and runs before `partition`.** That is the only
+  reason `bootloader` can stay where it is in `run.py`: the kernel cmdline is
+  known before the disk is touched. Moving a package's cmdline contribution
+  later would force the whole pipeline to be reordered.
+* **`iommu` is read from the ACPI tables (`DMAR`/`IVRS`), never from
+  `/sys/kernel/iommu_groups`.** The live ISO boots *without* `intel_iommu=on` —
+  adding it is exactly what a passthrough package asks for — so a check on the
+  active state would answer "no" on every capable machine and no such package
+  would ever be offered.
+* **The engine detects capabilities, the package detects details.** The engine
+  must answer `requires.capabilities` before running any hook, so it cannot
+  delegate. It stays coarse (`iommu`, `gpu-discrete`, `nvme-dedicated`,
+  `cpu-hybrid`); the precise work — PCI functions, IOMMU groups, `vfio-pci.ids`
+  — belongs to `resolve`.
+
+Two more findings from implementing the engine, both worth knowing before
+touching it:
+* **`resolve` being read-only is a CONVENTION, not a sandbox.** Tested
+  directly: a `resolve` hook that writes to disk succeeds, and the write
+  persists — nothing chroots or restricts the subprocess. What the pipeline
+  ordering actually depends on is that the engine never *asks* `resolve` to
+  write and never *uses* anything it wrote, not that `resolve` is incapable. A
+  malicious package owns the machine from the `install` phase onward
+  regardless, since that runs as root. The rule protects against accident and
+  ordering mistakes — real, worth having — but must be described as that, not
+  as a security boundary. Real sandboxing would be its own project.
+* **`chroot_base.py:9` imports `crypt`, removed from the Python stdlib in 3.13
+  (PEP 594).** Used for exactly one thing (line 98): hashing the user
+  account's password. The live ISO builds on **bookworm**
+  (`iso-build/auto/config --distribution bookworm`), Python 3.11, so
+  production is unaffected today — but `run.py` cannot even be imported on a
+  Python 3.13 host, and the day the ISO base moves to trixie the installer
+  breaks at the step that creates the user account, at the very end of an
+  otherwise successful install. Remedies: `passlib`, `openssl passwd -6`, or
+  `chpasswd -e` inside the chroot. Dated technical debt, not a bug to fix now
+  — out of the package-engine plan's scope.
+
+Activation uses a stamp (`/var/lib/nivuus/packages/<name>.activated`), not a
+self-disabling unit: an interrupted activation must retry at the next boot
+rather than believe it succeeded. Tests: `cd installer && make test-packages`
+(9 files). Spec: `docs/superpowers/specs/2026-08-27-decoupage-installer-console-design.md`.
+
 **Build & test:** `cd installer && sudo make build-iso` (needs `live-build`).
 `make test-portal` (portal on :8080), `make test-vm` (QEMU UEFI, portal via
 Ethernet fallback — WiFi AP isn't emulable in QEMU), engine on a loopback image
