@@ -99,7 +99,7 @@ def main() -> int:
         features.apply_features(config, target, nivuus_dir, hw, emit)
         if stop("features"):
             return 0
-        packages.apply_packages(plan, target, hw, emit)
+        packages.apply_packages(plan, target, nivuus_dir, hw, emit)
         if stop("packages"):
             return 0
         validate.validate(config, target, nivuus_dir, emit)

@@ -9,11 +9,21 @@ it returns is the kernel command line the bootloader step will write.
 apply_packages() then writes: modules, hugepages, apt, the install hook, and
 the activation unit that carries the package into first boot.
 
+The apply_packages assertions below deliberately look at ARTEFACTS UNDER THE
+TARGET, not at calls. chroot_run is faked here, so asserting that a
+`systemctl enable` command was issued proves only that this test's own fake
+was called - it cannot tell an installed system from an empty directory, and
+that is exactly how a branch shipped in which the activate phase could not
+run on any installed machine. What has to exist on the target is checked as
+files: the unit, the enablement symlink, the package directory, the CLI the
+unit's ExecStart names.
+
 Run: python3 scripts/tests/test_install_engine_packages.py
 """
 import json
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 
@@ -157,6 +167,22 @@ with tempfile.TemporaryDirectory() as collision_root:
     finally:
         steps_packages.discover = real_discover
 
+# --- kernel parameters are validated before anything is written ------------- #
+# The allowlist guarding /etc/default/grub lives in bootloader.py, which runs
+# at step 7 - after partition() has wiped the disk. A manifest resolving to a
+# parameter carrying shell meaning must therefore be refused HERE, in
+# plan_packages, or the operator meets "Unexpected error" on an already
+# destroyed target.
+check_raises("a shell-injecting kernel parameter is refused while planning",
+             lambda: steps_packages.plan_packages(
+                 {**config, "packages": {"injecteur": {}}}, HW, FakeEmit()),
+             "vfio-pci.ids=$(rm -rf /)")
+
+check_raises("and the refusal says it is a kernel parameter problem",
+             lambda: steps_packages.plan_packages(
+                 {**config, "packages": {"injecteur": {}}}, HW, FakeEmit()),
+             "paramètre noyau refusé")
+
 # --- apply_packages -------------------------------------------------------- #
 calls = []
 
@@ -168,11 +194,29 @@ def fake_chroot_run(target, cmd, **kwargs):
     return R()
 
 
+def seed_payload(target: pathlib.Path) -> str:
+    """Reproduce what copy_payload() leaves at /opt/nivuus on the target.
+
+    The real files, not stand-ins: the unit copied onto the target has to be
+    the one in configs/systemd/, and its ExecStart has to name the CLI that
+    actually exists in the payload.
+    """
+    payload = target / "opt" / "nivuus"
+    (payload / "configs" / "systemd").mkdir(parents=True)
+    shutil.copyfile(REPO / "configs/systemd/nivuus-package-activate@.service",
+                    payload / "configs/systemd/nivuus-package-activate@.service")
+    (payload / "installer" / "packages").mkdir(parents=True)
+    shutil.copyfile(REPO / "installer/packages/activate_cli.py",
+                    payload / "installer/packages/activate_cli.py")
+    return "/opt/nivuus"
+
+
 with tempfile.TemporaryDirectory() as tmp:
     steps_packages.chroot_run = fake_chroot_run
-    plan, _ = steps_packages.plan_packages(config, HW, FakeEmit())
-    steps_packages.apply_packages(plan, tmp, HW, FakeEmit())
     target = pathlib.Path(tmp)
+    nivuus_dir = seed_payload(target)
+    plan, _ = steps_packages.plan_packages(config, HW, FakeEmit())
+    steps_packages.apply_packages(plan, tmp, nivuus_dir, HW, FakeEmit())
 
     modules = (target / "etc/modules").read_text()
     check("static module written", "vfio_pci" in modules, True)
@@ -184,9 +228,37 @@ with tempfile.TemporaryDirectory() as tmp:
 
     check("apt was asked for the declared packages",
           any("cowsay" in c for c in calls), True)
-    check("the activation unit was enabled",
-          any("nivuus-package-activate@demo.service" in " ".join(c)
-              for c in calls), True)
+    check("apt was asked for the YAML parser the activate phase needs",
+          any("python3-yaml" in c for c in calls), True)
+
+    # --- the activate phase must be able to run on the installed system ----- #
+    unit = target / "etc/systemd/system/nivuus-package-activate@.service"
+    check("the activation unit reaches the target", unit.is_file(), True)
+    unit_text = unit.read_text()
+    check("its ExecStart points at the CLI where the payload actually puts it",
+          "ExecStart=/opt/nivuus/installer/packages/activate_cli.py %i"
+          in unit_text, True)
+
+    cli = target / "opt/nivuus/installer/packages/activate_cli.py"
+    check("the CLI that ExecStart names exists on the target", cli.is_file(),
+          True)
+    check("and it is executable", os.access(cli, os.X_OK), True)
+
+    pkg_dir = target / "opt/nivuus-packages/demo"
+    check("the selected package travels to the target", pkg_dir.is_dir(), True)
+    check("with its manifest, which is what discover() looks for",
+          (pkg_dir / "nivuus-package.yaml").is_file(), True)
+    check("and its hooks, which activate would run",
+          (pkg_dir / "hooks" / "resolve.py").is_file(), True)
+    check("a package that was NOT selected is not copied",
+          (target / "opt/nivuus-packages/refuser").exists(), False)
+
+    link = (target / "etc/systemd/system/multi-user.target.wants"
+            / "nivuus-package-activate@demo.service")
+    check("the activation is armed for first boot", link.is_symlink(), True)
+    check("and the symlink points at the template unit",
+          os.readlink(link),
+          "/etc/systemd/system/nivuus-package-activate@.service")
 
     marker = target / "etc" / "nivuus-demo.json"
     check("the install hook ran under the target root", marker.is_file(), True)
@@ -198,6 +270,85 @@ with tempfile.TemporaryDirectory() as tmp:
           state["demo"]["answers"]["greeting"], "salut")
     check("the recorded version matches the manifest",
           state["demo"]["version"], "1.0.0")
+
+# A payload with no activation unit must fail the install, not report success:
+# an install that cannot activate anything at first boot has not done what it
+# said it did.
+with tempfile.TemporaryDirectory() as tmp:
+    steps_packages.chroot_run = fake_chroot_run
+    target = pathlib.Path(tmp)
+    (target / "opt/nivuus/installer/packages").mkdir(parents=True)
+    shutil.copyfile(REPO / "installer/packages/activate_cli.py",
+                    target / "opt/nivuus/installer/packages/activate_cli.py")
+    plan, _ = steps_packages.plan_packages(config, HW, FakeEmit())
+    check_raises("a payload missing the activation unit fails the install",
+                 lambda: steps_packages.apply_packages(
+                     plan, tmp, "/opt/nivuus", HW, FakeEmit()),
+                 "nivuus-package-activate@.service")
+
+# Same for the CLI the unit's ExecStart names.
+with tempfile.TemporaryDirectory() as tmp:
+    steps_packages.chroot_run = fake_chroot_run
+    target = pathlib.Path(tmp)
+    (target / "opt/nivuus/configs/systemd").mkdir(parents=True)
+    shutil.copyfile(REPO / "configs/systemd/nivuus-package-activate@.service",
+                    target / "opt/nivuus/configs/systemd"
+                    / "nivuus-package-activate@.service")
+    plan, _ = steps_packages.plan_packages(config, HW, FakeEmit())
+    check_raises("a payload missing activate_cli.py fails the install",
+                 lambda: steps_packages.apply_packages(
+                     plan, tmp, "/opt/nivuus", HW, FakeEmit()),
+                 "activate_cli.py")
+
+# The state file must describe the residue of a PARTIAL apply: a package whose
+# install hook succeeded, then one that raised, must still leave the first one
+# recorded - it is on the target and armed for first boot either way.
+with tempfile.TemporaryDirectory() as tmp:
+    steps_packages.chroot_run = fake_chroot_run
+    target = pathlib.Path(tmp)
+    nivuus_dir = seed_payload(target)
+    plan, _ = steps_packages.plan_packages(config, HW, FakeEmit())
+
+    real_run_install = steps_packages.run_install
+
+    def exploding_run_install(manifest, hw, answers, root, emit):
+        real_run_install(manifest, hw, answers, root, emit)
+        raise steps_packages.HookError("hook install en échec (simulé)")
+
+    steps_packages.run_install = exploding_run_install
+    try:
+        check_raises("an install hook failure fails the step",
+                     lambda: steps_packages.apply_packages(
+                         plan, tmp, nivuus_dir, HW, FakeEmit()),
+                     "simulé")
+    finally:
+        steps_packages.run_install = real_run_install
+
+    check("a package whose hook raised is not recorded",
+          (target / "etc/nivuus/packages.json").exists(), False)
+
+    # And with the failure on the SECOND package, the first one is recorded.
+    two = plan + [plan[0]]
+    seen = []
+
+    def second_explodes(manifest, hw, answers, root, emit):
+        seen.append(manifest.name)
+        if len(seen) > 1:
+            raise steps_packages.HookError("second hook en échec (simulé)")
+        real_run_install(manifest, hw, answers, root, emit)
+
+    steps_packages.run_install = second_explodes
+    try:
+        check_raises("the second package's failure fails the step",
+                     lambda: steps_packages.apply_packages(
+                         plan + [plan[0]], tmp, nivuus_dir, HW, FakeEmit()),
+                     "second hook")
+    finally:
+        steps_packages.run_install = real_run_install
+
+    state = json.loads((target / "etc/nivuus/packages.json").read_text())
+    check("the package applied before the failure IS recorded",
+          "demo" in state, True)
 
 if failures:
     print(f"FAIL ({len(failures)})")

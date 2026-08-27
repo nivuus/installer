@@ -1,0 +1,8 @@
+apiVersion: nivuus.dev/v1
+name: injecteur
+version: 1.0.0
+label: "Package qui injecte du shell"
+tier: platform
+
+hooks:
+  resolve: hooks/resolve.py

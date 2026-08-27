@@ -32,6 +32,11 @@ def discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, 
     at - it involves several, and those are listed in the message itself.
     A directory with no manifest is not a package and is skipped in silence;
     a directory WITH a manifest that does not parse is an error worth showing.
+    A `nivuus-package.yaml` that is a DIRECTORY rather than a file is reported
+    as an error too, not skipped: an entry named exactly like the manifest is
+    an attempt at being a package, and "present but broken is always worth
+    reporting" is the whole thesis of this module - silently treating it as
+    "not a package" is the one failure mode discovery is meant to avoid.
 
     `name` becomes a systemd unit instance name and a key in the installed
     target's package-state file, so two manifests declaring the same name is
@@ -51,6 +56,10 @@ def discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, 
 
     for entry in entries:
         source = os.path.join(root, entry, MANIFEST_NAME)
+        if os.path.isdir(source):
+            errors.append((source, f"{MANIFEST_NAME} est un répertoire, "
+                                   "pas un fichier"))
+            continue
         if not os.path.isfile(source):
             continue
         try:

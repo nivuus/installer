@@ -12,6 +12,13 @@ The read-only rule is there to catch accident and ordering mistakes (a
 package author reaching for install-phase behaviour one phase too early),
 not to defend against a malicious package - one of those owns the machine
 from the install phase onward anyway, since install already runs as root.
+Concretely: plan_packages() runs resolve BEFORE partition(), so at that
+moment the target disk does not exist yet and there is nothing on it to
+write to. The realistic accident is therefore not a corrupted target - it is
+a resolve hook writing to the LIVE INSTALLER filesystem, whose root runs in
+RAM (see CLAUDE.md) and is thrown away at the reboot. Such a write silently
+does nothing useful and is gone by first boot, which is exactly the class of
+mistake this convention exists to make an author avoid.
 
 The protocol is deliberately a subprocess speaking jsonl on stdout rather than
 an imported Python API. A package must be able to run on a Debian that has

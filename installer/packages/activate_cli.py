@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """First-boot entry point for a package's `activate` phase.
 
-Deployed as /usr/local/sbin/nivuus-package-activate and run once per package
-by nivuus-package-activate@<name>.service. It re-reads the answers the wizard
-recorded on the target at install time, because the activate phase runs long
-after the portal is gone - there is nobody left to ask.
+Run once per package by nivuus-package-activate@<name>.service, IN PLACE at
+/opt/nivuus/installer/packages/activate_cli.py - the unit's ExecStart points
+here rather than at a copy under /usr/local/sbin, because this file computes
+its own sys.path from __file__ and a copy elsewhere could not import `common`
+or `packages`. It re-reads the answers the wizard recorded on the target at
+install time, because the activate phase runs long after the portal is gone -
+there is nobody left to ask.
 
 The stamp is written ONLY on success. An activation that fails is retried at
 the next boot rather than silently marked done, which matters because this is
@@ -48,7 +51,7 @@ class _StderrEmit:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
-        print("usage: nivuus-package-activate <package-name>", file=sys.stderr)
+        print("usage: activate_cli.py <package-name>", file=sys.stderr)
         return 2
     name = argv[1]
 

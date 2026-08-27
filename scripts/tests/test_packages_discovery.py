@@ -60,6 +60,25 @@ with tempfile.TemporaryDirectory() as tmp:
 check("a missing packages dir is empty, not an error",
       discover("/nonexistent/packages"), ([], []))
 
+# A directory NAMED nivuus-package.yaml is not "not a package": it is an
+# attempt at being one that went wrong, and this module's whole thesis is that
+# present-but-broken is always worth reporting. Skipping it in silence is
+# indistinguishable from a directory that never claimed to be a package.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    write_pkg(root, "sain", GOOD.format(api=API_VERSION, name="sain"))
+    (root / "difforme" / "nivuus-package.yaml").mkdir(parents=True)
+
+    found, errors = discover(str(root))
+    check("the healthy package beside it is still offered",
+          [m.name for m in found], ["sain"])
+    check("a manifest that is a directory is reported, not skipped",
+          len(errors), 1)
+    check("the error names the offending path",
+          errors[0][0], str(root / "difforme" / "nivuus-package.yaml"))
+    check("and says what is wrong with it",
+          "répertoire" in errors[0][1], True)
+
 # --- duplicate names --------------------------------------------------------#
 # The package name becomes a systemd unit instance name and a key in the
 # installed target's package-state file: two directories declaring the same
