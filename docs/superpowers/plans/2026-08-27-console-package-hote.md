@@ -1206,7 +1206,18 @@ grep -rn "scripts/vm-cpu-partition\|scripts/vm-wake-gate\|scripts/handle-vm-star
   | grep -v '^./CHANGELOG.md' | grep -v '^./docs/superpowers/'
 ```
 
-Attendu : seuls `install.sh` (qui disparaît en tâche 5) et `CLAUDE.md` (mis à jour en tâche 7). **Toute autre occurrence est un appelant que ce déplacement casse** — signalez-la.
+Attendu, **inventorié par le contrôleur avant le dispatch** — cinq lieux, pas deux :
+
+| Référence | Sort |
+| --- | --- |
+| `install.sh:106` (`cp … scripts/vm-cpu-partition.sh`) | Laisser : le fichier entier disparaît en tâche 5 |
+| `CLAUDE.md` (3 passages) | Laisser : mis à jour en tâche 7 |
+| `QUICKSTART.md:179` (`install -m 755 scripts/winvm …`) | **Corriger ici** → `console/host/winvm` |
+| `docs/winrm-setup.md:55` | **Corriger ici** → chemin relatif `console/host/winvm`. Il porte aujourd'hui un chemin absolu `/home/mallanic/Projects/Nivuus/scripts/winvm`, vestige d'une disposition antérieure — remplacez-le par un chemin relatif au dépôt, pas par un autre absolu |
+| `console/host/install-winrm-cli.sh:72` (son propre `echo`) | **Corriger ici** → le script se déplace, son message doit suivre |
+| `console/host/libvirt/hooks/qemu.d/Windows/prepare/begin/10-cpu-confine.sh:3` (commentaire) | **Corriger ici** → il dit « Real logic lives in the repo (scripts/vm-cpu-partition.sh) » |
+
+**Toute occurrence hors de cette liste est un appelant que le déplacement casse** — signalez-la.
 
 - [ ] **Step 4: Lancer les tests déplacés**
 
