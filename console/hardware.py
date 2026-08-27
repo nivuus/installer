@@ -181,10 +181,28 @@ def _whole_disk_name(name: str, sysfs_root: str = "/sys/class/block") -> str:
         return name
 
 
-def _device_to_pci_address(device: str) -> Optional[str]:
+SYSFS_BLOCK_ENV = "NIVUUS_SYSFS_BLOCK"
+
+
+def _sysfs_block_root() -> str:
+    """Root of the sysfs block tree, overridable for tests.
+
+    The tests must be able to describe a machine that is not the one running
+    them - a live ISO, a host whose root cannot be traced - and a block tree
+    is the one input that cannot be captured as text the way `lspci` output
+    can. NIVUUS_SYSFS_BLOCK is the same kind of seam
+    installer/common/progress.py already exposes through NIVUUS_PROGRESS_DIR.
+    Production never sets it.
+    """
+    return os.environ.get(SYSFS_BLOCK_ENV) or "/sys/block"
+
+
+def _device_to_pci_address(device: str,
+                           sysfs_root: Optional[str] = None) -> Optional[str]:
     """Resolve a block device name to its PCI address, or None."""
+    root = sysfs_root or _sysfs_block_root()
     try:
-        target = os.path.realpath(f"/sys/block/{device}/device/device")
+        target = os.path.realpath(os.path.join(root, device, "device", "device"))
     except OSError:
         return None
     tail = os.path.basename(target)
@@ -192,23 +210,55 @@ def _device_to_pci_address(device: str) -> Optional[str]:
 
 
 def select_passthrough_nvme(controllers: list[dict],
-                            host_addresses: set[str]) -> dict:
-    """The one NVMe controller that is not backing the host's own root.
+                            host_addresses: Optional[set[str]],
+                            wanted_address: Optional[str] = None) -> dict:
+    """The NVMe controller to hand over, chosen by the OPERATOR when possible.
 
-    Refuses to guess: the selected disk is wiped by the Windows installer, so
-    an ambiguous answer must be an error, never a best effort.
+    `wanted_address` is the PCI address behind the `dedicated_nvme` answer.
+    It DRIVES the choice; the host-root exclusion is then an assertion on
+    that choice, not the way the choice is made. The inversion is not
+    cosmetic - it is what makes this usable from the installer ISO, which is
+    the package's primary path. On a live medium the host root is the live
+    image, not a PCI disk, so `host_addresses` is None on EVERY machine and
+    a selector that derives from it can only ever refuse. The operator's
+    answer is the one piece of information that exists on both paths.
+
+    `host_addresses` is therefore allowed to be None (root not traceable):
+    the safety assertion simply does not apply, and must not become a
+    refusal on its own.
+
+    With no answer to go on, the old behaviour stands as a fallback:
+    auto-select when exactly one candidate is unambiguous, refuse otherwise.
+    The selected disk is wiped by the Windows installer, so an ambiguous
+    answer must be an error, never a best effort.
     """
     if not controllers:
         raise HardwareError("no NVMe controller found (PCI class 0108)")
+
+    known = [c["address"] for c in controllers]
+    if wanted_address:
+        chosen = next((c for c in controllers
+                       if c["address"] == wanted_address), None)
+        if chosen is None:
+            raise HardwareError(
+                f"the dedicated device resolves to PCI address "
+                f"{wanted_address}, which is not an NVMe controller; the "
+                f"NVMe controllers on this machine are: {known}")
+        if host_addresses and chosen["address"] in host_addresses:
+            raise HardwareError(
+                f"the dedicated device ({wanted_address}) backs the host root "
+                "filesystem; it cannot be handed to the guest")
+        return chosen
+
     if not host_addresses:
         raise HardwareError(
-            "host root not identified; cannot safely select a passthrough device"
-        )
+            "host root not identified and no dedicated NVMe was named; "
+            "cannot safely select a passthrough device")
     candidates = [c for c in controllers if c["address"] not in host_addresses]
     if not candidates:
         raise HardwareError(
             "every NVMe controller backs the host root; none can be passed "
-            f"through: {[c['address'] for c in controllers]}"
+            f"through: {known}"
         )
     if len(candidates) > 1:
         raise HardwareError(
@@ -275,12 +325,14 @@ def host_root_pci_addresses() -> Optional[set[str]]:
     return backing_devices if backing_devices else None
 
 
-def resolve_passthrough_nvme(raw: str, host_addresses: set[str]) -> dict:
+def resolve_passthrough_nvme(raw: str, host_addresses: Optional[set[str]],
+                             wanted_address: Optional[str] = None) -> dict:
     """The passthrough NVMe, decomposed the way a <hostdev> address needs.
 
     Pure, so it is testable on captured lspci text.
     """
-    controller = select_passthrough_nvme(parse_nvme_controllers(raw), host_addresses)
+    controller = select_passthrough_nvme(parse_nvme_controllers(raw),
+                                         host_addresses, wanted_address)
     functions = parse_pci_functions(raw, controller["address"])
     if not functions:
         raise HardwareError(f"cannot decompose address {controller['address']}")
@@ -291,19 +343,22 @@ def resolve_passthrough_nvme(raw: str, host_addresses: set[str]) -> dict:
     return matching
 
 
-def passthrough_nvme() -> dict:
-    """The NVMe controller to hand to the Windows guest, on this machine."""
-    host_addrs = host_root_pci_addresses()
-    if host_addrs is None:
-        raise HardwareError(
-            "cannot identify host root filesystem; refusing to guess passthrough device"
-        )
+def passthrough_nvme(wanted_address: Optional[str] = None) -> dict:
+    """The NVMe controller to hand to the Windows guest, on this machine.
+
+    An untraceable host root is NOT an error here any more: it is the normal
+    state of a live installer medium, where the root is the live image rather
+    than a PCI disk. It is passed through as None so select_passthrough_nvme
+    can treat the host-root exclusion as an assertion that does not apply,
+    instead of a refusal that would fire on every ISO install.
+    """
     return resolve_passthrough_nvme(
-        _run(["lspci", "-nn", "-D"]), host_addrs
+        _run(["lspci", "-nn", "-D"]), host_root_pci_addresses(), wanted_address
     )
 
 
-def pci_address_for_device(path: str) -> str | None:
+def pci_address_for_device(path: str,
+                           sysfs_root: Optional[str] = None) -> str | None:
     """PCI address of the controller behind a /dev/... block device, or None.
 
     The wizard hands back a device PATH; passthrough needs a PCI ADDRESS, and
@@ -311,7 +366,7 @@ def pci_address_for_device(path: str) -> str | None:
     resolved to its whole disk first, because /sys/block only knows the latter.
     """
     name = _whole_disk_name(os.path.basename(path.rstrip("/")))
-    return _device_to_pci_address(name)
+    return _device_to_pci_address(name, sysfs_root)
 
 
 def vfio_ids_for_slot(slot: str) -> list[str]:

@@ -10,9 +10,11 @@ downgraded to a disk image.
 Run: python3 scripts/tests/test_console_resolve.py
 """
 import json
+import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "installer"))
@@ -31,7 +33,7 @@ def check(label, got, want):
         failures.append(f"{label}: got {got!r}, want {want!r}")
 
 
-def call_hook(hw=None, answers=None):
+def call_hook(hw=None, answers=None, env=None):
     """Invoke console/hooks/resolve.py exactly as the engine does: a
     subprocess fed the {"hw":..., "answers":...} context on stdin, jsonl
     events on stdout. This is the hook's REAL interface - going through
@@ -50,9 +52,13 @@ def call_hook(hw=None, answers=None):
         ctx["hw"] = hw
     if answers is not None:
         ctx["answers"] = answers
+    child_env = dict(os.environ)
+    if env:
+        child_env.update(env)
     proc = subprocess.run(
         [sys.executable, str(RESOLVE_HOOK), "--phase", "resolve"],
-        input=json.dumps(ctx), capture_output=True, text=True, timeout=30)
+        input=json.dumps(ctx), capture_output=True, text=True, timeout=30,
+        env=child_env)
     events = []
     for line in proc.stdout.splitlines():
         line = line.strip()
@@ -301,6 +307,111 @@ else:
     check("hote 64 GiB : l invite recoit le defaut mesure (16384 MiB), "
           "PAS la moitie de l hote (32768 MiB)",
           plat.get("hugepages-mib"), 16384)
+
+# --- LE CHEMIN ISO LIVE, de bout en bout et de facon DETERMINISTE -------- #
+# C est le chemin PRINCIPAL du package - on l installe depuis l ISO - et
+# c est celui qui etait casse : le selecteur derivait le NVMe a passer en
+# EXCLUANT ceux qui portent la racine hote, or sur un support live la racine
+# est l image live, aucun disque PCI ne la porte, et findmnt rend « overlay ».
+# host_root_pci_addresses() rendait donc None sur TOUTES les machines et le
+# selecteur refusait partout. Mesure avant correctif :
+#
+#   hote deja installe, racine sur A  -> choisit B
+#   ISO live, racine = overlay        -> REFUS : « host root not identified »
+#
+# Les verifications materielles precedentes passaient parce qu elles
+# s executaient sur un hote installe : le mauvais chemin etait exerce.
+#
+# Le scenario est monte de toutes pieces - un faux `lspci` et un faux
+# `findmnt` sur le PATH, un faux arbre sysfs via NIVUUS_SYSFS_BLOCK - donc il
+# est vrai sur n importe quelle machine, y compris une sans NVMe du tout.
+LSPCI_LIVE = """\
+0000:00:02.0 VGA compatible controller [0300]: Intel Corporation AlderLake-S GT1 [8086:4680] (rev 0c)
+0000:01:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD104 [GeForce RTX 4070] [10de:2786] (rev a1)
+0000:01:00.1 Audio device [0403]: NVIDIA Corporation AD104 High Definition Audio Controller [10de:22bc] (rev a1)
+0000:02:00.0 Non-Volatile memory controller [0108]: Samsung Electronics Co Ltd NVMe SSD Controller 980 [144d:a809]
+0000:03:00.0 Non-Volatile memory controller [0108]: Samsung Electronics Co Ltd NVMe SSD Controller SM981 [144d:a808]
+"""
+
+
+def live_iso_env(root, disk_to_address):
+    """A fake live medium: no traceable host root, a captured lspci, a fake
+    sysfs block tree mapping device names to PCI addresses.
+
+    Returns the env overlay to hand call_hook().
+    """
+    binaries = os.path.join(root, "bin")
+    os.makedirs(binaries, exist_ok=True)
+    # A live ISO's root really is reported as `overlay` - a name that is not
+    # a block device, so nothing PCI can be derived from it.
+    with open(os.path.join(binaries, "findmnt"), "w") as fh:
+        fh.write("#!/bin/sh\necho overlay\n")
+    with open(os.path.join(binaries, "lspci"), "w") as fh:
+        fh.write("#!/bin/sh\ncat <<'EOF'\n" + LSPCI_LIVE + "EOF\n")
+    for name in ("findmnt", "lspci"):
+        os.chmod(os.path.join(binaries, name), 0o755)
+
+    block = os.path.join(root, "sysfs-block")
+    pci = os.path.join(root, "pci")
+    for device, address in disk_to_address.items():
+        os.makedirs(os.path.join(block, device, "device"), exist_ok=True)
+        os.makedirs(os.path.join(pci, address), exist_ok=True)
+        os.symlink(os.path.join(pci, address),
+                   os.path.join(block, device, "device", "device"))
+
+    return {"PATH": binaries + os.pathsep + os.environ.get("PATH", ""),
+            "NIVUUS_SYSFS_BLOCK": block}
+
+
+HW_LIVE = {"gpus": [GPU_OK], "cpu": CPU_OK, "memory_mib": 65536}
+
+with tempfile.TemporaryDirectory() as tmp:
+    env = live_iso_env(tmp, {"nvme9n1": "0000:03:00.0",
+                             "nvme8n1": "0000:00:02.0"})
+
+    # Le cas qui refusait sur toutes les machines et doit maintenant reussir.
+    rc, events = call_hook(hw=HW_LIVE, answers={"dedicated_nvme": "/dev/nvme9n1"},
+                           env=env)
+    check("ISO live : code de sortie 0", rc, 0)
+    check("ISO live : AUCUN refus", refusal_reason(events), None)
+    plat = platform_event(events)
+    check("ISO live : un plan platform est emis", plat is not None, True)
+    if plat:
+        check("ISO live : le NVMe choisi est celui repondu par l operateur",
+              "vfio-pci.ids=10de:2786,10de:22bc,144d:a808"
+              in plat.get("kernel-cmdline", []), True)
+
+    # Une reponse qui ne designe aucun controleur NVMe : refus motive, pas un
+    # choix de repli silencieux sur un autre disque.
+    rc, events = call_hook(hw=HW_LIVE, answers={"dedicated_nvme": "/dev/nvme8n1"},
+                           env=env)
+    check("ISO live, reponse non-NVMe : code de sortie 0", rc, 0)
+    reason = refusal_reason(events)
+    check("ISO live, reponse non-NVMe : un refus est emis",
+          reason is not None, True)
+    check("ISO live, reponse non-NVMe : le refus nomme l adresse trouvee",
+          bool(reason) and "0000:00:02.0" in reason, True)
+    check("ISO live, reponse non-NVMe : le refus nomme ce qui etait attendu",
+          bool(reason) and "0000:03:00.0" in reason, True)
+
+    # Une reponse qui ne se resout vers aucune adresse PCI du tout.
+    rc, events = call_hook(hw=HW_LIVE,
+                           answers={"dedicated_nvme": "/dev/nexistepas0n1"},
+                           env=env)
+    check("ISO live, disque inconnu : code de sortie 0", rc, 0)
+    reason = refusal_reason(events)
+    check("ISO live, disque inconnu : un refus est emis", reason is not None, True)
+    check("ISO live, disque inconnu : le refus nomme le disque demande",
+          bool(reason) and "/dev/nexistepas0n1" in reason, True)
+
+    # Sans reponse, sur un live ou la racine n est pas tracable, il ne reste
+    # rien pour decider : le refus est le bon comportement, et il le dit.
+    rc, events = call_hook(hw=HW_LIVE, answers={"dedicated_nvme": ""}, env=env)
+    check("ISO live sans reponse : code de sortie 0", rc, 0)
+    reason = refusal_reason(events)
+    check("ISO live sans reponse : un refus est emis", reason is not None, True)
+    check("ISO live sans reponse : le refus dit qu il manque le disque dedie",
+          bool(reason) and "dedicated NVMe" in reason, True)
 
 # --- non-regression : les refus deja verifies plus haut restent verts ---- #
 rc, events = call_hook(

@@ -17,9 +17,14 @@ from dataclasses import dataclass
 import yaml
 
 QUESTION_TYPES = ("bool", "choix", "texte", "secret", "disque", "gpu")
+# The question whose answer is a whole block device the package claims for
+# itself. Named because the ENGINE has to reason about it: only the engine
+# knows the install target, so only the engine can refuse an answer that
+# names it (see steps/packages.py).
+DISK_TYPE = "disque"
 # Types the ENGINE fills from its hardware detection; the answer is a device
 # path or a PCI slot the operator picked from a list the package never saw.
-HARDWARE_TYPES = ("disque", "gpu")
+HARDWARE_TYPES = (DISK_TYPE, "gpu")
 
 
 class WizardError(RuntimeError):

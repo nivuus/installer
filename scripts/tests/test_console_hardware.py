@@ -134,6 +134,56 @@ check_raises(
     lambda: hardware.select_passthrough_nvme([], {"0000:02:00.0"}),
 )
 
+# --- le cas ISO LIVE : la racine hote n est PAS identifiable -------------- #
+# C est le chemin PRINCIPAL du package, et l ancien selecteur y refusait sur
+# TOUTES les machines : sur un support live la racine est l image live, aucun
+# disque PCI ne la porte, donc host_root_pci_addresses() rend None et un
+# selecteur qui en derive n a jamais de quoi decider. La reponse de
+# l operateur (dedicated_nvme) est la seule information presente des deux
+# cotes : elle CHOISIT, et l exclusion de la racine hote devient une
+# assertion qui, faute de racine identifiable, ne s applique simplement pas.
+picked_live = hardware.select_passthrough_nvme(
+    ctrls, None, wanted_address="0000:03:00.0")
+check("ISO live : la reponse de l operateur choisit malgre une racine "
+      "inconnue", picked_live["address"], "0000:03:00.0")
+check("ISO live : et l id suit", picked_live["id"], "144d:a808")
+
+# Meme chose vue depuis la fonction pure qui decompose l adresse.
+resolved_live = hardware.resolve_passthrough_nvme(
+    LSPCI, None, wanted_address="0000:03:00.0")
+check("ISO live : l adresse est decomposee", resolved_live["bus"], "0x03")
+
+# Sans reponse ET sans racine identifiable, il ne reste rien pour decider :
+# le refus d origine tient, c est le seul cas ou il etait justifie.
+check_raises(
+    "ISO live sans reponse : plus rien pour decider, refus",
+    hardware.HardwareError,
+    lambda: hardware.select_passthrough_nvme(ctrls, None),
+)
+
+# Une reponse qui ne correspond a AUCUN controleur NVMe doit etre refusee, et
+# le refus doit nommer ce qui est attendu - sinon l operateur ne peut pas
+# corriger sa reponse.
+try:
+    hardware.select_passthrough_nvme(ctrls, None,
+                                     wanted_address="0000:00:02.0")
+    failures.append("une adresse qui n est pas un NVMe aurait du lever")
+except hardware.HardwareError as exc:
+    check("le refus nomme l adresse demandee", "0000:00:02.0" in str(exc), True)
+    check("le refus nomme les controleurs connus",
+          "0000:03:00.0" in str(exc), True)
+
+# L assertion de securite reste vraie quand la racine EST identifiable : une
+# reponse qui designe le disque de l hote est refusee, elle ne devient pas
+# une autorisation parce que l operateur l a ecrite.
+try:
+    hardware.select_passthrough_nvme(ctrls, {"0000:02:00.0"},
+                                     wanted_address="0000:02:00.0")
+    failures.append("le disque de la racine hote aurait du etre refuse")
+except hardware.HardwareError as exc:
+    check("le refus dit que le disque porte la racine hote",
+          "host root" in str(exc), True)
+
 # The template consumes nvme.bus / nvme.slot / nvme.function, so the resolved
 # record must be decomposed, not just {address, id}.
 resolved = hardware.resolve_passthrough_nvme(LSPCI, {"0000:02:00.0"})
@@ -200,6 +250,22 @@ check_raises(
 # --- pci_address_for_device : le pont entre /dev/... et une adresse PCI --- #
 check("un chemin introuvable rend None",
       hardware.pci_address_for_device("/dev/nexistepas0n1"), None)
+
+# Sur un arbre sysfs factice, pour que la traduction /dev/... -> adresse PCI
+# soit verifiee sans dependre des disques de la machine qui execute le test.
+with tempfile.TemporaryDirectory() as fake_block:
+    os.makedirs(os.path.join(fake_block, "nvme9n1", "device"))
+    os.makedirs(os.path.join(fake_block, "pci", "0000:03:00.0"))
+    os.symlink(os.path.join(fake_block, "pci", "0000:03:00.0"),
+               os.path.join(fake_block, "nvme9n1", "device", "device"))
+    check("un disque connu se traduit en adresse PCI",
+          hardware.pci_address_for_device("/dev/nvme9n1",
+                                          sysfs_root=fake_block),
+          "0000:03:00.0")
+    check("un disque absent de l arbre rend None",
+          hardware.pci_address_for_device("/dev/nvme8n1",
+                                          sysfs_root=fake_block),
+          None)
 
 # --- la selection du NVMe, de facon DETERMINISTE ------------------------- #
 # Sur du texte lspci capture, pas sur le materiel de cette machine : c est

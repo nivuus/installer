@@ -143,35 +143,40 @@ def main() -> int:
     # IOMMU group with the host cannot be handed over, and falling back to a
     # disk image would silently deliver something slower than what was asked.
     #
-    # passthrough_nvme() RAISES HardwareError on every failure path - no NVMe,
-    # ambiguous candidate, disk owned by the host - and never returns empty.
-    # Catching it is what turns "this machine will not do" into a sentence the
-    # operator reads before their disk is touched, instead of a traceback and
-    # a non-zero exit they cannot act on.
+    # THE OPERATOR'S ANSWER DRIVES THE SELECTION - it is not a cross-check on
+    # a choice made without it. Deriving the device from "the NVMe that does
+    # not back the host root" works only on an already-installed host: on the
+    # installer ISO the root is the live image, no PCI disk backs it, and
+    # that selector refuses on every machine. The answer is the one piece of
+    # information that exists on both paths, so it is the input; the
+    # host-root exclusion becomes a safety assertion on the result.
+    #
+    # The passthrough dict is a PCI FUNCTION - {address, id, function, bus,
+    # slot, domain}. There is no `device` key, so the operator's /dev/...
+    # answer must be translated to a PCI address before anything can be done
+    # with it.
     wanted = (answers.get("dedicated_nvme") or "").strip()
-    try:
-        nvme = hardware.passthrough_nvme()
-    except hardware.HardwareError as exc:
-        emit({"event": "refuse",
-              "reason": f"aucun NVMe dedie utilisable en passthrough PCI : {exc}"})
-        return 0
-
-    # The dict is a PCI FUNCTION - {address, id, function, bus, slot, domain}.
-    # There is no `device` key, so the operator's /dev/... answer has to be
-    # translated before it can be compared. Skipping this check would let the
-    # install hand over a disk the operator never chose.
+    wanted_address = None
     if wanted:
-        chosen = hardware.pci_address_for_device(wanted)
-        if chosen is None:
+        wanted_address = hardware.pci_address_for_device(wanted)
+        if wanted_address is None:
             emit({"event": "refuse",
                   "reason": f"impossible de resoudre {wanted} vers une adresse PCI ; "
                             "ce disque ne peut pas etre passe a la VM"})
             return 0
-        if chosen != nvme["address"]:
-            emit({"event": "refuse",
-                  "reason": f"le disque demande ({wanted}, {chosen}) n'est pas "
-                            f"celui qui peut etre detache ({nvme['address']})"})
-            return 0
+
+    # passthrough_nvme() RAISES HardwareError on every failure path - no NVMe,
+    # an answer that is not an NVMe controller, a device that backs the host
+    # root, an ambiguous auto-selection - and never returns empty. Catching it
+    # is what turns "this machine will not do" into a sentence the operator
+    # reads before their disk is touched, instead of a traceback and a
+    # non-zero exit they cannot act on.
+    try:
+        nvme = hardware.passthrough_nvme(wanted_address=wanted_address)
+    except hardware.HardwareError as exc:
+        emit({"event": "refuse",
+              "reason": f"aucun NVMe dedie utilisable en passthrough PCI : {exc}"})
+        return 0
 
     ids.append(nvme["id"])
 
