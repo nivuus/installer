@@ -104,6 +104,29 @@ check("la sentinelle posee est celle que steam-launch.ps1 consulte",
       retro_sync.HOLD_FILE, _litteral(_launch_code, "HoldFile"))
 check("l hote connait le vrai delai d expiration de la sentinelle",
       retro_sync.HOLD_MAX_AGE_S, _nombre(_launch_code, "HoldMaxAgeSeconds"))
+# Le chemin de steam.exe n est pas un detail de confort : si l hote et
+# steam-launch.ps1 divergent, le Test-Path de l arret echoue, « -shutdown »
+# n est jamais envoye, mais la terminaison forcee tue Steam quand meme. L arret
+# propre degenererait en kill dur EN SILENCE, et le shortcuts.vdf que Steam
+# s appretait a ecrire serait perdu — la panne meme que tout ce script existe
+# pour empecher.
+check("steam.exe est celui que steam-launch.ps1 lance",
+      retro_sync.STEAM_EXE, _litteral(_launch_code, "SteamExe"))
+check("la racine Steam est le dossier de ce steam.exe la",
+      retro_sync.STEAM_EXE.rsplit("\\", 1)[0], retro_sync.STEAM_ROOT)
+
+# Le marqueur de session : la commande qu Apollo SUIT pendant toute la session
+# (apps.json.j2). Un renommage la-bas rendrait la sonde aveugle, et le script
+# couperait des parties en cours sans jamais s en apercevoir.
+_apps = (GUEST / "templates" / "apps.json.j2").read_text(encoding="utf-8")
+_suivies = re.findall(r'"cmd":\s*"[^"]*?([\w.-]+\.ps1)', _apps)
+check("apps.json.j2 declare encore une commande suivie par session",
+      bool(_suivies), True)
+check("l hote sonde la commande qu Apollo suit reellement",
+      sorted(set(_suivies)), [retro_sync.SESSION_SCRIPT])
+check("ce script existe bien dans la charge utile",
+      (PROVISION / "assets" / retro_sync.SESSION_SCRIPT).is_file(), True)
+
 check("la racine d emulation est celle de l etape 32",
       retro_sync.EMULATION_ROOT, _litteral(_retro_code, "EmulationRoot"))
 # retro.exe : l etape 32 le compose depuis $PythonRoot, l hote le sonde en
@@ -222,11 +245,15 @@ class FakeGuest:
     """Ce que l hote a le droit de demander a la console, et rien de plus."""
 
     def __init__(self, fichiers=None, codes=None, leve=None,
-                 retro_exe=retro_sync.RETRO_EXE):
+                 retro_exe=retro_sync.RETRO_EXE, session=None,
+                 steam="steam=propre exe=present"):
         self.fichiers = dict(fichiers or {})
         self.codes = dict(codes or {})
         self.leve = leve or {}
         self.retro_exe = retro_exe
+        self.session = session
+        self.sessions_vues = 0
+        self.steam = steam
         self.journal = []
 
     def read_text(self, path):
@@ -246,8 +273,18 @@ class FakeGuest:
         return path in self.fichiers
 
     def ps(self, script):
+        """Les deux seuls scripts qui rendent quelque chose : la sonde de
+        session et l arret de Steam. La reponse de session peut etre une
+        LISTE, pour simuler une session qui commence en cours de route."""
+        if retro_sync.SESSION_SCRIPT in script:
+            self.journal.append(("session", None))
+            reponses = (self.session if isinstance(self.session, list)
+                        else [self.session])
+            i = min(self.sessions_vues, len(reponses) - 1)
+            self.sessions_vues += 1
+            return 0, reponses[i] or "aucune", ""
         self.journal.append(("ps", script))
-        return 0, "", ""
+        return 0, self.steam, ""
 
     def retro(self, args):
         self.journal.append(("retro", args[0]))
@@ -258,6 +295,7 @@ class FakeGuest:
 
 class Cfg:
     guest_label = "la console"
+    force = False
     emulation_root = retro_sync.EMULATION_ROOT
     steam_root = retro_sync.STEAM_ROOT
     steam_root_windows = retro_sync.STEAM_ROOT
@@ -279,6 +317,10 @@ check("le faux invite couvre toute la surface du vrai",
 def temoin(status, run="R1"):
     return retro_sync.format_witness(["# contrat"], run, status,
                                      retro_sync.EMULATION_ROOT, [])
+
+
+class CfgForce(Cfg):
+    force = True
 
 
 def invite(status=None, run="R1", avec_retro=True, **kw):
@@ -451,6 +493,65 @@ check("un temoin qui ne s ecrit pas fait refuser la synchronisation",
       lancer(g)[0], 4)
 check("... et rien n est synchronise", ("retro", "sync") in g.journal, False)
 
+# --- 5 bis. Une partie en cours ------------------------------------------ #
+# C est le seul chemin qui laisse la console PIRE qu avant, et il ne se repare
+# pas tout seul : Steam coupe emporte le jeu lance depuis lui, et rien ne le
+# relance avant la prochaine connexion.
+
+check("sans session, rien ne s oppose a la synchronisation",
+      retro_sync.session_refusal(None, False), None)
+check("une session en cours refuse la synchronisation",
+      retro_sync.session_refusal("PID 42 depuis hier", False) is not None, True)
+check("... et le refus nomme ce qu il protege",
+      "PID 42" in retro_sync.session_refusal("PID 42 depuis hier", False), True)
+check("--force passe outre, puisque c est une commande manuelle",
+      retro_sync.session_refusal("PID 42 depuis hier", True), None)
+
+g = invite("ok", session="PID 42 depuis 2026-08-26")
+_code, _dit, _signale = lancer(g)
+check("une session en cours arrete tout avant le premier telechargement",
+      _code, 7)
+check("... sans rejouer l installation", actions(g, "retro"), [])
+check("... sans toucher au temoin ni a la sentinelle", actions(g, "write"), [])
+check("... et en disant QUOI est en cours", "PID 42" in _signale, True)
+
+# La session peut commencer PENDANT l installation et le scan, qui se comptent
+# en minutes : la seconde sonde est celle qui protege reellement.
+g = invite("ok", session=[None, "PID 43 depuis maintenant"])
+_code, _dit, _signale = lancer(g)
+check("une session qui commence en cours de route est vue a temps", _code, 7)
+check("... Steam n est pas arrete", actions(g, "ps"), [])
+check("... rien n est synchronise", ("retro", "sync") in g.journal, False)
+check("... et la sentinelle posee entre-temps est rendue",
+      retro_sync.HOLD_FILE in g.fichiers, False)
+
+g = invite("ok", session="PID 44")
+_code, _dit, _signale = lancer(g, CfgForce())
+check("--force synchronise malgre la session", _code, 0)
+check("... en avertissant franchement de ce qui est perdu",
+      "force" in _signale and "PID 44" in _signale, True)
+
+# L arret de Steam est juge sur la table des processus RELUE, pas annonce.
+g = invite("ok", steam="steam=vivant exe=present")
+_leve = _essai_erreur(lambda: lancer(g))
+check("un Steam qui survit a la terminaison forcee leve",
+      isinstance(_leve, retro_sync.GuestError), True)
+check("... en disant que rien n a ete ecrit",
+      "shortcuts.vdf" in str(_leve), True)
+check("... et rien n est synchronise", ("retro", "sync") in g.journal, False)
+check("... la sentinelle etant rendue quand meme",
+      retro_sync.HOLD_FILE in g.fichiers, False)
+
+g = invite("ok", steam="steam=force exe=absent")
+_code, _dit, _signale = lancer(g)
+check("un steam.exe introuvable ne passe pas inapercu", _code, 0)
+check("... et l hote dit que seule la force a agi",
+      retro_sync.STEAM_EXE in _signale and "force" in _signale, True)
+
+g = invite("ok", steam="rien du tout")
+check("un invite muet sur le sort de Steam leve plutot que de continuer",
+      isinstance(_essai_erreur(lambda: lancer(g)), retro_sync.GuestError), True)
+
 # --- 6. La sentinelle rajeunie pendant une longue synchronisation -------- #
 
 check("la sentinelle est rajeunie bien avant d expirer",
@@ -535,6 +636,11 @@ _ligne = "powershell -encodedcommand " + base64.b64encode(
     _journal[-1][1].encode("utf-16-le")).decode("ascii")
 check("le plus gros temoin possible tient dans une ligne de commande Windows",
       len(_ligne) < 32767, True)
+# Un plafond seul se satisferait d une marge de trois caracteres : l en-tete du
+# contrat peut grossir cote invite sans que ce fichier-ci change, donc on exige
+# de la place devant.
+check("... avec de la marge pour un contrat qui s allongerait cote invite",
+      32767 - len(_ligne) >= 8000, True)
 
 
 def _reponse(rc, out):
@@ -558,9 +664,19 @@ _rc, _rapport = retro_sync.Guest(run=_reponse(
 check("le code de sortie de retro est celui de l invite, pas celui de WinRM",
       _rc, 1)
 check("... et son rapport accentue arrive intact", _rapport, "émulateur manquant")
-check("une sortie sans marqueur de code leve plutot que de mentir",
-      isinstance(_essai_erreur(retro_sync.Guest(run=_reponse(0, "bruit")).retro,
+check("un code de sortie vide leve une erreur nommee, pas une trace Python",
+      isinstance(_essai_erreur(retro_sync.Guest(run=_reponse(0, "EXIT=\n")).retro,
                                ["install"]), retro_sync.GuestError), True)
+# Les deux pannes ne se confondent pas : une sortie SANS marqueur veut dire
+# que le script PowerShell lui-meme n a pas tourne comme prevu, et le message
+# doit le dire — sinon elle se deguise en « code de sortie illisible » et le
+# lecteur cherche du cote de retro, qui n y est pour rien.
+_sans_marqueur = _essai_erreur(retro_sync.Guest(run=_reponse(0, "bruit")).retro,
+                               ["install"])
+check("une sortie sans marqueur de code leve plutot que de mentir",
+      isinstance(_sans_marqueur, retro_sync.GuestError), True)
+check("... en nommant le transport, pas retro",
+      "WinRM a rendu" in str(_sans_marqueur), True)
 
 # --- 7. La structure : le retrait est dans un finally, pas dans un chemin - #
 # Statique et exact (ast) : un commentaire qui promet « quoi qu il arrive »,
@@ -593,9 +709,18 @@ if _try is not None:
           any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
               and n.func.attr == "retro"
               for c in _corps for n in ast.walk(c)), True)
-    _pose = _appels(_fn, "place_hold")
-    check("la sentinelle est posee avant d entrer dans le bloc",
-          bool(_pose) and _pose[0].lineno < _try.lineno, True)
+    _pose = [c for n in _corps for c in _appels(n, "place_hold")]
+    check("la sentinelle est posee SOUS le finally qui la retire",
+          len(_pose), 1)
+    check("... et avant l arret de Steam",
+          bool(_pose) and _pose[0].lineno
+          < [c for n in _corps for c in _appels(n, "stop_steam")][0].lineno,
+          True)
+    _demarrage = [c for n in _corps for c in ast.walk(n)
+                  if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                  and c.func.attr == "start"]
+    check("le fil qui rajeunit la sentinelle demarre lui aussi sous le finally",
+          bool(_demarrage), True)
 _refresh = _appels(_fn, "refresh_witness")
 _garde = _appels(_fn, "sync_refusal")
 check("le temoin est rafraichi AVANT d etre relu par la garde",
@@ -603,6 +728,11 @@ check("le temoin est rafraichi AVANT d etre relu par la garde",
       True)
 check("la garde precede la pose de la sentinelle",
       bool(_garde) and bool(_pose) and _garde[0].lineno < _pose[0].lineno, True)
+_sessions = _appels(_fn, "streaming_session")
+check("la session est sondee deux fois : tot, puis juste avant d arreter Steam",
+      len(_sessions), 2)
+check("... la seconde sonde etant sous le finally qui rend la sentinelle",
+      bool(_try) and any(c.lineno > _try.lineno for c in _sessions), True)
 
 if failures:
     print(f"FAIL ({len(failures)})")
