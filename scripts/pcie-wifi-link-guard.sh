@@ -66,8 +66,8 @@ pcie_chain() {
 # unit against udev — brittle, and ordering games around multi-user.target once
 # cost this host a boot without Docker — wait for the chain to appear.
 wait_for_chain() {
-    local i
-    for i in $(seq 1 "${NIVUUS_CHAIN_WAIT:-30}"); do
+    local _attempt
+    for _attempt in $(seq 1 "${NIVUUS_CHAIN_WAIT:-30}"); do
         [ -n "$(pcie_chain)" ] && return 0
         sleep 1
     done
