@@ -15,7 +15,7 @@
 - **Contrat versionné** : `apiVersion: nivuus.dev/v1`. Un manifeste qui déclare autre chose est refusé, jamais toléré.
 - **Deux tiers** : `userspace` ne peut déclarer ni `kernel-cmdline`, ni `modules`, ni `hugepages-mib` — le moteur **rejette** le manifeste, il ne supprime pas silencieusement la clé. `platform` le peut.
 - **`resolve` est en lecture seule.** Il tourne avant la moindre écriture disque, et c'est ce qui permet de laisser `bootloader` à sa place actuelle dans `run.py`.
-- **Fichiers ≤ 200 lignes** (`.github/copilot-instructions.md`). Chaque module a une responsabilité.
+- **Un module, une responsabilité.** `CLAUDE.md` cite une règle « ≤ 200 lignes » venant de `.github/copilot-instructions.md` — **ce fichier n'existe pas dans ce dépôt**, et 18 fichiers `.py` suivis la dépassent déjà (`retro_sync.py` 789, `hardware.py` 637, `test_windows_guest_provision.py` 975). Elle n'est donc pas contraignante ici. Découper par nombre de lignes plutôt que par responsabilité est précisément ce que la règle voulait empêcher.
 - **Commentaires en anglais**, comme tout le dépôt. Les docstrings expliquent *pourquoi*, pas *quoi*.
 - **Convention de test du dépôt** : scripts autonomes, `python3 scripts/tests/test_x.py`, liste `failures` + `check(label, got, want)`, `sys.exit(1)` sur échec. **Il n'y a ni pytest.ini, ni conftest.py** — ne pas en introduire.
 - **Aucune modification du comportement de `kvm-vfio`** dans ce plan. `install.sh`, `features.py::_kvm_vfio_thermal` et `common/retro.py` ne sont pas touchés.
@@ -3795,6 +3795,14 @@ Dans `installer/Makefile`, ajouter à `.PHONY` la cible `test-packages`, puis :
 
 ```makefile
 # Run the package-engine test suite (no root, no chroot, no ISO).
+#
+# PYTHON is overridable because three of these suites import pydantic, which is
+# NOT in the Debian base: `make test-packages PYTHON=/path/to/venv/bin/python3`.
+# The CI runs no Python tests at all (ci.yml sets test-paths: ""), so this target
+# is the only aggregator there is - and an aggregator that fails for a missing
+# dependency reads as "the engine is broken", which is the wrong thing to learn.
+PYTHON ?= python3
+
 test-packages:
 	@for t in test_packages_manifest test_packages_capabilities \
 	          test_packages_discovery test_packages_conflicts \
@@ -3802,7 +3810,7 @@ test-packages:
 	          test_install_engine_bootloader test_install_engine_packages \
 	          test_webapp_models; do \
 	    echo "--- $$t"; \
-	    python3 $(dir $(INSTALLER_DIR))scripts/tests/$$t.py || exit 1; \
+	    $(PYTHON) $(dir $(INSTALLER_DIR))scripts/tests/$$t.py || exit 1; \
 	done
 ```
 
@@ -3812,7 +3820,7 @@ test-packages:
 cd installer && make test-packages && cd ..
 ```
 
-Attendu : neuf `OK - …`, aucun échec. `test_webapp_models` en fait partie : la tâche 10 l'étend pour couvrir `InstallConfig.packages`, et comme la CI ne lance aucun test Python, cette cible est le seul agrégateur.
+Attendu : neuf `OK - …`, aucun échec. **Trois de ces suites importent `pydantic`**, absent de la base Debian : `make test-packages PYTHON=/chemin/vers/venv/bin/python3` sur une machine qui ne l'a pas. `test_webapp_models` en fait partie : la tâche 10 l'étend pour couvrir `InstallConfig.packages`, et comme la CI ne lance aucun test Python, cette cible est le seul agrégateur.
 
 - [ ] **Step 6: Consigner dans `CLAUDE.md`**
 
