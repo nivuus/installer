@@ -695,6 +695,18 @@ for _asset in ("retro-status.ps1", "retro-7zr.ps1"):
     check(f"32-retro.ps1 dot-source assets\\{_asset} (dans le code)",
           f"assets\\{_asset}')" in _retro_code, True)
 
+# Le nom du dossier de pilotes retrogaming : nomme une fois cote Python
+# (payload.RETRO_DIRNAME, deja epingle a fetch_payload.RETRO_DIRNAME par
+# test_windows_guest_fetch_payload.py), mais recopie ici en litteral
+# PowerShell plutot qu importe - Windows ne lit pas payload.py. Un renommage
+# d un seul cote n est detecte par rien : sur une console ou la case EST
+# cochee, l etape leve alors une erreur bruyante qui accuse la charge utile
+# d avoir ete construite sans --retro (voir le message "aucun installateur
+# Python dans $PayloadRetro" plus bas), alors que le vrai probleme est ce
+# desaccord de nom entre les deux cotes.
+check("32-retro.ps1 cherche les pilotes retrogaming au nom que Python leur donne",
+      f"'drivers\\{payload.RETRO_DIRNAME}'" in _retro_code, True)
+
 # L etape reste dans la liste MEME quand l option n est pas cochee : une etape
 # absente ne laisse aucune trace. La position se lit sur le code de
 # run-all.ps1, pas sur son texte : le commentaire qui justifie l insertion

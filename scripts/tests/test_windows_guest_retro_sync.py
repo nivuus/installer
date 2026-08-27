@@ -76,6 +76,8 @@ _launch_code = code_only(
     (PROVISION / "assets" / "steam-launch.ps1").read_text(encoding="utf-8"))
 _retro_ps1 = (PROVISION / "32-retro.ps1").read_text(encoding="utf-8")
 _retro_code = code_only(_retro_ps1)
+_runall_code = code_only(
+    (PROVISION / "run-all.ps1").read_text(encoding="utf-8"))
 
 
 def _litteral(code, variable):
@@ -95,6 +97,20 @@ check("le temoin lu est celui que retro-status.ps1 ecrit",
       retro_sync.STATUS_FILE, _litteral(_status_code, "RetroStatusFile"))
 check("l identifiant de passage vient du meme fichier des deux cotes",
       retro_sync.RUN_FILE, _litteral(_status_code, "RetroRunFile"))
+# Le controle ci-dessus epingle le fichier que retro-status.ps1 et retro_sync
+# LISENT l un contre l autre - mais rien jusqu ici ne relie ca a ce que
+# run-all.ps1 ECRIT reellement. Une ligne supprimee la-bas (celle qui pose
+# provision.started a chaque passage) ne fait echouer aucun des seize fichiers
+# de test de ce depot : les deux lecteurs replient alors en silence sur le
+# meme repli (RUN_UNKNOWN / hors-run-all), la comparaison de passage passe
+# TOUJOURS, et la protection contre un temoin perime devient un no-op muet -
+# pire que l absence de temoin.
+check("run-all.ps1 pose bien le temoin de passage a l endroit que les deux "
+      "lecteurs attendent",
+      _litteral(_runall_code, "StateDir") + "\\provision.started",
+      retro_sync.RUN_FILE)
+check("... et le pose depuis le code, pas seulement dans un commentaire",
+      "Join-Path $StateDir 'provision.started'" in _runall_code, True)
 # Le repli quand run-all.ps1 n a rien laisse : si les deux cotes le nomment
 # differemment, la comparaison de passage echoue la ou elle devrait passer, et
 # l hote refuse de synchroniser une installation saine.

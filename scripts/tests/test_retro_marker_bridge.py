@@ -110,6 +110,54 @@ if _call is not None:
     check("main() passes args.retro (not a hardcoded literal) to build_retro_psd1",
           _is_args_retro, True)
 
+# --- The write itself must be UNCONDITIONAL ------------------------------ #
+# Everything above proves the two sides agree on WHERE and on WHAT value
+# main() feeds in - none of it proves main() always writes the file. Putting
+# that write under a condition ("if retro_enabled:", say) would leave every
+# check above green: build_retro_psd1 is still called with args.retro, the
+# round trip above still passes because it never reaches main() at all. An
+# absent retro.psd1 must stay indistinguishable from "a payload built before
+# this option existed" ONLY, never reachable by unchecking the box - that
+# distinction is the entire point of always rendering an explicit
+# Enabled = $false. payload.verify_staged() is not the guard here either: it
+# runs later, for a different reason (catching a build that forgot the file
+# entirely), not specifically a write skipped because retro was off.
+class _RetroWriteFinder(ast.NodeVisitor):
+    """Walks main()'s body for (config / "retro.psd1").write_text(...) and
+    tracks whether any ast.If wraps it - by the real syntax tree, so neither
+    a comment claiming the write is unconditional nor an unrelated variable
+    that happens to be named `config` can satisfy this."""
+
+    def __init__(self):
+        self.if_depth = 0
+        self.found = False
+        self.found_under_if = False
+
+    def visit_If(self, node):
+        self.if_depth += 1
+        self.generic_visit(node)
+        self.if_depth -= 1
+
+    def visit_Call(self, node):
+        func = node.func
+        if (isinstance(func, ast.Attribute) and func.attr == "write_text"
+                and isinstance(func.value, ast.BinOp)
+                and isinstance(func.value.op, ast.Div)
+                and isinstance(func.value.right, ast.Constant)
+                and func.value.right.value == "retro.psd1"):
+            self.found = True
+            if self.if_depth > 0:
+                self.found_under_if = True
+        self.generic_visit(node)
+
+
+if _main_fn is not None:
+    _finder = _RetroWriteFinder()
+    _finder.visit(_main_fn)
+    check("main() writes config/retro.psd1 at all", _finder.found, True)
+    check("... and does so UNCONDITIONALLY, retro on or off",
+          _finder.found_under_if, False)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
