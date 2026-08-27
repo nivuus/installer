@@ -24,6 +24,10 @@ jobs:
       shellcheck-paths: "."
   codeql:
     uses: nivuus/.github/.github/workflows/codeql.yml@main
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
     with:
       # Python only: CodeQL supports neither Bash nor Zsh, so the shell
       # scripts here are covered by shellcheck instead.
