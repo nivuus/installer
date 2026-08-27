@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Tests for the PCI/NVMe detection helpers used by the Windows guest domain.
+"""Tests for the PCI/NVMe/CPU-isolation helpers used by the console package.
 
 The parsers are pure: they take captured `lspci` text. `_whole_disk_name` is
 exercised against a fake sysfs tree built in a temp dir. So these tests run
 anywhere and do not depend on the machine they execute on.
 
-Run: python3 scripts/tests/test_windows_guest_hardware.py
+Run: python3 scripts/tests/test_console_hardware.py
 """
 import os
 import pathlib
@@ -13,9 +13,9 @@ import sys
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "installer"))
+sys.path.insert(0, str(REPO / "console"))
 
-from common import hardware  # noqa: E402
+import hardware  # noqa: E402
 
 failures = []
 
@@ -142,6 +142,50 @@ check("resolved bus", resolved["bus"], "0x03")
 check("resolved slot", resolved["slot"], "0x00")
 check("resolved function", resolved["function"], "0x0")
 check("resolved id", resolved["id"], "144d:a808")
+
+# --- isolation_plan: la derivation que le moteur ne fait plus ------------- #
+check("hybrid: les P-cores sont isoles",
+      hardware.isolation_plan({"hybrid": True, "performance_cpus": [0, 1, 2, 3],
+                               "total_cpus": 8}),
+      {"isolcpus": "0-3", "nohz_full": "0-3"})
+check("uniforme: tout sauf cpu0",
+      hardware.isolation_plan({"hybrid": False, "performance_cpus": [],
+                               "total_cpus": 4}),
+      {"isolcpus": "1-3", "nohz_full": "1-3"})
+check("snapshot vide ne leve pas",
+      hardware.isolation_plan({}), {"isolcpus": "", "nohz_full": ""})
+check("cpu_ranges compresse", hardware.cpu_ranges([0, 1, 2, 3, 8]), "0-3,8")
+check("cpu_ranges vide", hardware.cpu_ranges([]), "")
+
+# --- pci_address_for_device : le pont entre /dev/... et une adresse PCI --- #
+check("un chemin introuvable rend None",
+      hardware.pci_address_for_device("/dev/nexistepas0n1"), None)
+
+# --- la selection du NVMe, de facon DETERMINISTE ------------------------- #
+# Sur du texte lspci capture, pas sur le materiel de cette machine : c est
+# ce qui rend ce test vrai partout. LSPCI est deja defini plus haut dans ce
+# fichier (repris de test_windows_guest_hardware.py).
+try:
+    hardware.select_passthrough_nvme(hardware.parse_nvme_controllers(LSPCI),
+                                     {"0000:02:00.0"})
+    picked = True
+except hardware.HardwareError:
+    picked = False
+check("un NVMe non possede par l hote est selectionnable", picked, True)
+
+try:
+    # Les deux controleurs appartiennent a l hote : plus aucun candidat.
+    hardware.select_passthrough_nvme(hardware.parse_nvme_controllers(LSPCI),
+                                     {"0000:02:00.0", "0000:03:00.0"})
+    failures.append("aucun candidat libre aurait du lever HardwareError")
+except hardware.HardwareError as exc:
+    check("le refus nomme la raison", bool(str(exc).strip()), True)
+
+try:
+    hardware.select_passthrough_nvme([], set())
+    failures.append("aucun controleur NVMe aurait du lever HardwareError")
+except hardware.HardwareError:
+    pass
 
 if failures:
     print(f"FAIL ({len(failures)})")
