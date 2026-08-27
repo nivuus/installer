@@ -1517,9 +1517,16 @@ Sur ses sept blocs, cinq sont de la mise en place VM et vivent désormais dans l
 
 **Files:**
 - Delete: `install.sh`
-- Modify: `installer/install-engine/steps/features.py` (`_kvm_vfio_thermal` → `_thermal`, suppression de `_retro`)
+- Modify: `installer/install-engine/steps/features.py` (`_kvm_vfio_thermal` → `_thermal`, suppression de `_retro` et de l'import `from common.retro import retro_state_path`)
 - Modify: `scripts/tests/test_install_engine_features.py`
+- Modify: `scripts/tests/test_retro_marker_bridge.py` — **le pont change de rive, voir ci-dessous**
 - Modify: `installer/install-engine/steps/validate.py` si elle référence `install.sh`
+
+⚠️ **Le pont retro casse à cette tâche si on n'y touche pas.** `test_retro_marker_bridge.py` teste aujourd'hui que `features.retro_state_path` **est** l'objet exporté par `common/retro.py` — or cette tâche retire cet import de `features.py`. Le test échouerait à l'import.
+
+Il ne peut pas simplement être repointé vers le package : **`console/` ne peut rien importer de `installer/`** (contrainte d'autonomie), donc `console/hooks/install.py` porte le chemin en littéral, tandis que `common/retro.py` le porte en constante. Ils coïncident aujourd'hui par la seule vigilance de qui les a tapés — c'est exactement la divergence que ce test existait pour empêcher.
+
+Le garde-fou doit donc changer de nature : au lieu de comparer deux objets Python, **exécuter le hook install du package sur une cible temporaire et vérifier que le fichier atterrit précisément à `common.retro.retro_state_path(cible)`**, le chemin que `windows-guest/build.py` ira lire. C'est un test plus fort que l'ancien : il vérifie l'artefact, pas l'import — et il resterait vrai même si les deux côtés cessaient de partager le moindre symbole, ce qui est justement ce vers quoi la phase 2b les emmène.
 
 **Interfaces:**
 - Consumes: rien
