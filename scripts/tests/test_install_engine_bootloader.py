@@ -55,6 +55,37 @@ except ValueError as exc:
 
 check("the file always ends with a newline", plain.endswith("\n"), True)
 
+# /etc/default/grub is sourced as shell by grub-mkconfig: a parameter from a
+# third-party package is shell text evaluated as root at install time. A
+# denylist (just '"') cannot be exhaustive against that - only an allowlist
+# can. Each of these is shell-meaningful and must be refused.
+for bad, needle in [
+    ("saut\nligne", "saut"),
+    ("inject$(id)", "inject"),
+    ("inject`id`", "inject"),
+    ("inject;id", "inject"),
+    ("a b", "a b"),
+]:
+    try:
+        grub_defaults((bad,))
+        failures.append(f"shell-unsafe parameter {bad!r} was accepted")
+    except ValueError as exc:
+        check(f"the error names {bad!r}", needle in str(exc), True)
+
+# A non-string element must fail cleanly (ValueError), not crash on .strip().
+try:
+    grub_defaults((42,))
+    failures.append("a non-string parameter (int) was accepted")
+except ValueError as exc:
+    check("the error names the non-string parameter", "42" in str(exc), True)
+
+# Positive case: every parameter this project actually emits still passes.
+check("every real-world parameter this project emits still passes",
+      'GRUB_CMDLINE_LINUX_DEFAULT="quiet intel_iommu=on iommu=pt nohz_full=0-15 '
+      'vfio-pci.ids=10de:2786,10de:22bc"'
+      in grub_defaults(("intel_iommu=on", "iommu=pt", "nohz_full=0-15",
+                        "vfio-pci.ids=10de:2786,10de:22bc")), True)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

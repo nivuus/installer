@@ -93,6 +93,38 @@ with tempfile.TemporaryDirectory() as tmp:
     check_raises("choix without choices refused",
                  lambda: load_questions(str(nochoice)), "choices")
 
+    # A default is an answer the operator never gets to correct - if it does
+    # not satisfy the question's own constraints, an unanswered question
+    # would hand a bad value straight to a hook. Caught at load time, once.
+    baddefault_choix = pathlib.Path(tmp) / "bc.yaml"
+    baddefault_choix.write_text(
+        "- key: edition\n  type: choix\n  label: X\n  choices: [a, b]\n"
+        "  default: c\n")
+    check_raises("a choix default outside its choices is refused at load time",
+                 lambda: load_questions(str(baddefault_choix)), "edition")
+
+    baddefault_bool = pathlib.Path(tmp) / "bb.yaml"
+    baddefault_bool.write_text(
+        "- key: retro\n  type: bool\n  label: X\n  default: \"yes\"\n")
+    check_raises("a bool default that is a string is refused at load time",
+                 lambda: load_questions(str(baddefault_bool)), "retro")
+
+    # bool("false") is True: a package author writing `required: "false"`
+    # must not silently get the opposite of what they typed.
+    badrequired = pathlib.Path(tmp) / "br.yaml"
+    badrequired.write_text(
+        "- key: req_flag\n  type: bool\n  label: X\n  required: \"false\"\n")
+    check_raises("a non-bool 'required' is refused rather than coerced",
+                 lambda: load_questions(str(badrequired)), "req_flag")
+
+    # `key: on` (unquoted) parses under YAML 1.1 as the bool True, not the
+    # string "on" - a dict literal can't produce this, so it goes through a
+    # real YAML file, the same trap manifest.py already refuses on dict keys.
+    barekey = pathlib.Path(tmp) / "bk.yaml"
+    barekey.write_text("- key: on\n  type: bool\n  label: X\n")
+    check_raises("a bare on/off/yes/no key is refused, not coerced via str()",
+                 lambda: load_questions(str(barekey)), "quote it")
+
 # --- validate_answers ------------------------------------------------------ #
 answers = validate_answers(questions, {
     "dedicated_disk": "/dev/nvme1n1",
@@ -121,6 +153,10 @@ check_raises("an unknown key is refused",
                  "dedicated_disk": "/dev/nvme1n1", "admin_password": "x",
                  "sournois": 1}),
              "sournois")
+check_raises("an empty-string answer to a required disque is refused",
+             lambda: validate_answers(questions, {
+                 "dedicated_disk": "", "admin_password": "x"}),
+             "dedicated_disk")
 
 check("a package with no questions accepts nothing",
       validate_answers([], {}), {})

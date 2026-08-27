@@ -1557,6 +1557,38 @@ with tempfile.TemporaryDirectory() as tmp:
     check_raises("choix without choices refused",
                  lambda: load_questions(str(nochoice)), "choices")
 
+    # A default is an answer the operator never gets to correct - if it does
+    # not satisfy the question's own constraints, an unanswered question
+    # would hand a bad value straight to a hook. Caught at load time, once.
+    baddefault_choix = pathlib.Path(tmp) / "bc.yaml"
+    baddefault_choix.write_text(
+        "- key: edition\n  type: choix\n  label: X\n  choices: [a, b]\n"
+        "  default: c\n")
+    check_raises("a choix default outside its choices is refused at load time",
+                 lambda: load_questions(str(baddefault_choix)), "edition")
+
+    baddefault_bool = pathlib.Path(tmp) / "bb.yaml"
+    baddefault_bool.write_text(
+        "- key: retro\n  type: bool\n  label: X\n  default: \"yes\"\n")
+    check_raises("a bool default that is a string is refused at load time",
+                 lambda: load_questions(str(baddefault_bool)), "retro")
+
+    # bool("false") is True: a package author writing `required: "false"`
+    # must not silently get the opposite of what they typed.
+    badrequired = pathlib.Path(tmp) / "br.yaml"
+    badrequired.write_text(
+        "- key: req_flag\n  type: bool\n  label: X\n  required: \"false\"\n")
+    check_raises("a non-bool 'required' is refused rather than coerced",
+                 lambda: load_questions(str(badrequired)), "req_flag")
+
+    # `key: on` (unquoted) parses under YAML 1.1 as the bool True, not the
+    # string "on" - a dict literal can't produce this, so it goes through a
+    # real YAML file, the same trap manifest.py already refuses on dict keys.
+    barekey = pathlib.Path(tmp) / "bk.yaml"
+    barekey.write_text("- key: on\n  type: bool\n  label: X\n")
+    check_raises("a bare on/off/yes/no key is refused, not coerced via str()",
+                 lambda: load_questions(str(barekey)), "quote it")
+
 # --- validate_answers ------------------------------------------------------ #
 answers = validate_answers(questions, {
     "dedicated_disk": "/dev/nvme1n1",
@@ -1585,6 +1617,10 @@ check_raises("an unknown key is refused",
                  "dedicated_disk": "/dev/nvme1n1", "admin_password": "x",
                  "sournois": 1}),
              "sournois")
+check_raises("an empty-string answer to a required disque is refused",
+             lambda: validate_answers(questions, {
+                 "dedicated_disk": "", "admin_password": "x"}),
+             "dedicated_disk")
 
 check("a package with no questions accepts nothing",
       validate_answers([], {}), {})
@@ -1664,6 +1700,28 @@ class Question:
         return payload
 
 
+def _check_value(qtype: str, choices: tuple[str, ...], key: str, value,
+                  context: str) -> None:
+    """Type/constraint check shared by a question's own default (checked once,
+    at load time, in load_questions) and an answer (checked in
+    validate_answers). Applying the same rule in both places is what makes the
+    module's claim true - "answers are validated once, here, before any of
+    them reach a hook" - a bad default that skipped this check would reach a
+    hook unchecked the moment the question went unanswered.
+    """
+    if qtype == "bool" and not isinstance(value, bool):
+        raise WizardError(
+            f"question {key!r} {context} expects true/false, got {value!r}")
+    if qtype == "choix" and value not in choices:
+        raise WizardError(
+            f"question {key!r} {context} expects one of {choices}, "
+            f"got {value!r}")
+    if qtype in ("texte", "secret") + HARDWARE_TYPES \
+            and not isinstance(value, str):
+        raise WizardError(
+            f"question {key!r} {context} expects a string, got {value!r}")
+
+
 def load_questions(path: str) -> list[Question]:
     """Read and validate a package's question file."""
     try:
@@ -1682,7 +1740,19 @@ def load_questions(path: str) -> list[Question]:
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
             raise WizardError(f"{path}: question #{index + 1} must be a mapping")
-        key = str(item.get("key") or "").strip()
+
+        # PyYAML implements YAML 1.1: a bare on/off/yes/no VALUE parses as a
+        # bool, not a string - `key: on` yields True, not "on". manifest.py
+        # hit the same trap on dict keys and refuses it; do the same here
+        # instead of silently coercing via str(), which used to turn a
+        # mistyped `key: on` into the literal key "True".
+        raw_key = item.get("key")
+        if raw_key is not None and not isinstance(raw_key, str):
+            raise WizardError(
+                f"{path}: question #{index + 1} key {raw_key!r} must be a "
+                "string - quote it if it looks like on/off/yes/no, which "
+                "YAML parses as a boolean")
+        key = (raw_key or "").strip()
         if not key:
             raise WizardError(f"{path}: question #{index + 1} has no 'key'")
         if key in seen:
@@ -1704,9 +1774,19 @@ def load_questions(path: str) -> list[Question]:
             raise WizardError(
                 f"{path}: question {key!r} is a 'choix' but declares no 'choices'")
 
+        required_raw = item.get("required", False)
+        if not isinstance(required_raw, bool):
+            raise WizardError(
+                f"{path}: question {key!r} 'required' must be true/false, "
+                f"got {required_raw!r}")
+
+        default = item.get("default")
+        if default is not None:
+            _check_value(qtype, choices, key, default, "default")
+
         questions.append(Question(
-            key=key, type=qtype, label=label, default=item.get("default"),
-            choices=choices, required=bool(item.get("required", False)),
+            key=key, type=qtype, label=label, default=default,
+            choices=choices, required=required_raw,
         ))
     return questions
 
@@ -1734,17 +1814,14 @@ def validate_answers(questions, answers: dict) -> dict:
             continue
 
         value = answers[question.key]
-        if question.type == "bool" and not isinstance(value, bool):
+        _check_value(question.type, question.choices, question.key, value,
+                     "answer")
+        # An empty device path / PCI slot reaching a hook is not a usable
+        # answer for a required disque/gpu question.
+        if question.type in HARDWARE_TYPES and question.required and value == "":
             raise WizardError(
-                f"question {question.key!r} expects true/false, got {value!r}")
-        if question.type == "choix" and value not in question.choices:
-            raise WizardError(
-                f"question {question.key!r} expects one of {question.choices}, "
-                f"got {value!r}")
-        if question.type in ("texte", "secret") + HARDWARE_TYPES \
-                and not isinstance(value, str):
-            raise WizardError(
-                f"question {question.key!r} expects a string, got {value!r}")
+                f"question {question.key!r} is required and cannot be an "
+                "empty value")
         validated[question.key] = value
     return validated
 ```
@@ -2317,6 +2394,37 @@ except ValueError as exc:
 
 check("the file always ends with a newline", plain.endswith("\n"), True)
 
+# /etc/default/grub is sourced as shell by grub-mkconfig: a parameter from a
+# third-party package is shell text evaluated as root at install time. A
+# denylist (just '"') cannot be exhaustive against that - only an allowlist
+# can. Each of these is shell-meaningful and must be refused.
+for bad, needle in [
+    ("saut\nligne", "saut"),
+    ("inject$(id)", "inject"),
+    ("inject`id`", "inject"),
+    ("inject;id", "inject"),
+    ("a b", "a b"),
+]:
+    try:
+        grub_defaults((bad,))
+        failures.append(f"shell-unsafe parameter {bad!r} was accepted")
+    except ValueError as exc:
+        check(f"the error names {bad!r}", needle in str(exc), True)
+
+# A non-string element must fail cleanly (ValueError), not crash on .strip().
+try:
+    grub_defaults((42,))
+    failures.append("a non-string parameter (int) was accepted")
+except ValueError as exc:
+    check("the error names the non-string parameter", "42" in str(exc), True)
+
+# Positive case: every parameter this project actually emits still passes.
+check("every real-world parameter this project emits still passes",
+      'GRUB_CMDLINE_LINUX_DEFAULT="quiet intel_iommu=on iommu=pt nohz_full=0-15 '
+      'vfio-pci.ids=10de:2786,10de:22bc"'
+      in grub_defaults(("intel_iommu=on", "iommu=pt", "nohz_full=0-15",
+                        "vfio-pci.ids=10de:2786,10de:22bc")), True)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
@@ -2351,23 +2459,37 @@ guard against re-running; the guard is unnecessary when nobody edits.
 Ajouter, avant `install_bootloader` :
 
 ```python
+# /etc/default/grub is SOURCED AS SHELL by grub-mkconfig, so a parameter from a
+# third-party package is shell text evaluated as root at install time. A denylist
+# cannot be exhaustive against that; only an allowlist can. This set covers every
+# kernel parameter this project emits - intel_iommu=on, iommu=pt, nohz_full=0-15,
+# vfio-pci.ids=10de:2786,10de:22bc, root=/dev/nvme0n1p2 - and nothing that carries
+# shell meaning (quotes, whitespace, newlines, $, backticks, ; & | ...).
+KERNEL_PARAM_RE = re.compile(r"^[A-Za-z0-9_.,:=/@+-]+$")
+
+
 def grub_defaults(extra_cmdline: tuple[str, ...] = ()) -> str:
     """Render /etc/default/grub with the packages' kernel parameters appended.
 
     Order matters and is stable: `quiet` first, then package parameters in the
-    order the packages were resolved, de-duplicated. A parameter containing a
-    double quote would break the file, so it is refused rather than escaped -
-    no legitimate kernel parameter needs one.
+    order the packages were resolved, de-duplicated. Each parameter is checked
+    against KERNEL_PARAM_RE and refused (ValueError, naming the parameter and
+    the allowed character set) rather than escaped - see the note above.
     """
     params = []
     for param in extra_cmdline:
-        param = (param or "").strip()
+        if not isinstance(param, str):
+            raise ValueError(
+                f"kernel parameter {param!r} must be a string")
+        param = param.strip()
         if not param or param in params:
             continue
-        if '"' in param:
+        if not KERNEL_PARAM_RE.match(param):
             raise ValueError(
-                f"kernel parameter {param!r} contains a double quote, which "
-                "cannot be written to /etc/default/grub")
+                f"kernel parameter {param!r} contains characters outside "
+                f"{KERNEL_PARAM_RE.pattern} - /etc/default/grub is sourced as "
+                "shell by grub-mkconfig, so only letters, digits and "
+                "_.,:=/@+- are allowed")
         params.append(param)
 
     cmdline = " ".join(["quiet", *params])
@@ -2378,6 +2500,8 @@ def grub_defaults(extra_cmdline: tuple[str, ...] = ()) -> str:
         'GRUB_CMDLINE_LINUX=""\n'
     )
 ```
+
+Ajouter aussi `import re` dans les imports du module.
 
 Changer la signature et le corps :
 
