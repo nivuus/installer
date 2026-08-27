@@ -173,10 +173,10 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 ```bash
 # Installer winrm-cli
 cd /home/mallanic/Projects/Nivuus
-sudo ./scripts/install-winrm-cli.sh
+sudo ./console/host/install-winrm-cli.sh
 
 # Installer wrapper winvm
-sudo install -m 755 scripts/winvm /usr/local/bin/winvm
+sudo install -m 755 console/host/winvm /usr/local/bin/winvm
 
 # Configurer credentials
 mkdir -p ~/.config/nivuus

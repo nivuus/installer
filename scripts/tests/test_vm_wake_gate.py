@@ -9,7 +9,7 @@ import importlib.util
 import pathlib
 import sys
 
-GATE = pathlib.Path(__file__).resolve().parents[1] / "vm-wake-gate.py"
+GATE = pathlib.Path(__file__).resolve().parents[2] / "console" / "host" / "vm-wake-gate.py"
 
 spec = importlib.util.spec_from_file_location("vm_wake_gate", GATE)
 gate = importlib.util.module_from_spec(spec)

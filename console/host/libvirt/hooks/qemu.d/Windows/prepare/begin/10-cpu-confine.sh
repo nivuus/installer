@@ -1,6 +1,6 @@
 #!/bin/bash
 # Confine the host cgroups to the CPUs the VM does not pin, for as long as it runs.
-# Real logic lives in the repo (scripts/vm-cpu-partition.sh); never fail the VM start.
+# Real logic lives in the repo (console/host/vm-cpu-partition.sh); never fail the VM start.
 /etc/libvirt/hooks/vm-cpu-partition.sh confine "$1" >> /var/log/libvirt-cpu-hook.log 2>&1
 
 # Switch the host CPU policy to gaming (EPP performance + C6 latency ceiling).
