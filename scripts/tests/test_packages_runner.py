@@ -121,6 +121,109 @@ with tempfile.TemporaryDirectory() as tmp:
         check("the error names the package", "boom" in str(exc), True)
         check("the error carries the exit code", "3" in str(exc), True)
 
+
+def _resolve_only_pkg(tmp, name, resolve_body):
+    """A minimal userspace package with only a resolve hook, for protocol tests."""
+    pkg = pathlib.Path(tmp) / name
+    (pkg / "hooks").mkdir(parents=True)
+    (pkg / "nivuus-package.yaml").write_text(
+        f"apiVersion: {manifest_mod.API_VERSION}\nname: {name}\nversion: 1.0.0\n"
+        f'label: "{name}"\ntier: userspace\nhooks:\n  resolve: hooks/resolve.py\n')
+    (pkg / "hooks" / "resolve.py").write_text(resolve_body)
+    return load_manifest(str(pkg / "nivuus-package.yaml"))
+
+
+RESOLVE_BOOTSTRAP = "import json, sys\njson.load(sys.stdin)\n"
+
+# --- a 'platform' event that lies about its own field types must be refused,
+# not coerced: a bare string iterates into single-character fragments, and
+# those fragments would otherwise reach the kernel command line. ------------ #
+with tempfile.TemporaryDirectory() as tmp:
+    bad_cmdline = _resolve_only_pkg(
+        tmp, "bad-cmdline",
+        RESOLVE_BOOTSTRAP +
+        "print(json.dumps({'event': 'platform', "
+        "'kernel-cmdline': 'intel_iommu=on', 'modules': [], "
+        "'hugepages-mib': 0}))\n")
+    try:
+        run_resolve(bad_cmdline, HW, {})
+        failures.append("a string kernel-cmdline did not raise HookError")
+    except HookError as exc:
+        check("the error names the offending field 'kernel-cmdline'",
+              "kernel-cmdline" in str(exc), True)
+        check("the error names the package", "bad-cmdline" in str(exc), True)
+
+with tempfile.TemporaryDirectory() as tmp:
+    bad_modules = _resolve_only_pkg(
+        tmp, "bad-modules",
+        RESOLVE_BOOTSTRAP +
+        "print(json.dumps({'event': 'platform', "
+        "'kernel-cmdline': [], 'modules': 'vfio_pci', "
+        "'hugepages-mib': 0}))\n")
+    try:
+        run_resolve(bad_modules, HW, {})
+        failures.append("a string modules did not raise HookError")
+    except HookError as exc:
+        check("the error names the offending field 'modules'",
+              "modules" in str(exc), True)
+
+# --- hugepages-mib from a hook must obey the same rule manifest.py already
+# applies to the static declaration. ----------------------------------------- #
+with tempfile.TemporaryDirectory() as tmp:
+    bad_neg = _resolve_only_pkg(
+        tmp, "bad-neg-hugepages",
+        RESOLVE_BOOTSTRAP +
+        "print(json.dumps({'event': 'platform', "
+        "'kernel-cmdline': [], 'modules': [], "
+        "'hugepages-mib': -5}))\n")
+    try:
+        run_resolve(bad_neg, HW, {})
+        failures.append("a negative hugepages-mib did not raise HookError")
+    except HookError as exc:
+        check("the error names hugepages-mib for the negative case",
+              "hugepages-mib" in str(exc), True)
+
+with tempfile.TemporaryDirectory() as tmp:
+    bad_bool = _resolve_only_pkg(
+        tmp, "bad-bool-hugepages",
+        RESOLVE_BOOTSTRAP +
+        "print(json.dumps({'event': 'platform', "
+        "'kernel-cmdline': [], 'modules': [], "
+        "'hugepages-mib': True}))\n")
+    try:
+        run_resolve(bad_bool, HW, {})
+        failures.append("a boolean hugepages-mib did not raise HookError")
+    except HookError as exc:
+        check("the error names hugepages-mib for the boolean case",
+              "hugepages-mib" in str(exc), True)
+
+# --- output cap: an accidental print loop must not OOM the installer. The
+# chosen behaviour is to keep the hook's own success/failure (exit code)
+# authoritative and just stop retaining stdout past the cap, with one warning
+# naming the package - failing the whole install over verbose-but-otherwise-
+# harmless output would be a worse outcome than a truncated log. ------------ #
+with tempfile.TemporaryDirectory() as tmp:
+    pkg = pathlib.Path(tmp) / "chatty"
+    (pkg / "hooks").mkdir(parents=True)
+    (pkg / "nivuus-package.yaml").write_text(
+        f"apiVersion: {manifest_mod.API_VERSION}\nname: chatty\nversion: 1.0.0\n"
+        'label: "Chatty"\ntier: userspace\nhooks:\n  install: hooks/install.py\n')
+    (pkg / "hooks" / "install.py").write_text(
+        "import json\n"
+        "for _ in range(50000):\n"
+        "    print(json.dumps({'event': 'progress', 'pct': 1, 'msg': 'x' * 20}))\n"
+        "print(json.dumps({'event': 'done'}))\n")
+    chatty = load_manifest(str(pkg / "nivuus-package.yaml"))
+    chatty_emit = FakeEmit()
+    run_install(chatty, HW, {}, tmp, chatty_emit)  # must not raise
+    check("a cap-exceeded warning names the package",
+          any(line[0] == "warn" and "chatty" in line[3]
+              for line in chatty_emit.lines),
+          True)
+    info_count = sum(1 for line in chatty_emit.lines if line[0] == "info")
+    check("progress events stopped accumulating once the cap was hit",
+          info_count < 50000, True)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

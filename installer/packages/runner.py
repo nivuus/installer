@@ -1,9 +1,17 @@
 """Executing a package's hooks, and the jsonl protocol they speak.
 
-`resolve` being READ-ONLY is the load-bearing property of this module. It runs
-before the engine writes anything, so the exact kernel command line is known
-before partitioning - which is why `bootloader` can stay exactly where it is in
-run.py instead of being reordered after the features step.
+`resolve` is a CONTRACT WITH PACKAGE AUTHORS, not a sandbox: nothing here
+stops a resolve hook's subprocess from writing to disk, and a hook that does
+will succeed and its write will persist - there is no enforcement mechanism,
+and none is in scope. What the pipeline ordering in run.py actually depends
+on is narrower than "resolve cannot write": the engine never *asks* resolve
+to write anything, and never *uses* anything a resolve hook might have
+written - so `bootloader` can safely read the platform block resolve returned
+before partitioning runs, without the engine caring whether resolve behaved.
+The read-only rule is there to catch accident and ordering mistakes (a
+package author reaching for install-phase behaviour one phase too early),
+not to defend against a malicious package - one of those owns the machine
+from the install phase onward anyway, since install already runs as root.
 
 The protocol is deliberately a subprocess speaking jsonl on stdout rather than
 an imported Python API. A package must be able to run on a Debian that has
@@ -16,9 +24,28 @@ Events a hook may emit, one JSON object per line:
     {"event":"platform","kernel-cmdline":[...],"modules":[...],
      "hugepages-mib":int}          - resolve only
     {"event":"refuse","reason":str}                  - resolve only
-    {"event":"done"}
+    {"event":"done"}                                 - advisory only, see below
 Anything else on stdout is relayed as a progress line rather than dropped: a
-hook that prints is easier to debug than a hook that is silently truncated.
+hook that prints is easier to debug than a hook that is silently truncated -
+up to MAX_HOOK_OUTPUT_BYTES (below), past which an accidental print loop must
+not be allowed to OOM the installer mid-install.
+
+`done` is advisory, not enforced: nothing here checks that a hook emitted it,
+and nothing should start to - only the subprocess exit code decides success
+or failure. A hook that is correct but terse (no `done` line) must not be
+treated as having failed, which is why enforcing it was rejected. Do not
+start relying on `done` for anything: a documented-but-unenforced event is
+worse than no event at all, and if that guarantee is ever really needed it
+has to be enforced here first, not assumed from the docstring.
+
+A `platform` event is trusted enough to end up on the kernel command line, so
+its `kernel-cmdline` and `modules` are refused (HookError) unless they are
+genuine lists of strings, and `hugepages-mib` is refused unless it is a
+non-negative int that is not a bool - the same rule `manifest.py` already
+applies to the static declaration, so a hook cannot be laxer than the file it
+resolves. None of these are silently coerced: a hook that speaks the protocol
+wrongly is a broken hook, and the operator needs to know which package it was
+rather than get a suspiciously-empty command line.
 """
 from __future__ import annotations
 
@@ -32,6 +59,14 @@ from .manifest import Manifest, Platform
 
 # A hook is third-party code; it never gets to hang the install forever.
 HOOK_TIMEOUT = {"resolve": 120, "install": 1800, "activate": 7200}
+
+# A progress protocol needs a few kilobytes at most. The realistic threat is
+# not a malicious hook (install already runs as root - it needs no stdout
+# bomb) but an accidental print loop: past this many bytes of stdout, stop
+# retaining more of it rather than let that OOM the installer mid-install.
+# The hook itself is not killed for it - only its output past the cap is
+# discarded, so a chatty-but-otherwise-correct hook still completes normally.
+MAX_HOOK_OUTPUT_BYTES = 1 << 20  # 1 MiB
 
 
 class HookError(RuntimeError):
@@ -78,9 +113,23 @@ def _run_hook(manifest: Manifest, phase: str, hw: dict, answers: dict,
             f"{HOOK_TIMEOUT[phase]}s and was killed") from exc
 
     events: list[dict] = []
+    consumed = 0
+    truncated = False
     for line in proc.stdout.splitlines():
         line = line.strip()
         if not line:
+            continue
+        if truncated:
+            continue
+        consumed += len(line) + 1
+        if consumed > MAX_HOOK_OUTPUT_BYTES:
+            truncated = True
+            if emit:
+                emit.warn(
+                    "packages", 0,
+                    f"[{manifest.name}] hook '{phase}' exceeded "
+                    f"{MAX_HOOK_OUTPUT_BYTES} bytes of stdout; "
+                    "the rest was discarded")
             continue
         try:
             event = json.loads(line)
@@ -106,6 +155,35 @@ def _run_hook(manifest: Manifest, phase: str, hw: dict, answers: dict,
     return events
 
 
+def _require_str_list(value, manifest: Manifest, phase: str, field: str) -> list:
+    """A 'platform' event's list fields must be genuine lists of strings.
+
+    `tuple(str(v) for v in value)` on a bare string silently disintegrates it
+    into one-character fragments - which would then land on the kernel
+    command line. Refuse rather than coerce: a hook that speaks the protocol
+    wrongly is a broken hook, and the operator needs to know which package.
+    """
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise HookError(
+            f"package {manifest.name}: hook '{phase}' emitted a 'platform' "
+            f"event whose '{field}' is not a list of strings ({value!r})")
+    return value
+
+
+def _require_nonneg_hugepages(value, manifest: Manifest, phase: str) -> int:
+    """Mirror manifest.py's own rule for the static 'hugepages-mib' field.
+
+    `bool` is an `int` subclass in Python, so it is checked explicitly - a
+    hook emitting `true` must not silently become 1 hugepage.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise HookError(
+            f"package {manifest.name}: hook '{phase}' emitted a 'platform' "
+            f"event whose 'hugepages-mib' is not a non-negative integer "
+            f"({value!r})")
+    return value
+
+
 def run_resolve(manifest: Manifest, hw: dict, answers: dict,
                 emit=None) -> Resolution:
     """Read-only phase. Returns the merged platform block, or a refusal."""
@@ -119,12 +197,22 @@ def run_resolve(manifest: Manifest, hw: dict, answers: dict,
                 or "le package a refusé cette machine sans en donner la raison"
             return Resolution(ok=False, reason=reason, platform=manifest.platform)
         if kind == "platform":
-            hugepages = event.get("hugepages-mib") or 0
+            cmdline_raw = event.get("kernel-cmdline")
+            if cmdline_raw is None:
+                cmdline_raw = []
+            modules_raw = event.get("modules")
+            if modules_raw is None:
+                modules_raw = []
+            hugepages_raw = event.get("hugepages-mib")
+            if hugepages_raw is None:
+                hugepages_raw = 0
+            _require_str_list(cmdline_raw, manifest, "resolve", "kernel-cmdline")
+            _require_str_list(modules_raw, manifest, "resolve", "modules")
+            hugepages = _require_nonneg_hugepages(hugepages_raw, manifest, "resolve")
             resolved = Platform(
-                kernel_cmdline=tuple(str(v) for v in
-                                     (event.get("kernel-cmdline") or [])),
-                modules=tuple(str(v) for v in (event.get("modules") or [])),
-                hugepages_mib=int(hugepages) if isinstance(hugepages, int) else 0,
+                kernel_cmdline=tuple(str(v) for v in cmdline_raw),
+                modules=tuple(str(v) for v in modules_raw),
+                hugepages_mib=hugepages,
             )
     return Resolution(ok=True, reason="",
                       platform=manifest.platform.merge(resolved))
