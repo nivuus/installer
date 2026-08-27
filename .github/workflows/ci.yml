@@ -13,7 +13,10 @@ jobs:
   python:
     uses: nivuus/.github/.github/workflows/ci-python.yml@main
     with:
-      test-paths: tests scripts/tests
+      # No pytest suite: the files under scripts/tests/ are standalone scripts
+      # that run on import, not pytest modules. Aiming pytest at them executes
+      # them during collection. Tracked as an issue in this repository.
+      test-paths: ""
   shell:
     uses: nivuus/.github/.github/workflows/ci-shell.yml@main
     with:
