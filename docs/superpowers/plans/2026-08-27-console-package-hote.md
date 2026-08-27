@@ -1914,7 +1914,29 @@ son hook resolve qui refuse une machine qui ne convient pas."
 
 - [ ] **Step 1: Ajouter les suites à l'agrégateur**
 
-Dans `installer/Makefile`, ajouter `test_console_hardware test_console_resolve test_console_install` à la boucle `test-packages`. Mettre à jour le compte annoncé (neuf → douze).
+⚠️ **Le contrôleur a compté avant le dispatch : l'agrégateur couvre 9 suites, et 18 autres existent sans être couvertes.** Comme la CI ne lance **aucun** test Python, une suite hors de cette cible n'est exécutée par personne.
+
+Ajouter les **six** que cette phase a créées ou touchées :
+
+```
+test_common_hardware test_console_hardware test_console_resolve
+test_console_install test_install_engine_features test_retro_marker_bridge
+```
+
+soit **quinze** au total. Mettre à jour le compte annoncé partout où il figure.
+
+Puis, **tenter** les onze `test_windows_guest_*` restantes et ajouter celles qui passent sans root, sans réseau et sans support Windows monté :
+
+```bash
+for t in scripts/tests/test_windows_guest_*.py; do
+  printf '%-46s ' "$(basename "$t")"
+  timeout 120 python3 "$t" >/dev/null 2>&1 && echo "PASSE" || echo "echoue/exige plus"
+done
+```
+
+Ajoutez celles qui passent ; **listez nommément celles qui échouent et pourquoi** dans votre rapport. Elles sont pré-existantes et hors périmètre à réparer — mais une suite que rien n'exécute est une suite qui pourrit, et ce projet n'a aucun filet CI pour le voir.
+
+⚠️ **`test_windows_guest_domain.py` échouera** : elle importe `installer/windows-guest/domain.py`, cassé depuis la tâche 1 (il utilise la moitié précise de `hardware.py`, partie dans le package). C'est attendu et réparé en phase 2b — ne l'ajoutez pas, et notez-la comme telle.
 
 - [ ] **Step 2: Prouver que le moteur planifie et applique `console`**
 
@@ -1953,7 +1975,7 @@ Attendu, **selon la machine** : sur un hôte avec IOMMU, GPU dédié et NVMe dé
 cd installer && make test-packages PYTHON=<python-du-venv>
 ```
 
-Attendu : douze `OK`.
+Attendu : quinze `OK`, plus celles des suites `test_windows_guest_*` que vous aurez pu ajouter.
 
 - [ ] **Step 4: Mettre à jour `installer/README.md`**
 
