@@ -74,7 +74,7 @@ Le moteur doit répondre à `requires.capabilities` **avant** d'exécuter le moi
 **Interfaces:**
 - Consumes: rien
 - Produces:
-  - `installer/common/hardware.py` garde : `list_disks`, `list_ethernet`, `list_wifi`, `first_ap_interface`, `first_wired_with_carrier`, `iommu_support`, `list_gpus` (**sans le champ `ids`**), `cpu_topology` (**sans `isolcpus` ni `nohz_full`**), `detect_all`
+  - `installer/common/hardware.py` garde : `list_disks`, `list_ethernet`, `list_wifi`, `first_ap_interface`, `first_wired_with_carrier`, `iommu_support`, `list_gpus` (**sans le champ `ids`**), `cpu_topology` (**sans `isolcpus` ni `nohz_full`**), `memory_total_mib(meminfo_path="/proc/meminfo") -> int` (RAM hôte en MiB depuis `MemTotal`, fail-open à `0`), `detect_all` — dont le dict rendu porte désormais une clé **`memory_mib`** (ajoutée en fix round 2 de la tâche 2 : `detect_all()` ne la portait pas, donc `resolve` tombait systématiquement sur son repli plancher)
   - `console/hardware.py` expose : `HardwareError`, `pci_slot_ids(slot) -> list[str]`, `parse_pci_functions(raw, slot) -> list[dict]`, `pci_slot_functions(slot) -> list[dict]`, `parse_nvme_controllers(raw) -> list[dict]`, `select_passthrough_nvme(controllers, host_addresses) -> dict`, `host_root_pci_addresses() -> set[str] | None`, `resolve_passthrough_nvme(raw, host_addresses) -> dict`, `passthrough_nvme() -> dict`, `_whole_disk_name(name, sysfs_root=...) -> str`, `pci_address_for_device(path) -> str | None`, `vfio_ids_for_slot(slot) -> list[str]`, `cpu_ranges(nums) -> str`, `isolation_plan(cpu: dict) -> dict` → `{"isolcpus": str, "nohz_full": str}`
 
 ⚠️ **Deux faits sur ces fonctions que le code appelant DOIT respecter, vérifiés dans la source :**
@@ -400,6 +400,26 @@ la phase suivante."
 - Consumes: `console/hardware.py` (`vfio_ids_for_slot`, `isolation_plan`, `resolve_passthrough_nvme`, `host_root_pci_addresses`)
 - Produces: un package découvrable par `installer/packages/discovery.py` et résolvable par `installer/packages/runner.py`
 
+> **Fix round 2 (revue de code) a touché deux fichiers hors de cette liste
+> initiale**, tous deux côté moteur et non côté package :
+> - `installer/common/hardware.py` : ajout de `memory_total_mib()` et de la
+>   clé `memory_mib` dans `detect_all()` (Partie 1 — ce champ n'existait pas
+>   du tout ; `resolve` tombait donc systématiquement sur son repli
+>   plancher, une erreur de taille silencieuse, pas un plantage).
+> - `scripts/tests/test_common_hardware.py` (nouvelle suite, créée plutôt
+>   que d'étendre `test_packages_capabilities.py` : celle-ci teste la
+>   conversion `hw dict -> capacités`, pas la détection elle-même — ce
+>   nouveau fichier suit la même convention 1-fichier-source-1-suite que
+>   `test_console_hardware.py`).
+>
+> Et la Partie 2 a changé la forme du budget de hugepages dans
+> `console/hooks/resolve.py` : `GUEST_MIB_DEFAULT` (16384 MiB fixe, aligné
+> sur ce que ce projet a mesuré et gardé après avoir vu l'hôte swapper —
+> voir `CLAUDE.md`, "Hugepages pool halved") remplace "moitié de l'hôte",
+> clampé vers le BAS uniquement (`min(DEFAULT, host // 2)`), avec le même
+> refus qu'avant sous `GUEST_MIB_MIN`. Les deux blocs verbatim ci-dessous
+> (Steps 3 et 5) sont à jour avec ce correctif.
+
 - [ ] **Step 1: Écrire le manifeste**
 
 `console/nivuus-package.yaml` :
@@ -673,6 +693,20 @@ check("memoire negative : code de sortie 0", rc, 0)
 reason = refusal_reason(events)
 check("memoire negative : un refus est emis", reason is not None, True)
 
+# --- budget invite : GUEST_MIB_DEFAULT (16384), jamais "moitie de l hote" #
+# Round 2 de revue : "moitie de l hote" rejouait EXACTEMENT l erreur deja
+# corrigee dans ce projet (CLAUDE.md, "Hugepages pool halved" - un pool de
+# 16584 pages, double du besoin reel, faisait swapper l hote ; reduit a 8448
+# pages, ~16896 MiB mesures). Le budget par defaut est donc fixe a 16384 MiB
+# (16 GiB), et seulement reduit si l hote ne peut pas le fournir - jamais
+# calcule comme une fraction de la RAM totale. Table mesuree :
+#
+#   hote   8 GiB (8192 MiB)  -> refuse (le plancher meme ne tient pas)
+#   hote  16 GiB (16384 MiB) -> invite  8192 MiB (frontiere, moitie = plancher)
+#   hote  24 GiB (24576 MiB) -> invite 12288 MiB (moitie, sous le defaut)
+#   hote  32 GiB (32768 MiB) -> invite 16384 MiB (moitie = defaut, pile)
+#   hote  64 GiB (65536 MiB) -> invite 16384 MiB (defaut, PAS la moitie - 32768)
+
 # 8 GiB hote : la moitie (4096) est sous le plancher (8192) - refuse, et la
 # raison doit nommer la RAM reelle de l hote pour que l operateur comprenne
 # pourquoi (pas juste "trop petit").
@@ -682,6 +716,18 @@ reason = refusal_reason(events)
 check("hote 8 GiB : un refus est emis", reason is not None, True)
 check("hote 8 GiB : le refus nomme la RAM",
       bool(reason) and "8192" in reason, True)
+
+# 16383 MiB, juste sous la frontiere des 16 GiB : doit refuser, et nommer a
+# la fois ce que l hote a et ce qu il faudrait - c est le cas qu un futur
+# lecteur pourrait croire identique a 16384 s il ne regarde pas de pres.
+rc, events = call_hook(hw={"gpus": [GPU_OK], "memory_mib": 16383}, answers={})
+check("hote 16383 MiB (juste sous la frontiere) : code de sortie 0", rc, 0)
+reason = refusal_reason(events)
+check("hote 16383 MiB : un refus est emis", reason is not None, True)
+check("hote 16383 MiB : le refus nomme la RAM de l hote",
+      bool(reason) and "16383" in reason, True)
+check("hote 16383 MiB : le refus nomme le besoin",
+      bool(reason) and "16384" in reason, True)
 
 # 16 GiB hote : la moitie (8192) egale exactement le plancher - la frontiere
 # ne doit PAS refuser une machine qui fonctionne reellement.
@@ -697,8 +743,40 @@ else:
     check("hote 16 GiB : l invite recoit exactement le plancher",
           plat.get("hugepages-mib"), 8192)
 
-# 64 GiB hote (cette machine) : inchange par rapport a avant le correctif -
-# garde-fou de non-regression sur le cas reel de cette machine.
+# 24 GiB hote : la moitie (12288) est sous le defaut (16384) - l invite
+# recoit la moitie, pas le defaut plein.
+rc, events = call_hook(
+    hw={"gpus": [GPU_OK], "cpu": CPU_OK, "memory_mib": 24576},
+    answers={"dedicated_nvme": ""})
+check("hote 24 GiB : code de sortie 0", rc, 0)
+plat = platform_event(events)
+if plat is None:
+    check("hote 24 GiB : un plan platform est emis (pas de refus)",
+          refusal_reason(events), None)
+else:
+    check("hote 24 GiB : l invite recoit la moitie (12288 MiB)",
+          plat.get("hugepages-mib"), 12288)
+
+# 32 GiB hote : la moitie (16384) egale exactement le defaut.
+rc, events = call_hook(
+    hw={"gpus": [GPU_OK], "cpu": CPU_OK, "memory_mib": 32768},
+    answers={"dedicated_nvme": ""})
+check("hote 32 GiB : code de sortie 0", rc, 0)
+plat = platform_event(events)
+if plat is None:
+    check("hote 32 GiB : un plan platform est emis (pas de refus)",
+          refusal_reason(events), None)
+else:
+    check("hote 32 GiB : l invite recoit le defaut (16384 MiB)",
+          plat.get("hugepages-mib"), 16384)
+
+# 64 GiB hote (cette machine) : le point que l on veut EPINGLER. La moitie
+# de l hote serait 32768 MiB - c est exactement l erreur "hugepages pool
+# halved" documentee dans CLAUDE.md. L invite doit recevoir le DEFAUT fixe
+# (16384 MiB), jamais la moitie de l hote : c est le cas qu un futur lecteur
+# sera tente de "corriger" en le remettant a host_mib // 2, donc gardez
+# cette assertion telle quelle si le budget par defaut change un jour pour
+# une autre raison mesuree.
 rc, events = call_hook(
     hw={"gpus": [GPU_OK], "cpu": CPU_OK, "memory_mib": 65536},
     answers={"dedicated_nvme": ""})
@@ -708,8 +786,9 @@ if plat is None:
     check("hote 64 GiB : un plan platform est emis (pas de refus)",
           refusal_reason(events), None)
 else:
-    check("hote 64 GiB : l invite recoit 32768 MiB", plat.get("hugepages-mib"),
-          32768)
+    check("hote 64 GiB : l invite recoit le defaut mesure (16384 MiB), "
+          "PAS la moitie de l hote (32768 MiB)",
+          plat.get("hugepages-mib"), 16384)
 
 # --- non-regression : les refus deja verifies plus haut restent verts ---- #
 rc, events = call_hook(
@@ -799,11 +878,20 @@ sys.path.insert(0, HERE)
 
 import hardware  # noqa: E402
 
-# The guest gets half of host RAM, clamped: enough for a gaming guest, never
-# so much that the host starts swapping. Hugepages are reserved at boot and
-# never handed back, so over-asking costs the host permanently.
+# Guest memory budget. NOT "half the host" - this project already made and
+# corrected that exact mistake: CLAUDE.md's "Hugepages pool halved" finding
+# records a 16584-page pool (double the VM's real need) that left the host
+# swapping, cut down to 8448 pages (~16896 MiB; the VM itself uses ~8205
+# MiB). GUEST_MIB_DEFAULT is pinned to that measured, settled figure -
+# rounded to 16384 MiB (16 GiB) - not derived from host size. Hugepages are
+# reserved at BOOT and NEVER handed back, so over-asking costs the host
+# permanently; that is exactly what made it swap the first time. Do NOT
+# "improve" this back to host_mib // 2 - that IS the mistake, not a
+# conservative default.
+GUEST_MIB_DEFAULT = 16384
+# Below this, the guest is not a usable gaming console - refuse rather than
+# shrink further (see guest_memory_mib).
 GUEST_MIB_MIN = 8192
-GUEST_MIB_MAX = 32768
 
 
 def emit(event: dict) -> None:
@@ -811,46 +899,49 @@ def emit(event: dict) -> None:
 
 
 def guest_memory_mib(hw: dict):
-    """Half of host RAM, clamped to [GUEST_MIB_MIN, GUEST_MIB_MAX].
+    """GUEST_MIB_DEFAULT, clamped DOWN if the host cannot spare it.
 
     Returns (mib, reason). On success `reason` is None. On failure `mib` is
     None and `reason` names precisely what disqualifies this host - main()
     turns that straight into a `refuse` event instead of doing arithmetic
     that can raise.
 
+    The guest never gets more than GUEST_MIB_DEFAULT (see its docstring for
+    why that is a fixed, measured figure rather than a fraction of host
+    RAM), and never more than half the host either - `min(DEFAULT, total //
+    2)`. Below GUEST_MIB_MIN even after that clamp, the machine is refused
+    rather than squeezed further:
+
     Two distinct failure classes, refused for two distinct reasons:
 
     - The figure itself is unusable (not a number, or negative) - a
       malformed snapshot, the same class of problem passthrough_nvme() and
       isolation_plan() already refuse rather than guess through.
-    - The figure is a real number but the host is too small: hugepages are
-      reserved at BOOT and NEVER handed back (see CLAUDE.md), so
-      unconditionally applying GUEST_MIB_MIN regardless of host size would
-      let a 4 or 8 GiB host reserve all - or more than all - of its RAM for
-      a guest, leaving nothing for the host itself. That is the same
-      mistake "PCI passthrough only" already exists to prevent: a console
-      that boots but performs unusably is worse than one that explains why
-      it cannot be installed on this machine. So this refuses rather than
-      shrinking the floor.
+    - The figure is a real number but the host is too small even for the
+      floor: a console that boots but performs unusably is worse than one
+      that explains why it cannot be installed on this machine - the same
+      reasoning "PCI passthrough only" already applies elsewhere in this
+      hook.
     """
     total = hw.get("memory_mib")
     if total is None or total == 0:
-        # No RAM figure at all: there is nothing to strand-check against,
-        # so fall back to the floor as a best effort rather than refuse on
-        # missing data the detection layer should have supplied.
+        # No RAM figure at all: there is nothing to strand-check or clamp
+        # against, so fall back to the floor - the smallest budget a usable
+        # guest needs - rather than assume the generous default on a host
+        # we know nothing about.
         return GUEST_MIB_MIN, None
     if isinstance(total, bool) or not isinstance(total, (int, float)):
         return None, f"quantite de memoire hote illisible : {total!r}"
     if total < 0:
         return None, f"quantite de memoire hote negative : {total!r}"
-    half = total // 2
-    if half < GUEST_MIB_MIN:
+    budget = min(GUEST_MIB_DEFAULT, total // 2)
+    if budget < GUEST_MIB_MIN:
         return None, (
             f"cet hote n'a que {int(total)} MiB de RAM ; il en faut au moins "
             f"{GUEST_MIB_MIN * 2} MiB pour heberger la console sans priver "
             "l'hote de toute sa memoire (les hugepages sont reserves au "
             "demarrage et ne sont jamais rendus)")
-    return max(GUEST_MIB_MIN, min(GUEST_MIB_MAX, int(half))), None
+    return int(budget), None
 
 
 def main() -> int:

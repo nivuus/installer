@@ -377,6 +377,38 @@ def _read_int(path: str) -> Optional[int]:
         return None
 
 
+def memory_total_mib(meminfo_path: str = "/proc/meminfo") -> int:
+    """Host RAM in MiB, from /proc/meminfo's `MemTotal`. 0 on any failure.
+
+    Coarse and generic, like the rest of this module: host RAM is not
+    specific to any one package (the console package uses it to size the
+    guest's hugepage budget, but any package might want it), so it belongs
+    on the engine side rather than being detected inside one package.
+
+    `meminfo_path` is overridable so tests can point this at a fake file
+    instead of the real `/proc/meminfo` - the same convention `iommu_support`
+    uses for its ACPI table directory.
+
+    Fail-open like every other function in this module: a missing or
+    unreadable file, a missing `MemTotal` line, or a non-numeric value all
+    yield 0, never an exception - one undetectable figure must not break the
+    wizard. The kernel reports `MemTotal` in kB (labelled "kB" but actually
+    KiB); divided by 1024 for MiB, floor rounding.
+    """
+    try:
+        with open(meminfo_path) as fh:
+            for line in fh:
+                if not line.startswith("MemTotal:"):
+                    continue
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    return int(parts[1]) // 1024
+                return 0
+    except OSError:
+        pass
+    return 0
+
+
 # --------------------------------------------------------------------------- #
 # Aggregate snapshot for the wizard                                           #
 # --------------------------------------------------------------------------- #
@@ -390,6 +422,7 @@ def detect_all() -> dict:
         "gpus": gpus,
         "cpu": cpu_topology(),
         "iommu": iommu_support(),
+        "memory_mib": memory_total_mib(),
         "passthrough_candidates": [g for g in gpus if g.get("discrete")],
     }
 

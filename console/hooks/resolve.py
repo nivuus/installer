@@ -29,11 +29,20 @@ sys.path.insert(0, HERE)
 
 import hardware  # noqa: E402
 
-# The guest gets half of host RAM, clamped: enough for a gaming guest, never
-# so much that the host starts swapping. Hugepages are reserved at boot and
-# never handed back, so over-asking costs the host permanently.
+# Guest memory budget. NOT "half the host" - this project already made and
+# corrected that exact mistake: CLAUDE.md's "Hugepages pool halved" finding
+# records a 16584-page pool (double the VM's real need) that left the host
+# swapping, cut down to 8448 pages (~16896 MiB; the VM itself uses ~8205
+# MiB). GUEST_MIB_DEFAULT is pinned to that measured, settled figure -
+# rounded to 16384 MiB (16 GiB) - not derived from host size. Hugepages are
+# reserved at BOOT and NEVER handed back, so over-asking costs the host
+# permanently; that is exactly what made it swap the first time. Do NOT
+# "improve" this back to host_mib // 2 - that IS the mistake, not a
+# conservative default.
+GUEST_MIB_DEFAULT = 16384
+# Below this, the guest is not a usable gaming console - refuse rather than
+# shrink further (see guest_memory_mib).
 GUEST_MIB_MIN = 8192
-GUEST_MIB_MAX = 32768
 
 
 def emit(event: dict) -> None:
@@ -41,46 +50,49 @@ def emit(event: dict) -> None:
 
 
 def guest_memory_mib(hw: dict):
-    """Half of host RAM, clamped to [GUEST_MIB_MIN, GUEST_MIB_MAX].
+    """GUEST_MIB_DEFAULT, clamped DOWN if the host cannot spare it.
 
     Returns (mib, reason). On success `reason` is None. On failure `mib` is
     None and `reason` names precisely what disqualifies this host - main()
     turns that straight into a `refuse` event instead of doing arithmetic
     that can raise.
 
+    The guest never gets more than GUEST_MIB_DEFAULT (see its docstring for
+    why that is a fixed, measured figure rather than a fraction of host
+    RAM), and never more than half the host either - `min(DEFAULT, total //
+    2)`. Below GUEST_MIB_MIN even after that clamp, the machine is refused
+    rather than squeezed further:
+
     Two distinct failure classes, refused for two distinct reasons:
 
     - The figure itself is unusable (not a number, or negative) - a
       malformed snapshot, the same class of problem passthrough_nvme() and
       isolation_plan() already refuse rather than guess through.
-    - The figure is a real number but the host is too small: hugepages are
-      reserved at BOOT and NEVER handed back (see CLAUDE.md), so
-      unconditionally applying GUEST_MIB_MIN regardless of host size would
-      let a 4 or 8 GiB host reserve all - or more than all - of its RAM for
-      a guest, leaving nothing for the host itself. That is the same
-      mistake "PCI passthrough only" already exists to prevent: a console
-      that boots but performs unusably is worse than one that explains why
-      it cannot be installed on this machine. So this refuses rather than
-      shrinking the floor.
+    - The figure is a real number but the host is too small even for the
+      floor: a console that boots but performs unusably is worse than one
+      that explains why it cannot be installed on this machine - the same
+      reasoning "PCI passthrough only" already applies elsewhere in this
+      hook.
     """
     total = hw.get("memory_mib")
     if total is None or total == 0:
-        # No RAM figure at all: there is nothing to strand-check against,
-        # so fall back to the floor as a best effort rather than refuse on
-        # missing data the detection layer should have supplied.
+        # No RAM figure at all: there is nothing to strand-check or clamp
+        # against, so fall back to the floor - the smallest budget a usable
+        # guest needs - rather than assume the generous default on a host
+        # we know nothing about.
         return GUEST_MIB_MIN, None
     if isinstance(total, bool) or not isinstance(total, (int, float)):
         return None, f"quantite de memoire hote illisible : {total!r}"
     if total < 0:
         return None, f"quantite de memoire hote negative : {total!r}"
-    half = total // 2
-    if half < GUEST_MIB_MIN:
+    budget = min(GUEST_MIB_DEFAULT, total // 2)
+    if budget < GUEST_MIB_MIN:
         return None, (
             f"cet hote n'a que {int(total)} MiB de RAM ; il en faut au moins "
             f"{GUEST_MIB_MIN * 2} MiB pour heberger la console sans priver "
             "l'hote de toute sa memoire (les hugepages sont reserves au "
             "demarrage et ne sont jamais rendus)")
-    return max(GUEST_MIB_MIN, min(GUEST_MIB_MAX, int(half))), None
+    return int(budget), None
 
 
 def main() -> int:
