@@ -1975,7 +1975,7 @@ Attendu, **selon la machine** : sur un hôte avec IOMMU, GPU dédié et NVMe dé
 cd installer && make test-packages PYTHON=<python-du-venv>
 ```
 
-Attendu : quinze `OK`, plus celles des suites `test_windows_guest_*` que vous aurez pu ajouter.
+Attendu : 26 `OK`.
 
 - [ ] **Step 4: Mettre à jour `installer/README.md`**
 
@@ -2032,7 +2032,7 @@ things about it are easy to break:
 detects **capabilities** (coarse: is there an IOMMU, a discrete GPU, a spare
 NVMe — `list_gpus` no longer carries `ids`, `cpu_topology` no longer carries
 `isolcpus`), and `console/hardware.py` detects the **details** in its resolve
-phase. Tests: `cd installer && make test-packages` (12 files).
+phase. Tests: `cd installer && make test-packages` (26 files).
 ```
 
 - [ ] **Step 6: Corriger `QUICKSTART.md`**
@@ -2059,7 +2059,7 @@ Attendu : **aucune sortie**, hors `CLAUDE.md` là où il décrit l'histoire.
 git add -A
 git commit -m "docs(console): brancher le package et aligner la documentation
 
-L agregateur couvre desormais douze suites. README, CLAUDE.md et
+L agregateur couvre desormais 26 suites. README, CLAUDE.md et
 QUICKSTART decrivent ce qui existe : install.sh a disparu, console est
 un package ordinaire, et hardware.py est coupe selon le meme principe
 que tout le reste - le moteur detecte les capacites, le package detecte
