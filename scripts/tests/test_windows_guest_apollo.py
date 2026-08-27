@@ -68,8 +68,17 @@ check("no output is pinned", "output_name" in conf_map, False)
 # pour rien — et Apollo affiche « Fatal: Unable to find display or encoder
 # during startup » en recommandant de ne pas streamer. Fausse alarme, mais une
 # fausse alarme marquee « Fatal » apprend a ignorer les vraies.
-check("un ecran virtuel est tenu en permanence",
-      conf_map.get("headless_mode"), "true")
+#
+# headless_mode = true fait taire cette banniere, et casse le streaming vers le
+# telephone : avec un ecran deja la, Apollo reconfigure un mode existant au lieu
+# d'en creer un a la resolution demandee, et le client sort 0,5 s apres s'etre
+# connecte (« The surface has been released » dans MediaCodec.configure, puis
+# « Video stream start failed: -5 »). Mesure du 2026-08-26/27 : active a
+# 22:20:16, premier echec a 22:25:02, le 2410x1080 refonctionne des le retrait.
+# Ce test garde la banniere plutot que le bug — le raisonnement complet est dans
+# l'en-tete de sunshine.conf.j2.
+check("aucun ecran n'est tenu en permanence",
+      conf_map.get("headless_mode"), None)
 check("credentials are not in sunshine.conf",
       any("p4ssw0rd" in v for v in conf_map.values()), False)
 

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MARKER_NAME = "PAYLOAD.id"
-PROVISION_VERSION = "B2"
+PROVISION_VERSION = "B3"
 TARGET_BUILD = "26100"
 
 

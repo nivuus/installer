@@ -171,7 +171,7 @@ check("target device name info type is 2 (GET_TARGET_NAME)",
 
 # --- Sub-project B.
 # R1: the version lives in two languages and must move in one step.
-check("provision version is B2", payload.PROVISION_VERSION, "B2")
+check("provision version is B3", payload.PROVISION_VERSION, "B3")
 check("the standalone SudoVDA stage is gone",
       (PROVISION / "20-sudovda.ps1").exists(), False)
 
@@ -434,6 +434,25 @@ check("le sondage ne rallonge pas l attente",
 # que Steam demarre encore.
 check("steam-session.ps1 laisse a Steam le temps de sa premiere mise a jour",
       "AppearDeadlineSeconds = 300" in _sess, True)
+# LA SURVEILLANCE DE STEAM NE DOIT JAMAIS ATTENDRE DERRIERE AUTRE CHOSE.
+# La maximisation et la surveillance tenaient dans deux boucles successives.
+# Un Steam deja lance et replie dans la zone de notification n a pas de fenetre
+# principale, donc pas de titre a reconnaitre : la premiere boucle allait au
+# bout de ses 180 s, et quitter Steam ne fermait rien pendant tout ce temps.
+# Mesure du 2026-08-27 : session ouverte a 11:16:05, Apollo n a rendu la main
+# qu a 11:19:08 — 180 s de boucle plus les 3 s de grace, au dixieme pres.
+# Une seule boucle desormais : elle surveille, et greffe la maximisation dessus.
+_sess_loops = [ln for ln in _sess_code if re.match(r"\s*while \(\$true\)", ln)]
+check("une seule boucle principale surveille Steam",
+      len(_sess_loops), 1)
+check("la maximisation se greffe sur la surveillance",
+      "$maximized = Set-SteamMaximized" in _sess, True)
+check("la maximisation ne bloque plus la surveillance",
+      any("while" in ln and "windowDeadline" in ln for ln in _sess_code), False)
+# En Big Picture la fenetre est deja plein ecran : partir avec le travail fait
+# evite d interroger la table des processus une fois de plus par demi-seconde.
+check("Big Picture ne cherche aucune fenetre a maximiser",
+      "$maximized = ($Mode -ne 'Desktop')" in _sess, True)
 # La maximisation vivait dans un prep-cmd, qu Apollo attend AVANT de lancer
 # l application, et sa boucle ne sortait jamais avant son delai : 182 secondes
 # de retard mesurees a chaque session le 2026-08-26. Elle doit sortir des que la

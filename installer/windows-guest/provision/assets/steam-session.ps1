@@ -68,10 +68,18 @@ if (-not (Test-SteamRunning)) {
     return
 }
 
-# --- 2. Maximiser la fenetre, puis passer a autre chose -----------------------
-# Steam restaure sa geometrie precedente, qui sur un ecran virtuel tout neuf est
-# une petite fenetre dans un coin. En Big Picture la fenetre est deja plein
-# ecran et il n y a rien a maximiser.
+# --- 2. Surveiller Steam, et maximiser sa fenetre au passage -----------------
+# UNE SEULE BOUCLE, et c est le coeur de ce script. Les deux taches tenaient
+# autrefois dans deux boucles successives : maximiser d abord, surveiller
+# ensuite. Un Steam deja lance et replie dans la zone de notification n a PAS de
+# fenetre principale, donc pas de titre a reconnaitre, donc la premiere boucle
+# allait au bout de son delai -- 180 s pendant lesquelles quitter Steam ne
+# fermait rien. Mesure du 2026-08-27 : session ouverte a 11:16:05, Apollo
+# n a rendu la main qu a 11:19:08, soit 180 s de boucle plus les 3 s de grace.
+# Surveiller est la tache qui ne doit JAMAIS attendre ; maximiser se greffe
+# dessus et echoue sans consequence.
+$MaximizeDeadlineSeconds = 180
+
 if ($Mode -eq 'Desktop') {
     try {
         Add-Type @'
@@ -82,28 +90,40 @@ public static class NivuusWin {
     public const int SW_MAXIMIZE = 3;
 }
 '@
-        $windowDeadline = (Get-Date).AddSeconds(180)
-        while ((Get-Date) -lt $windowDeadline) {
-            $p = Get-Process -Name 'steam' -ErrorAction SilentlyContinue |
-                 Where-Object { $_.MainWindowTitle -eq 'Steam' } | Select-Object -First 1
-            if ($p) {
-                [NivuusWin]::ShowWindow($p.MainWindowHandle, [NivuusWin]::SW_MAXIMIZE) | Out-Null
-                break
-            }
-            Start-Sleep -Milliseconds 500
-        }
     }
     catch {
-        Write-Warning "fenetre non maximisee : $_"
+        Write-Warning "maximisation indisponible : $_"
     }
 }
 
-# --- 3. Tenir la session aussi longtemps que Steam vit ------------------------
+# Steam restaure sa geometrie precedente, qui sur un ecran virtuel tout neuf est
+# une petite fenetre dans un coin. En Big Picture la fenetre est deja plein
+# ecran : rien a maximiser, on part donc avec le travail deja fait.
+$maximized = ($Mode -ne 'Desktop')
+$maximizeDeadline = (Get-Date).AddSeconds($MaximizeDeadlineSeconds)
+
+function Set-SteamMaximized {
+    try {
+        $p = Get-Process -Name 'steam' -ErrorAction SilentlyContinue |
+             Where-Object { $_.MainWindowTitle -eq 'Steam' } | Select-Object -First 1
+        if (-not $p) { return $false }
+        [NivuusWin]::ShowWindow($p.MainWindowHandle, [NivuusWin]::SW_MAXIMIZE) | Out-Null
+        return $true
+    }
+    catch {
+        Write-Warning "fenetre non maximisee : $_"
+        return $true   # ne pas reessayer en boucle sur une erreur durable
+    }
+}
+
 while ($true) {
     if (Test-SteamRunning) {
-        # Les deux sondages s ajoutent tels quels au delai de grace, et leur
-        # cout est nul face aux heures que dure une session : une interrogation
-        # de la table des processus, deux fois par seconde.
+        if (-not $maximized -and (Get-Date) -lt $maximizeDeadline) {
+            $maximized = Set-SteamMaximized
+        }
+        # Le sondage s ajoute tel quel au delai de grace, et son cout est nul
+        # face aux heures que dure une session : une interrogation de la table
+        # des processus, deux fois par seconde.
         Start-Sleep -Milliseconds 500
         continue
     }

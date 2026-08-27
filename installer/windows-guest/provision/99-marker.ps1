@@ -133,7 +133,7 @@ Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' 
                     -Name 'NivuusProvision' -ErrorAction SilentlyContinue
 
 $marker = @(
-    "provision_version=B2",
+    "provision_version=B3",
     "completed=$(Get-Date -Format o)",
     "computer=$env:COMPUTERNAME",
     "agent_session=$sid"
