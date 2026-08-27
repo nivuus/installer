@@ -32,9 +32,22 @@ CE QUI EST REFUSÉ, ET POURQUOI C'EST LE CŒUR DE CE SCRIPT :
 `retro scan` fabrique les chemins d'exécutables depuis le MANIFESTE sans
 vérifier qu'ils existent, et la garde de racine de `retro sync` les accepte
 puisqu'ils sont bien sous la racine d'émulation. Synchroniser après une
-installation partielle ne produit donc pas une bibliothèque incomplète : elle
-produit une bibliothèque peuplée d'entrées qui ne démarrent pas — cassé, pas
-absent, et c'est le propriétaire qui le découvre depuis son canapé.
+installation partielle produirait donc, sans autre protection, une
+bibliothèque peuplée d'entrées qui ne démarrent pas — cassé, pas absent, et
+c'est le propriétaire qui le découvre depuis son canapé.
+
+C'est pourquoi l'appel à `retro scan` ci-dessous passe `--emulation-root-local`
+: donné, `retro` vérifie lui-même que chaque exécutable existe et ignore (en
+le signalant) les systèmes dont l'émulateur manque. `retro scan` tourne DANS
+l'invité (`Guest.retro`, via WinRM) : « cette machine » et « la console », du
+point de vue de la commande qui tourne réellement, désignent donc le MÊME
+disque — la valeur passée est celle de `--emulation-root`, pas un chemin côté
+hôte. Retirer ce paramètre rendrait ce correctif inerte en silence ; un test
+de `test_windows_guest_retro_sync.py` épingle sa présence et sa valeur.
+
+Cette vérification est une défense EN PROFONDEUR, pas la première ligne : le
+témoin durable ci-dessous refuse de synchroniser AVANT même que `scan` ne
+tourne dès qu'un passage n'est pas « ok » (y compris « partial »).
 
 D'où le témoin durable que l'étape 32 laisse sur le volume persistant
 (`D:\\state\\retro.status`, écrit par `provision/assets/retro-status.ps1`, qui
@@ -673,6 +686,7 @@ def synchronise(guest, cfg) -> int:
     code, rapport = guest.retro(
         ["scan", "--roms", cfg.roms, "--roms-windows", cfg.roms,
          "--emulation-root", cfg.emulation_root,
+         "--emulation-root-local", cfg.emulation_root,
          "--user-manifest", cfg.user_manifest, "--output", cfg.inventory])
     print(rapport.rstrip())
     if code != 0:

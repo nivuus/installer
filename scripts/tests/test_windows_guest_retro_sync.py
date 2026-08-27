@@ -271,6 +271,11 @@ class FakeGuest:
         self.sessions_vues = 0
         self.steam = steam
         self.journal = []
+        # Les arguments COMPLETS du dernier appel a chaque sous-commande : le
+        # journal ci-dessus ne garde que le nom (args[0]), pour rester lisible
+        # dans les scenarios de sequence. Un test sur ce que l hote PASSE a
+        # `retro scan` a besoin de la ligne entiere.
+        self.args_vus = {}
 
     def read_text(self, path):
         self.journal.append(("read", path))
@@ -304,6 +309,7 @@ class FakeGuest:
 
     def retro(self, args):
         self.journal.append(("retro", args[0]))
+        self.args_vus[args[0]] = list(args)
         if args[0] in self.leve:
             raise self.leve[args[0]]
         return self.codes.get(args[0], 0), f"rapport {args[0]}"
@@ -380,6 +386,21 @@ check("... et porte le passage COURANT, pas celui du temoin d avant",
       "R1")
 _reste = [a for a in _appels[2:] if a != ("read", retro_sync.STATUS_FILE)]
 check("le scan precede la sentinelle", _reste[0], ("retro", "scan"))
+# Sans --emulation-root-local, `retro scan` fabrique les chemins d executables
+# depuis le manifeste SANS verifier qu ils existent : une installation
+# partielle peuplerait Steam d entrees qui ne demarrent pas (voir la
+# docstring du module). `retro scan` tourne DANS l invite (guest.retro), donc
+# « cette machine » et « la console », du point de vue de cette commande-la,
+# designent le MEME disque : la valeur locale doit etre celle de
+# --emulation-root, pas un chemin cote hote.
+_args_scan = g.args_vus["scan"]
+check("le scan verifie les executables sur le disque local",
+      "--emulation-root-local" in _args_scan, True)
+if "--emulation-root-local" in _args_scan:
+    check("... avec la racine que la commande, qui tourne dans l invite, "
+          "atteint elle-meme (meme valeur que --emulation-root)",
+          _args_scan[_args_scan.index("--emulation-root-local") + 1],
+          retro_sync.EMULATION_ROOT)
 check("la sentinelle est posee AVANT l arret de Steam",
       _reste[1], ("write", retro_sync.HOLD_FILE))
 check("Steam est arrete avant la synchronisation", _reste[2][0], "ps")
