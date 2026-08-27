@@ -538,6 +538,20 @@ refus = run_resolve(m, HW_SANS_GPU, {"dedicated_nvme": "/dev/nvme1n1",
 check("sans GPU dedie, resolve refuse", refus.ok, False)
 check("et il dit pourquoi", "GPU" in refus.reason, True)
 
+# Une topologie CPU malformee doit devenir un refus, pas une trace
+# d exception : isolation_plan leve HardwareError, et ce que resolve rend
+# atterrit sur la ligne de commande NOYAU.
+HW_CPU_CASSE = {
+    **HW_SANS_GPU,
+    "gpus": [{"slot": "01:00.0", "vendor": "nvidia", "discrete": True}],
+    "cpu": {"hybrid": True, "performance_cpus": [-1, 0], "total_cpus": 8},
+}
+refus_cpu = run_resolve(m, HW_CPU_CASSE, {"dedicated_nvme": "",
+                                          "admin_password": "x", "retro": False})
+check("une topologie CPU malformee est refusee", refus_cpu.ok, False)
+check("et le refus la nomme",
+      "CPU" in refus_cpu.reason or "cpu" in refus_cpu.reason, True)
+
 # --- resolve sur un materiel plausible ----------------------------------- #
 # ATTENTION : au-dela du GPU, resolve appelle hardware.passthrough_nvme(),
 # qui lit le VRAI lspci de la machine qui execute ce test. Son issue depend
@@ -701,7 +715,19 @@ def main() -> int:
             return 0
 
     ids.append(nvme["id"])
-    plan = hardware.isolation_plan(hw.get("cpu") or {})
+
+    # isolation_plan RAISES on a malformed CPU snapshot rather than translating
+    # it: what it returns lands on the kernel command line, and the allowlist
+    # downstream guards shell metacharacters only - it would happily pass a
+    # semantically nonsensical range like "-1-1". Same contract as
+    # passthrough_nvme above, so the same treatment: a refusal, not a traceback.
+    try:
+        plan = hardware.isolation_plan(hw.get("cpu") or {})
+    except hardware.HardwareError as exc:
+        emit({"event": "refuse",
+              "reason": f"topologie CPU inexploitable : {exc}"})
+        return 0
+
     cmdline = [f"vfio-pci.ids={','.join(ids)}"]
     if plan["nohz_full"]:
         cmdline.append(f"nohz_full={plan['nohz_full']}")
