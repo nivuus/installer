@@ -223,8 +223,18 @@ def payload_tree(directory: str) -> dict[str, str]:
 # from inside the package. About 200 KiB in total - reading them is the same
 # trade-off already made for media_identity, on the cheap side of it: a few
 # code files are affordable to hash, several gigabytes of medium are not.
+# fetch_payload.py is in this list, and the reason is worth stating because
+# the obvious one is WRONG: it is not "covered by payload_tree() anyway".
+# payload_done() is deliberately shallow - a non-empty payload directory is
+# enough for it - so a changed downloader never re-runs, the tree never moves,
+# and its change would reach the fingerprint through nothing at all. Hashing
+# the file itself is the only signal that the downloader changed. It buys the
+# ISO rebuild, not a re-fetch: the payload on disk still has to be removed by
+# hand for new pins to be downloaded. That gap belongs to payload_done(), not
+# here, and is left named rather than papered over.
 BUILD_INPUT_FILES = ("build.py", "unattend_iso.py", "autounattend.py",
-                     "apollo.py", "media.py", "payload.py")
+                     "apollo.py", "media.py", "payload.py",
+                     "fetch_payload.py")
 BUILD_INPUT_DIRS = ("templates", "provision", "probe", "assets")
 
 # The modules under guest/ that deliberately do NOT enter the fingerprint,
@@ -241,10 +251,6 @@ BUILD_INPUT_EXCLUDED = {
     "domain.py": "shapes the domain, not the image",
     # Same, for the throwaway HDR bench domain: never part of the console.
     "testdomain.py": "throwaway bench domain, never shipped",
-    # Produces the payload tree, whose CONTENT is already hashed by
-    # payload_tree(). Hashing the fetcher too would rebuild on a change that
-    # provably downloaded the same bytes.
-    "fetch_payload.py": "its output is fingerprinted by payload_tree()",
     # Host-side, post-install and optional: replays `retro install` against a
     # guest that already exists. Nothing of it is staged into the ISO.
     "retro_sync.py": "runs on the host after the install, not in the image",
@@ -527,8 +533,46 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         runner(build_cmd)
         write_build_stamp(stamp, fingerprint())
 
+    def defined_xml() -> str | None:
+        """The domain's current definition, or None when it is not defined."""
+        proc = virsh("dumpxml", DOMAIN_NAME)
+        if getattr(proc, "returncode", 1) != 0:
+            return None         # unreachable libvirtd is not "already done"
+        return proc.stdout or ""
+
     def domain_defined() -> bool:
-        return getattr(virsh("dumpxml", DOMAIN_NAME), "returncode", 1) == 0
+        """Is the INSTALL domain defined - not merely "a domain named Windows".
+
+        The distinction is the whole point. This step now emits a domain
+        carrying BOTH install media; "it exists" was a sufficient predicate
+        only while it emitted one single XML. A pre-existing Windows domain
+        without the media - the nominal case when reinstalling a console, and
+        the case on any host that has ever run one - would otherwise let the
+        step skip, and `start` would boot a blank NVMe with no error anywhere.
+        So compare what IS defined against what SHOULD be: both media, by
+        path, in the definition libvirt holds.
+        """
+        xml = defined_xml()
+        if xml is None:
+            return False
+        return source_iso in xml and str(iso_out) in xml
+
+    def define_argv() -> list[str]:
+        """The argv to define with, --replace added only when one is there.
+
+        guard_replace() refuses to redefine an existing domain without it, so
+        without this the step would fail on exactly the case domain_defined()
+        just declared undone. It is never passed blindly: on a fresh host
+        there is nothing to replace, and the flag stays off.
+
+        This DOES discard a hibernated session on a host where "Windows" is
+        already the owner's production VM. guard_fresh_varstore() is the
+        remaining backstop - it refuses while the old varstore is there, and
+        clearing it is deliberate operator action.
+        """
+        if defined_xml() is None:
+            return define_cmd
+        return define_cmd + ["--replace"]
 
     def domain_up() -> bool:
         proc = virsh("domstate", DOMAIN_NAME)
@@ -543,7 +587,9 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
              None, "fetch the offline payload binaries"),
         Step("build", build_done, build_run, build_cmd, fingerprint,
              "build the unattended Windows ISO"),
-        Step("define", domain_defined, lambda: runner(define_cmd), define_cmd,
+        # `command` is the argv for a fresh host; define_argv() appends
+        # --replace at run time when a stale domain is actually there.
+        Step("define", domain_defined, lambda: runner(define_argv()), define_cmd,
              None, "define the libvirt domain from detected hardware"),
         Step("start", domain_up, lambda: runner(start_cmd), start_cmd, None,
              "start the guest so Windows Setup runs unattended"),

@@ -186,9 +186,15 @@ check("les deux medias sont bien ceux demandes",
 # installations : bus sata, cibles sdb/sdc, readonly sur les deux.
 check("les deux medias sont sur le bus sata",
       [c.find("target").get("bus") for c in install_cdroms], ["sata", "sata"])
-check("les deux medias ont des cibles distinctes",
-      sorted(c.find("target").get("dev") for c in install_cdroms),
-      ["sdb", "sdc"])
+# APPARIE, pas ensembliste : « sdb et sdc sont tous deux presents » reste vrai
+# si les deux medias sont intervertis, et un media officiel monte sur sdc
+# derriere une ISO de reponses sur sdb est un domaine qui n installe rien.
+# Meme trou que --password-file / --apollo-password-file a la tache 3.
+_par_lecteur = {c.find("target").get("dev"): c.find("source").get("file")
+                for c in install_cdroms}
+check("chaque media est sur SON lecteur", _par_lecteur,
+      {"sdb": "/media/backup/ltsc.iso",
+       "sdc": "/var/lib/nivuus/guest/nivuus-unattend.iso"})
 check("les deux medias sont en lecture seule",
       [c.find("readonly") is not None for c in install_cdroms], [True, True])
 
@@ -239,6 +245,88 @@ check("une chaine vide compte comme absente",
 check("la paire complete est rendue telle quelle",
       domain.install_media("/m/w.iso", "/v/u.iso"),
       {"windows_iso": "/m/w.iso", "unattend_iso": "/v/u.iso"})
+
+
+# --- le cablage argv -> XML, medias compris ------------------------------ #
+# main() n etait exerce qu en mode REGIME, et deux mutations passaient alors
+# TOUTE la suite au vert (mesurees a la revue) :
+#   * build_domain_xml() transmettant windows_iso aux DEUX medias - l invite
+#     n a plus d autounattend.xml et Setup reste sur l ecran de langue,
+#     indefiniment ;
+#   * main() intervertissant les deux drapeaux - l ordre d amorcage atterrit
+#     sur une ISO qui n est pas amorcable.
+# Les deux vivent ENTRE argv et domain_xml(), segment que rien ne traversait.
+# Le materiel est simule pour que ce controle vaille sur n importe quel
+# constructeur ; tout le reste du chemin est reel, du parse des arguments au
+# rendu du gabarit.
+_orig_hw = {name: getattr(hardware, name) for name in
+            ("list_gpus", "cpu_topology", "passthrough_nvme",
+             "pci_slot_functions")}
+_orig_uuid = domain.existing_uuid
+try:
+    hardware.list_gpus = lambda: [{"discrete": True, "slot": "0000:01:00.0"}]
+    hardware.cpu_topology = lambda: {"performance_cpus": list(range(16)),
+                                     "total_cpus": 24}
+    hardware.passthrough_nvme = lambda: dict(NVME)
+    hardware.pci_slot_functions = lambda slot: [dict(g) for g in GPU]
+    domain.existing_uuid = lambda *a, **k: None
+
+    def _main_xml(argv):
+        """Run main() on this argv and return (rc, stdout)."""
+        out, err = io.StringIO(), io.StringIO()
+        saved = sys.argv
+        sys.argv = argv
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = domain.main()
+        finally:
+            sys.argv = saved
+        return rc, out.getvalue()
+
+    _rc, _out = _main_xml(["domain.py", "xml",
+                           "--windows-iso", "/m/officiel.iso",
+                           "--unattend-iso", "/v/reponses.iso"])
+    check("main() rend 0 avec les deux medias", _rc, 0)
+    # Un XML absent doit produire un ECHEC NOMME, jamais une trace : une
+    # mutation qui fait refuser main() (deux fois le meme media, par exemple)
+    # laisse stdout vide, et un ET.fromstring("") nu tuerait tout le fichier
+    # avant que la moindre ligne d echec ne soit imprimee.
+    _mcd = []
+    if _rc == 0 and _out.strip():
+        _mcd = [d for d in ET.fromstring(_out).findall("devices/disk")
+                if d.get("device") == "cdrom"]
+    else:
+        failures.append(
+            f"argv -> XML : main() n a produit aucun XML exploitable (code "
+            f"{_rc}), donc l appariement des medias n a pas pu etre verifie")
+    # APPARIEMENT, pas presence : c est precisement ce que les deux mutations
+    # cassent sans qu aucune assertion ensembliste ne bronche.
+    check("argv -> XML : chaque media atterrit sur SON lecteur",
+          {c.find("target").get("dev"): c.find("source").get("file")
+           for c in _mcd},
+          {"sdb": "/m/officiel.iso", "sdc": "/v/reponses.iso"})
+    check("argv -> XML : un seul ordre d amorcage",
+          _out.count("<boot order="), 1)
+    check("argv -> XML : et il porte sur le media Windows, pas sur les reponses",
+          [c.find("source").get("file")
+           for c in _mcd if c.find("boot") is not None],
+          ["/m/officiel.iso"])
+
+    # Le meme main(), sans drapeau, rend le domaine de regime.
+    _rc2, _out2 = _main_xml(["domain.py", "xml"])
+    check("main() sans drapeau rend le domaine de regime", _rc2, 0)
+    check("et ce domaine ne monte aucun cdrom", "cdrom" in _out2, False)
+
+    # Les refus traversent main() en code 1, jamais en trace.
+    check("main() refuse une paire incomplete",
+          _main_xml(["domain.py", "xml", "--windows-iso", "/m/officiel.iso"])[0], 1)
+    check("main() refuse deux fois le meme fichier",
+          _main_xml(["domain.py", "xml", "--windows-iso", "/m/x.iso",
+                     "--unattend-iso", "/m/x.iso"])[0], 1)
+finally:
+    for _name, _fn in _orig_hw.items():
+        setattr(hardware, _name, _fn)
+    domain.existing_uuid = _orig_uuid
 
 
 # domain_in_listing() must correctly parse virsh list --all --name output

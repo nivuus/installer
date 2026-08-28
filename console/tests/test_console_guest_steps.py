@@ -318,7 +318,9 @@ with tempfile.TemporaryDirectory() as tmp:
     check("define appelle domain.py define",
           define_cmd[1].endswith("guest/domain.py") and define_cmd[2] == "define",
           True)
-    check("define ne passe pas --replace, qui jetterait la session hibernee",
+    # `command` est l argv d une machine vierge ; --replace n est ajoute qu au
+    # lancement, et seulement si un domaine est reellement la (voir plus bas).
+    check("l argv de base ne porte pas --replace",
           "--replace" in define_cmd, False)
     # DEUX medias, et pas n importe lesquels. Le gabarit de production amorce
     # sinon le NVMe, vierge a ce stade : Setup ne demarrerait jamais. Le media
@@ -421,11 +423,28 @@ with tempfile.TemporaryDirectory() as tmp:
                  steps.GuestBuildError, gone["build"].run)
 
 # define / start: driven entirely by the injected virsh.
+#
+# « le domaine Windows existe » NE SUFFIT PLUS comme predicat de define, et
+# c est le coeur de l affaire : cette etape emet desormais le domaine
+# d INSTALLATION, medias attaches. Un domaine Windows preexistant SANS medias
+# - le cas nominal d une console qu on reinstalle, et le cas de toute machine
+# qui en a deja fait tourner un - ferait sinon sauter l etape, et `start`
+# amorcerait un NVMe vierge sans que rien ne le signale.
+def installed_xml(tmp, windows_iso=None):
+    """Le XML que virsh rendrait pour un domaine d installation correct."""
+    windows = windows_iso or ANSWERS["windows_iso"]
+    unattend = os.path.join(tmp, "nivuus-unattend.iso")
+    return ("<domain><devices>"
+            f"<disk device='cdrom'><source file='{windows}'/></disk>"
+            f"<disk device='cdrom'><source file='{unattend}'/></disk>"
+            "</devices></domain>")
+
+
 with tempfile.TemporaryDirectory() as tmp:
     v = FakeVirsh(RUNNING)
     st = by_name(plan(tmp, v))
-    check("define est fait quand virsh dumpxml repond",
-          st["define"].already_done(), True)
+    check("un domaine sans medias ne fait PAS sauter define",
+          st["define"].already_done(), False)
     check("start est fait quand le domaine ne dit pas shut off",
           st["start"].already_done(), True)
     check("les predicats interrogent bien virsh sur le domaine",
@@ -434,8 +453,67 @@ with tempfile.TemporaryDirectory() as tmp:
 
 with tempfile.TemporaryDirectory() as tmp:
     st = by_name(plan(tmp, FakeVirsh(OFF)))
-    check("define est fait mais start ne l est pas sur un domaine eteint",
-          (st["define"].already_done(), st["start"].already_done()), (True, False))
+    check("un domaine eteint sans medias ne fait sauter ni define ni start",
+          (st["define"].already_done(), st["start"].already_done()), (False, False))
+
+# ... et un domaine qui porte DEJA les deux bons medias, lui, est fait.
+with tempfile.TemporaryDirectory() as tmp:
+    ok = {"dumpxml": (0, installed_xml(tmp)), "domstate": (0, "shut off\n")}
+    st = by_name(plan(tmp, FakeVirsh(ok)))
+    check("un domaine portant les deux medias fait sauter define",
+          st["define"].already_done(), True)
+
+# Un SEUL des deux medias ne suffit pas : c est exactement le domaine a demi
+# defini qui installe un ecran de langue et rien d autre.
+with tempfile.TemporaryDirectory() as tmp:
+    moitie = ("<domain><devices><disk device='cdrom'>"
+              f"<source file='{ANSWERS['windows_iso']}'/></disk>"
+              "</devices></domain>")
+    st = by_name(plan(tmp, FakeVirsh({"dumpxml": (0, moitie),
+                                      "domstate": (0, "shut off\n")})))
+    check("un domaine ne portant qu un seul media n est pas fait",
+          st["define"].already_done(), False)
+
+# Un domaine portant les medias d une AUTRE installation (autre ISO source)
+# n est pas le notre : il doit etre redefini.
+with tempfile.TemporaryDirectory() as tmp:
+    autre = {"dumpxml": (0, installed_xml(tmp, "/media/backup/une-autre.iso")),
+             "domstate": (0, "shut off\n")}
+    st = by_name(plan(tmp, FakeVirsh(autre)))
+    check("un domaine portant un autre media source n est pas fait",
+          st["define"].already_done(), False)
+
+# --- --replace : seulement quand il y a vraiment quelque chose a remplacer - #
+# guard_replace() refuse de redefinir un domaine existant sans lui, donc sans
+# cela l etape echouerait sur le cas meme que le predicat vient de declarer
+# non fait. Mais il ne doit pas etre passe a l aveugle : sur une machine
+# vierge il n y a rien a remplacer.
+def lance(tmp, virsh_answers):
+    """L argv REELLEMENT lance par define, via un lanceur qui l enregistre."""
+    vus = []
+    given = dict(ANSWERS, guest_workdir=tmp)
+    steps_list = steps.plan_steps(given, {}, tmp, virsh=FakeVirsh(virsh_answers),
+                                  runner=vus.append,
+                                  size_of=lambda d: DISK_BYTES)
+    by_name(steps_list)["define"].run()
+    return vus[0]
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    frais = lance(tmp, NO_DOMAIN)
+    check("sur une machine vierge, define ne passe pas --replace",
+          "--replace" in frais, False)
+    perime = lance(tmp, RUNNING)
+    check("face a un domaine preexistant, define passe --replace",
+          "--replace" in perime, True)
+    # Et il garde les deux medias dans les deux cas : --replace s ajoute, il
+    # ne remplace rien de la ligne.
+    for etiquette, argv in (("vierge", frais), ("preexistant", perime)):
+        check(f"define ({etiquette}) garde le media Windows",
+              arg(argv, "--windows-iso"), ANSWERS["windows_iso"])
+        check(f"define ({etiquette}) garde l ISO de reponses",
+              arg(argv, "--unattend-iso"),
+              os.path.join(tmp, "nivuus-unattend.iso"))
 
 with tempfile.TemporaryDirectory() as tmp:
     # virsh unreachable: never read as "already done". An unreachable

@@ -144,6 +144,18 @@ def install_media(windows_iso: str | None,
             "install domain needs BOTH the official Windows medium (which "
             "boots) and the ISO build.py produced (which Setup reads once "
             "booted). Pass --windows-iso and --unattend-iso, or neither.")
+    if windows == unattend:
+        # The two are different objects by construction, so one path in both
+        # slots is a caller wiring both flags to the same variable. Left
+        # unchecked it renders a domain that looks healthy - two drives, one
+        # boot order - and installs nothing: whichever ISO it is, the guest
+        # is missing the other half. Setup then sits on the language screen
+        # forever, with no error anywhere.
+        raise DomainError(
+            f"both install media point at the same file ({windows}): the "
+            "official Windows medium and the ISO build.py produced are two "
+            "different files, and a domain carrying one of them twice can "
+            "never complete Setup.")
     return {"windows_iso": windows, "unattend_iso": unattend}
 
 
