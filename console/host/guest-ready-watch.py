@@ -58,11 +58,17 @@ full, anything) never gets retried, and the domain keeps its install media
 forever - the exact failure this whole mechanism exists to prevent. See
 main()'s READY branch.
 
-The IP-discovery method (virsh domifaddr, agent source then lease source)
-is copied from handle-vm-start.sh, not reinvented - see that script for why
-each source is tried in that order and why either can legitimately come up
-empty here (no guest-agent channel yet, and this bridge is externally
-managed, not a libvirt network with its own lease file).
+The IP-discovery method is the host's own neighbour table, keyed by the
+domain's MAC address (see find_guest_ip()) - NOT virsh domifaddr, which
+handle-vm-start.sh also uses but which cannot ever answer on this topology.
+Measured on the running production VM (2026-08-28): `--source agent` fails
+(the domain declares no <channel>, so no guest agent ever answers),
+`--source lease` and `--source arp` both return empty tables, and `virsh
+net-list --all` declares no libvirt network at all - the domain sits on an
+externally managed bridge, not a libvirt one with a lease file of its own.
+handle-vm-start.sh carries the same defect; it goes unnoticed there only
+because started/begin/rules.sh installs the forward-ports unconditionally,
+regardless of whether the IP lookup found anything.
 
 Deployed to /usr/local/sbin/ by console/hooks/install.py, armed (as a timer
 only - nivuus-guest-ready.service carries no [Install] section of its own,
@@ -81,10 +87,6 @@ import sys
 import time
 
 VM_NAME = "Windows"
-# guest/domain.py's own BRIDGE constant. Copied, not imported: this script
-# is deployed standalone under /usr/local/sbin/ - the same reason
-# handle-vm-start.sh and vm-idle-shutdown.sh do not import from console/.
-VM_INTERFACE = "internalBridge"
 WINRM_PORT = 5985
 PORT_PROBE_TIMEOUT_S = 3
 
@@ -99,11 +101,12 @@ STATE_DIR = "/var/lib/nivuus"
 STATE_PATH = os.path.join(STATE_DIR, "guest-ready-state.json")
 
 # installer/packages/discovery.py's PACKAGES_DIR default, plus this
-# package's own name (console/nivuus-package.yaml). Copied, not imported,
-# for the same standalone-script reason as VM_INTERFACE above:
-# apply_packages() copies the whole package tree there once, at install
-# time, and never removes it - so guest/domain.py is reliably at this path
-# on any machine where this script itself is running.
+# package's own name (console/nivuus-package.yaml). Copied, not imported:
+# this script is deployed standalone under /usr/local/sbin/, the same
+# reason handle-vm-start.sh and vm-idle-shutdown.sh do not import from
+# console/. apply_packages() copies the whole package tree there once, at
+# install time, and never removes it - so guest/domain.py is reliably at
+# this path on any machine where this script itself is running.
 DOMAIN_PY = "/opt/nivuus-packages/console/guest/domain.py"
 
 NOT_STARTED = "not_started"
@@ -113,6 +116,12 @@ READY = "ready"
 TERMINAL_STATES = frozenset({FAILED, READY})
 
 _IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+# Both single and double quotes are tolerated even though every real sample
+# measured on this host used single quotes (virsh dumpxml AND the Step-2
+# test double agree) - a defensive margin against a libvirt version that
+# quotes XML attributes differently costs nothing here.
+_MAC_RE = re.compile(r"mac address=['\"]([0-9a-fA-F:]+)['\"]")
+_BRIDGE_RE = re.compile(r"source bridge=['\"]([^'\"]+)['\"]")
 
 
 def classify(*, domstate: str, port_open: bool, elapsed_s: float) -> str:
@@ -148,28 +157,86 @@ def query_domstate(vm_name: str = VM_NAME, run=subprocess.run) -> str:
     return (proc.stdout or "").strip()
 
 
-def find_guest_ip(vm_name: str = VM_NAME, interface: str = VM_INTERFACE,
-                  run=subprocess.run) -> str | None:
-    """The guest's IP, by the same method handle-vm-start.sh already uses:
-    try the QEMU guest agent first, then libvirt's own lease record.
+def query_dumpxml(vm_name: str = VM_NAME, run=subprocess.run) -> str:
+    """The domain's XML, or "" when libvirt cannot answer - same convention
+    as query_domstate()."""
+    proc = run(["virsh", "dumpxml", vm_name], capture_output=True, text=True,
+               env=dict(os.environ, LC_ALL="C", LANG="C"))
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout or ""
 
-    Neither source is guaranteed to answer here - this console has no
-    guest-agent channel until the agent stage of provisioning runs, and
-    the bridge is externally managed (NetworkManager's dnsmasq-shared, not
-    a libvirt network with its own lease file) - so a miss on both is
-    expected during most of an install, not a bug. None means "cannot
-    check the port yet", nothing more.
+
+def query_neigh(bridge: str, run=subprocess.run) -> str:
+    """Raw `ip neigh show dev <bridge>` output, or "" on failure.
+
+    NOTE the measured format gotcha: with the `dev <bridge>` filter applied,
+    iproute2 OMITS the `dev <bridge>` token from each line (it is redundant
+    once filtered) - only the unfiltered `ip neigh show` includes it. Both
+    were measured on this host (iproute2-6.15.0) for Task 1's Step 1. The
+    parser in find_guest_ip() below never assumes that token is present.
     """
-    env = dict(os.environ, LC_ALL="C", LANG="C")
-    for source in ("agent", "lease"):
-        proc = run(["virsh", "domifaddr", vm_name, "--interface", interface,
-                    "--source", source], capture_output=True, text=True,
-                   env=env)
-        if proc.returncode != 0:
+    proc = run(["ip", "neigh", "show", "dev", bridge], capture_output=True,
+               text=True, env=dict(os.environ, LC_ALL="C", LANG="C"))
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout or ""
+
+
+def find_guest_ip(vm_name: str = VM_NAME, run=subprocess.run,
+                  dumpxml=None, neigh=None) -> str | None:
+    """The guest's IPv4, found through the host's neighbour table rather
+    than through any of libvirt's own IP-discovery sources - see the module
+    docstring for why none of those (agent, lease, arp) can ever answer on
+    this topology, measured on the running production VM.
+
+    What DOES work, measured the same day: the domain XML declares its own
+    MAC address and bridge; the host's neighbour table on that bridge
+    associates the MAC with an IP once the guest has spoken at all (DHCP
+    request, gratuitous ARP, any traffic) - no libvirt network, no guest
+    agent channel, required. A MAC absent from the table means the guest
+    has not spoken yet, which is a state to report (see classify()), not an
+    error to raise - so this returns None, never raises, on every miss.
+
+    IPv6 neighbour entries carry the SAME MAC (link-local, always present
+    once a guest is up) and are deliberately skipped: returning one would
+    send the WinRM probe (see probe_port()) to an address the guest is not
+    listening on.
+
+    `dumpxml`/`neigh` are injected as bare callables - dumpxml() takes no
+    argument, neigh(bridge) takes the bridge name found in the XML - rather
+    than a `run=` shim, so tests can hand back literal strings without also
+    reimplementing subprocess.CompletedProcess. See
+    test_console_guest_ready.py.
+    """
+    dumpxml = dumpxml or (lambda: query_dumpxml(vm_name, run=run))
+    neigh = neigh or (lambda bridge: query_neigh(bridge, run=run))
+
+    xml = dumpxml() or ""
+    mac_match = _MAC_RE.search(xml)
+    bridge_match = _BRIDGE_RE.search(xml)
+    if not mac_match or not bridge_match:
+        return None
+    mac = mac_match.group(1).lower()
+    bridge = bridge_match.group(1)
+
+    table = neigh(bridge) or ""
+    for line in table.splitlines():
+        tokens = line.split()
+        if not tokens:
             continue
-        match = _IPV4_RE.search(proc.stdout or "")
-        if match:
-            return match.group(0)
+        ip = tokens[0]
+        if ":" in ip:
+            # IPv6 - never returned, see the docstring above.
+            continue
+        lower_tokens = [t.lower() for t in tokens]
+        if "lladdr" not in lower_tokens:
+            continue
+        lladdr_idx = lower_tokens.index("lladdr")
+        if lladdr_idx + 1 >= len(tokens):
+            continue
+        if lower_tokens[lladdr_idx + 1] == mac:
+            return ip
     return None
 
 

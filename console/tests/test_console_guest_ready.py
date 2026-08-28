@@ -4,10 +4,12 @@
 activate.py's 'start' step launches Windows Setup and returns immediately;
 without this script, "installing" and "failed" are indistinguishable for an
 hour, then forever. This suite proves the four-way classification fires for
-the right reason in each case, that the IP lookup reuses handle-vm-start.sh's
-own method rather than inventing a second one, that a READY guest triggers a
-media-less redefinition of the domain, and that the timer stops itself only
-once a state is ACTUALLY terminal.
+the right reason in each case, that the IP lookup uses the host's own
+neighbour table (the only source that answers on this topology - measured
+on the running production VM, see find_guest_ip()'s docstring) rather than
+virsh domifaddr, that a READY guest triggers a media-less redefinition of
+the domain, and that the timer stops itself only once a state is ACTUALLY
+terminal.
 
 guest-ready-watch.py's own subprocess calls (virsh, systemctl, domain.py
 define) are never launched for real: every one of those dependencies is
@@ -97,29 +99,22 @@ check("au seuil pile : echec",
       watch.FAILED)
 
 
-# --- IP discovery: the SAME method as handle-vm-start.sh - agent first, ---
-# then lease - never a third, invented source. --------------------------- #
+# --- IP discovery: the host's neighbour table, keyed by the domain's own --
+# MAC/bridge - NOT virsh domifaddr (agent/lease/arp), which handle-vm-start.sh
+# also uses but which cannot ever answer on this topology. See the module
+# docstring on find_guest_ip() for the 2026-08-28 measurement on the running
+# production VM that established this. ------------------------------------ #
 
 class FakeVirshCall:
-    """Implements the full interface query_domstate()/find_guest_ip() read
-    off a subprocess.run() result: returncode, stdout, stderr. A fake
-    missing one of these would make the fake pass for reasons that have
-    nothing to do with the code under test."""
+    """Implements the full interface query_domstate() reads off a
+    subprocess.run() result: returncode, stdout, stderr. A fake missing one
+    of these would make the fake pass for reasons that have nothing to do
+    with the code under test."""
 
     def __init__(self, returncode=0, stdout="", stderr=""):
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
-
-
-AGENT_TABLE_HIT = (
-    " Name       MAC address          Protocol     Address\n"
-    "-------------------------------------------------------------------------------\n"
-    " vnet25     52:54:00:48:e0:3e    ipv4         192.168.3.2/24\n\n")
-LEASE_TABLE_HIT = AGENT_TABLE_HIT
-EMPTY_TABLE = (
-    " Name       MAC address          Protocol     Address\n"
-    "-------------------------------------------------------------------------------\n\n")
 
 
 def recording_run(script):
@@ -136,32 +131,59 @@ def recording_run(script):
     return run, calls
 
 
-run, calls = recording_run({("domifaddr", "agent"): FakeVirshCall(0, AGENT_TABLE_HIT)})
-ip = watch.find_guest_ip(run=run)
-check("agent source alone: IP found", ip, "192.168.3.2")
-check("agent hit: lease is never tried", len(calls), 1)
-check("the call targets the domain's own bridge (domain.py's BRIDGE)",
-      "--interface" in calls[0] and
-      calls[0][calls[0].index("--interface") + 1] == watch.VM_INTERFACE,
-      True)
-check("agent is tried first, exactly like handle-vm-start.sh",
-      calls[0][-2:], ["--source", "agent"])
+# The neighbour table is the only source that works on this topology: the
+# domain sits on an EXTERNAL bridge, so libvirt has no lease to hand out and
+# no guest agent answers. Measured on the running production VM.
+XML = "<domain><devices><interface type='bridge'>" \
+      "<mac address='52:54:00:48:e0:3e'/>" \
+      "<source bridge='internalBridge'/></interface></devices></domain>"
+NEIGH = ("192.168.3.2 dev internalBridge lladdr 52:54:00:48:e0:3e REACHABLE\n"
+         "fe80::426f:90c7:b3a2:c6b dev internalBridge lladdr "
+         "52:54:00:48:e0:3e STALE\n")
+check("l IPv4 est trouvee par le MAC du domaine",
+      watch.find_guest_ip(dumpxml=lambda: XML, neigh=lambda br: NEIGH),
+      "192.168.3.2")
 
-run, calls = recording_run({
-    ("domifaddr", "agent"): FakeVirshCall(0, EMPTY_TABLE),
-    ("domifaddr", "lease"): FakeVirshCall(0, LEASE_TABLE_HIT),
-})
-ip = watch.find_guest_ip(run=run)
-check("agent empty, lease hit: IP found via lease", ip, "192.168.3.2")
-check("both sources tried, agent first", [c[-2:] for c in calls],
-      [["--source", "agent"], ["--source", "lease"]])
+# An IPv6 entry carries the same MAC. Returning it would send the WinRM probe
+# to an address the guest does not listen on.
+check("l IPv6 n est jamais rendue a la place",
+      ":" in (watch.find_guest_ip(dumpxml=lambda: XML,
+                                  neigh=lambda br: NEIGH) or ""), False)
 
-run, calls = recording_run({
-    ("domifaddr", "agent"): FakeVirshCall(1, "", "agent not configured"),
-    ("domifaddr", "lease"): FakeVirshCall(0, EMPTY_TABLE),
-})
-ip = watch.find_guest_ip(run=run)
-check("neither source has an answer: None, not an exception", ip, None)
+# A MAC that is not in the table means the guest has not spoken yet - which is
+# a state to report, not an error to raise.
+check("un invite muet rend None",
+      watch.find_guest_ip(dumpxml=lambda: XML, neigh=lambda br: ""), None)
+
+# The MAC comparison must not depend on case: `ip neigh` and libvirt do not
+# agree on it across versions.
+check("la comparaison de MAC ignore la casse",
+      watch.find_guest_ip(dumpxml=lambda: XML,
+                          neigh=lambda br: NEIGH.upper()), "192.168.3.2")
+
+# The bridge queried is the one the domain XML declares, not a hardcoded
+# name - a domain on a different bridge must be looked up there instead.
+seen_bridges = []
+watch.find_guest_ip(dumpxml=lambda: XML,
+                    neigh=lambda br: seen_bridges.append(br) or NEIGH)
+check("neigh() is called with the bridge the domain XML declares",
+      seen_bridges, ["internalBridge"])
+
+# No mac/bridge in the XML at all (domain not yet defined, or no interface
+# element parsed): nothing to look up, so None - not an exception.
+check("no mac/bridge in the domain XML: None, not an exception",
+      watch.find_guest_ip(dumpxml=lambda: "<domain/>", neigh=lambda br: NEIGH),
+      None)
+
+# Measured gotcha from Task 1's Step 1: `ip neigh show dev <bridge>` (the
+# dev-filtered form query_neigh() actually runs) OMITS the `dev <bridge>`
+# token per line - only the unfiltered `ip neigh show` includes it. The
+# parser must not depend on that token being present.
+NEIGH_NO_DEV_TOKEN = "192.168.3.2 lladdr 52:54:00:48:e0:3e REACHABLE\n"
+check("the parser does not depend on the optional dev token",
+      watch.find_guest_ip(dumpxml=lambda: XML,
+                          neigh=lambda br: NEIGH_NO_DEV_TOKEN),
+      "192.168.3.2")
 
 run, _ = recording_run({("domstate", None): FakeVirshCall(0, "running\n")})
 check("query_domstate strips the trailing newline",
@@ -374,7 +396,8 @@ if failures:
         print(f"FAIL - {item}")
     sys.exit(1)
 print("OK - the four states classify for the right reason, IP discovery "
-      "reuses handle-vm-start.sh's own method, the redefinition argv "
+      "uses the host's neighbour table keyed by the domain's MAC (the only "
+      "source that answers on this topology), the redefinition argv "
       "survives domain.py's REAL guards (--keyed-varstore fix), and the "
       "timer stops on READY only once that redefinition has actually "
       "succeeded")
