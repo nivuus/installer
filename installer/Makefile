@@ -59,15 +59,16 @@ test-vm:
 # is the only aggregator there is - and an aggregator that fails for a missing
 # dependency reads as "the engine is broken", which is the wrong thing to learn.
 #
-# 30 suites (2026-08-28): the original 9, the 6 the console-package phase
-# created or touched, test_console_host_files for versioned-not-deployed files,
-# test_console_wake_units for the VM wake socket units, test_console_activate
-# for the phase that arms them, test_vm_wake_gate for the wake gate itself
-# (it already targets console/host/vm-wake-gate.py and needs neither root nor
-# network - the branch wired the wake UNITS in and left the suite testing the
-# gatekeeper out), and all 11 test_windows_guest_* suites, which run clean
-# standalone (no root, no network, no mounted Windows medium) and were simply
-# never wired into any aggregator before. NOTE: a green run here is not proof
+# 30 suites (2026-08-28, measured): 11 run directly below (the engine/webapp/
+# packages suites that stay outside console/), and 19 are delegated to
+# `console/Makefile`'s own `test` target - the 20 suites that test code living
+# under console/ moved to console/tests/ so that a later `git filter-repo
+# --path console` is mechanical (everything the package owns is already
+# under it); test_handle_vm_start.sh moved with them but was never part of
+# this count, since it is shell, not Python, and this loop only ever ran
+# .py files - see console/Makefile for why it stays unwired. PYTHON is
+# propagated to the sub-make so the console suites that need pydantic don't
+# silently fall back to a bare python3. NOTE: a green run here is not proof
 # that installer/windows-guest/domain.py works - see CLAUDE.md, Installer
 # Architecture, for the coverage gap both domain suites share.
 PYTHON ?= python3
@@ -78,20 +79,12 @@ test-packages:
 	          test_packages_wizard test_packages_runner \
 	          test_install_engine_bootloader test_install_engine_packages \
 	          test_webapp_models \
-	          test_common_hardware test_console_hardware test_console_resolve \
-	          test_console_install test_console_host_files test_console_wake_units \
-	          test_console_activate test_vm_wake_gate \
-	          test_install_engine_features \
-	          test_retro_marker_bridge \
-	          test_windows_guest_apollo test_windows_guest_autounattend \
-	          test_windows_guest_build test_windows_guest_domain \
-	          test_windows_guest_fetch_payload test_windows_guest_iso \
-	          test_windows_guest_media test_windows_guest_payload \
-	          test_windows_guest_production_domain test_windows_guest_provision \
-	          test_windows_guest_retro_sync; do \
+	          test_common_hardware \
+	          test_install_engine_features; do \
 	    echo "--- $$t"; \
 	    $(PYTHON) $(dir $(INSTALLER_DIR))scripts/tests/$$t.py || exit 1; \
 	done
+	@$(MAKE) -C $(dir $(INSTALLER_DIR))console test PYTHON=$(PYTHON)
 
 # Build the secondary ISO that unattends the Windows guest install (root:
 # inspecting the LTSC medium needs a loop mount).
