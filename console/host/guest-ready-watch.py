@@ -42,6 +42,22 @@ itself, so the domain that keeps running is the one Setup is still inside
 of, or has already finished configuring; only the NEXT start reads the new,
 media-less definition.
 
+That redefinition passes --keyed-varstore, not just --replace. Without it,
+domain.py's guard_fresh_varstore() refuses ANY existing NVRAM varstore
+unconditionally - and by READY, the varstore always already exists, because
+our own earlier `define --windows-iso ... --unattend-iso ...` step is what
+created it. --keyed-varstore asserts exactly that: this varstore is not the
+stale, pre-Secure-Boot leftover the guard exists to catch, it is the one
+THIS package's own pipeline created, already keyed, a short while ago. See
+guard_fresh_varstore()'s docstring in domain.py for the full argument.
+
+Consequently the timer does NOT stop on READY alone - only once the
+redefinition has actually succeeded. Stopping on READY unconditionally
+would mean a redefinition that fails once (a transient libvirt hiccup, disk
+full, anything) never gets retried, and the domain keeps its install media
+forever - the exact failure this whole mechanism exists to prevent. See
+main()'s READY branch.
+
 The IP-discovery method (virsh domifaddr, agent source then lease source)
 is copied from handle-vm-start.sh, not reinvented - see that script for why
 each source is tried in that order and why either can legitimately come up
@@ -51,8 +67,8 @@ managed, not a libvirt network with its own lease file).
 Deployed to /usr/local/sbin/ by console/hooks/install.py, armed (as a timer
 only - nivuus-guest-ready.service carries no [Install] section of its own,
 matching vm-idle-shutdown.{service,timer}) by console/hooks/activate.py.
-The timer self-stops once a TERMINAL state (READY or FAILED) is reached -
-see main(): there is nothing left to learn by continuing to probe.
+The timer self-stops once a TERMINAL state is reached: FAILED unconditionally,
+READY only once the media-less redefinition has succeeded - see main().
 """
 from __future__ import annotations
 
@@ -201,14 +217,25 @@ def redefine_steady_state(run=subprocess.run,
     only reaches READY once domstate is 'running'), so guard_replace()
     would refuse without it.
 
+    --keyed-varstore is ALSO unconditional, and just as necessary:
+    domain.py's guard_fresh_varstore() otherwise refuses ANY existing NVRAM
+    varstore, unconditionally on --replace - and by READY, the varstore at
+    domain.py's NVRAM_PATH always exists, because our own earlier `define
+    --windows-iso ... --unattend-iso ...` step is what created it. Without
+    this flag this call can never succeed even once: it would always hit
+    that guard, and the domain would carry its install media forever. See
+    guard_fresh_varstore()'s own docstring for why asserting this here -
+    and only here - is safe.
+
     Returns whether the command succeeded; never raises. This is
     best-effort housekeeping - if it fails, the classification already
     reported above (and already saved) must not be undone by it, so a
-    failure here is logged by the caller and nothing more.
+    failure here is logged by the caller, which must also NOT stop the
+    timer: see main()'s handling of the READY branch.
     """
     python_bin = python_bin or sys.executable or "python3"
-    proc = run([python_bin, DOMAIN_PY, "define", "--replace"],
-              capture_output=True, text=True)
+    proc = run([python_bin, DOMAIN_PY, "define", "--replace",
+               "--keyed-varstore"], capture_output=True, text=True)
     return getattr(proc, "returncode", 1) == 0
 
 
@@ -260,14 +287,21 @@ def main(*, domstate_fn=None, ip_fn=None, probe_fn=None, redefine_fn=None,
     if result == READY:
         print(f"guest-ready: invite joignable sur {ip}:{WINRM_PORT} apres "
              f"{int(elapsed)}s - provisionnement termine")
+        # The timer stops ONLY once the redefinition itself has actually
+        # succeeded - not merely because the port answered. A reachable
+        # guest that still carries its install media is not yet the
+        # terminal state this script exists to reach: stopping here
+        # unconditionally would mean the domain keeps its install media
+        # FOREVER, since nothing would ever retry the redefinition again.
         if redefine_fn():
             print("guest-ready: domaine redefini sans les medias "
                  "d installation")
+            stop_fn()
         else:
             print("guest-ready: la redefinition sans les medias a echoue - "
-                 "le domaine garde les medias d installation jusqu au "
-                 "prochain passage de ce script", file=sys.stderr)
-        stop_fn()
+                 "le domaine garde les medias d installation ; nouvelle "
+                 "tentative au prochain passage de ce minuteur",
+                 file=sys.stderr)
     elif result == FAILED:
         print(f"guest-ready: domaine actif depuis {int(elapsed)}s, port "
              f"{WINRM_PORT} toujours ferme (seuil {INSTALL_TIMEOUT_S}s "

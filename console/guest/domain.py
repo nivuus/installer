@@ -201,7 +201,8 @@ def guard_replace(*, exists: bool, replace: bool) -> None:
         )
 
 
-def guard_fresh_varstore(*, exists: bool, path: str = NVRAM_PATH) -> None:
+def guard_fresh_varstore(*, exists: bool, keyed_varstore: bool = False,
+                         path: str = NVRAM_PATH) -> None:
     """Refuse to define when the target varstore file already exists.
 
     libvirt only copies its <nvram template=...> into the target file the
@@ -215,8 +216,24 @@ def guard_fresh_varstore(*, exists: bool, path: str = NVRAM_PATH) -> None:
     The fix is operator action, not code: `virsh undefine Windows --nvram`
     (already the first step of the cutover spec) deletes the stale varstore
     so the next define lets libvirt populate a fresh, keyed one.
+
+    `keyed_varstore=True` is a documented escape hatch, legitimate for
+    exactly one caller: guest-ready-watch.py's redefinition of an install
+    domain into the steady-state one, once WinRM answers (`domain.py define
+    --replace --keyed-varstore`, no --windows-iso/--unattend-iso). At that
+    point the varstore at `path` is not the stale, pre-Secure-Boot leftover
+    this guard exists to catch - it is the one THIS package's own earlier
+    `define --windows-iso ... --unattend-iso ...` step created from the
+    Secure Boot template a short while before, already keyed, and it now
+    also carries the boot entry Windows Setup itself wrote into it during
+    the install this guard just watched succeed. Refusing to reuse it here
+    would make the guest's two install media permanent - the very failure
+    this flag exists to prevent. It must NEVER be passed on a first
+    `define` of a domain whose varstore history is not already known that
+    way; only the redefinition path can make that claim, because only it
+    was the one that created the varstore it is now reusing.
     """
-    if exists:
+    if exists and not keyed_varstore:
         raise DomainError(
             f"varstore {path!r} already exists; libvirt will NOT repopulate "
             "it from the Secure Boot template, so the guest would silently "
@@ -300,7 +317,12 @@ def build_domain_xml(*, announce: bool = False,
     )
 
 
-def main() -> int:
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Extracted from main() so a caller (a test, notably) can parse an argv
+    and inspect the resulting namespace without running any of main()'s own
+    I/O - hardware detection, guard checks, or the `virsh define` call
+    itself.
+    """
     parser = argparse.ArgumentParser(description="Production Windows guest domain")
     parser.add_argument("action", choices=["xml", "define"])
     parser.add_argument("--replace", action="store_true",
@@ -308,6 +330,16 @@ def main() -> int:
                              "-- the next boot of a hibernated Windows then "
                              "resumes into changed hardware and discards the "
                              "saved session")
+    # See guard_fresh_varstore()'s own docstring for the one caller this is
+    # legitimate for (the media-less redefinition once WinRM answers) and
+    # why: everywhere else, an existing varstore is exactly the stale,
+    # pre-Secure-Boot leftover the guard exists to catch.
+    parser.add_argument("--keyed-varstore", action="store_true",
+                        help="assert that the existing NVRAM varstore is "
+                             "already keyed from the Secure Boot template - "
+                             "true only when THIS domain's own earlier "
+                             "define created it, never for an unrelated "
+                             "pre-existing domain")
     # Both or neither: see install_media(). Paths, never secrets, so argv is
     # the right place for them.
     parser.add_argument("--windows-iso",
@@ -316,7 +348,11 @@ def main() -> int:
     parser.add_argument("--unattend-iso",
                         help="the ISO build.py produced, holding the answer "
                              "file and the payload; requires --windows-iso")
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> int:
+    args = build_arg_parser().parse_args()
 
     # Imported here, not at module scope: the tests put only
     # console/guest on sys.path, and a top-level import of hardware would
@@ -332,7 +368,8 @@ def main() -> int:
             print(xml_text)
             return 0
         guard_replace(exists=domain_exists(), replace=args.replace)
-        guard_fresh_varstore(exists=Path(NVRAM_PATH).exists())
+        guard_fresh_varstore(exists=Path(NVRAM_PATH).exists(),
+                             keyed_varstore=args.keyed_varstore)
         path = Path("/run") / "nivuus-windows-domain.xml"
         # Write with mode 0600 to avoid leaving host topology world-readable
         path.write_text(xml_text)

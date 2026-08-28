@@ -4,18 +4,32 @@
 activate.py's 'start' step launches Windows Setup and returns immediately;
 without this script, "installing" and "failed" are indistinguishable for an
 hour, then forever. This suite proves the four-way classification fires for
-the right reason in each case (never never touching a real virsh, systemctl
-or domain.py), that the IP lookup reuses handle-vm-start.sh's own method
-rather than inventing a second one, that a READY guest triggers a
+the right reason in each case, that the IP lookup reuses handle-vm-start.sh's
+own method rather than inventing a second one, that a READY guest triggers a
 media-less redefinition of the domain, and that the timer stops itself only
-on a TERMINAL state.
+once a state is ACTUALLY terminal.
 
-Never calls the real virsh/systemctl/domain.py: every dependency
-guest-ready-watch.py reads is injected as a fake implementing the FULL
-interface the code under test actually uses (returncode/stdout/stderr for
-a virsh-shaped call, a plain bool for redefine/probe) - a fake missing a
-field the code reads would make the fake, not the code, the thing being
-measured. That mistake was already made once on this plan.
+guest-ready-watch.py's own subprocess calls (virsh, systemctl, domain.py
+define) are never launched for real: every one of those dependencies is
+injected as a fake implementing the FULL interface the code under test
+actually uses (returncode/stdout/stderr for a virsh-shaped call, a plain
+bool for redefine/probe) - a fake missing a field the code reads would make
+the fake, not the code, the thing being measured. That mistake was already
+made once on this plan.
+
+Round-1 review found two defects that combine into "the domain keeps its
+install media forever": redefine_steady_state()'s argv hit
+domain.py's REAL guard_fresh_varstore() unconditionally (a documented
+guard, not a bug - see domain.py's own docstring), and main() stopped the
+timer on READY whether or not the redefinition actually succeeded, so a
+first refusal was never retried. Both fixes are proven below by calling
+domain.py's REAL guard functions (imported for real, never faked) with the
+exact state and flags this script's own redefinition constructs - not by
+comparing the argv to a fake run() that cannot see whether domain.py itself
+would accept it. domain.guard_replace()/domain.guard_fresh_varstore() are
+pure decision functions (no I/O, never touch virsh) - calling them
+directly proves the real refusal/pass path without ever executing `virsh
+define` or `domain.py define`.
 
 Run: python3 console/tests/test_console_guest_ready.py
 """
@@ -28,10 +42,19 @@ import tempfile
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 SCRIPT = ROOT / "console" / "host" / "guest-ready-watch.py"
+GUEST_DIR = ROOT / "console" / "guest"
 
 spec = importlib.util.spec_from_file_location("guest_ready_watch", SCRIPT)
 watch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(watch)
+
+# The REAL domain.py, not a fake - see the module docstring on why this
+# suite needs it. jinja2-only at module scope (no hardware import unless a
+# function that needs it is actually called, which none of the guard/parser
+# functions below do), same convention as the other console/tests/* suites
+# that import domain.py directly.
+sys.path.insert(0, str(GUEST_DIR))
+import domain  # noqa: E402
 
 failures = []
 
@@ -151,9 +174,11 @@ check("an unreachable libvirtd reads as the empty state, not an exception",
 
 # --- READY redefines the domain WITHOUT the two install media ----------- #
 # guard_replace() in domain.py refuses an existing domain without
-# --replace, so it must be there; --windows-iso/--unattend-iso must NOT
-# be there, or install_media() would build the INSTALL domain again
-# instead of the steady-state one - see domain.py's own domain_xml().
+# --replace, so it must be there; guard_fresh_varstore() refuses an
+# existing NVRAM varstore without --keyed-varstore (round-1 fix - see the
+# module docstring), so that must be there too; --windows-iso/--unattend-iso
+# must NOT be there, or install_media() would build the INSTALL domain
+# again instead of the steady-state one - see domain.py's own domain_xml().
 
 redefine_calls = []
 
@@ -170,6 +195,9 @@ argv = redefine_calls[0]
 check("it calls domain.py define", argv[:3], ["python3", watch.DOMAIN_PY, "define"])
 check("--replace is passed (guard_replace() would refuse without it)",
       "--replace" in argv, True)
+check("--keyed-varstore is passed (guard_fresh_varstore() would otherwise "
+      "refuse the varstore OUR OWN earlier define already created)",
+      "--keyed-varstore" in argv, True)
 check("neither install medium is passed: this must build the STEADY-STATE "
       "domain, not the install one",
       "--windows-iso" in argv or "--unattend-iso" in argv, False)
@@ -181,6 +209,56 @@ def failing_redefine_run(argv, **_kwargs):
 
 check("a failed redefine is reported as failure, not raised",
       watch.redefine_steady_state(run=failing_redefine_run), False)
+
+
+# --- the argv above, checked against domain.py's REAL parser and REAL ---
+# guards - never a fake, and never `virsh define` itself. This is the
+# round-1 fix: the argv-only check above cannot see whether domain.py
+# itself would accept it; this section proves it does, past the exact
+# point (guard_fresh_varstore) where the unpatched code used to refuse.
+
+# 1) domain.py's real argument parser accepts this exact argv and produces
+#    the flags main() would read - proves the CLI wiring, not just the
+#    argv shape.
+parsed = domain.build_arg_parser().parse_args(argv[2:])  # drop [python, DOMAIN_PY]
+check("domain.py's real parser sees action=define", parsed.action, "define")
+check("domain.py's real parser sees --replace", parsed.replace, True)
+check("domain.py's real parser sees --keyed-varstore", parsed.keyed_varstore, True)
+check("domain.py's real parser sees no install media",
+      (parsed.windows_iso, parsed.unattend_iso), (None, None))
+
+no_flags = domain.build_arg_parser().parse_args(["define"])
+check("--keyed-varstore defaults to False on a plain define (the FIRST "
+      "define, media attached, must stay exactly as strict as before)",
+      no_flags.keyed_varstore, False)
+
+# 2) domain.py's real guards, fed the parsed flags above and the state they
+#    will ACTUALLY find at READY time: the domain exists (it is 'running'),
+#    and its varstore exists (our own earlier define created it). Neither
+#    guard is faked - a passing call here means domain.py itself, not a
+#    stand-in for it, accepts this redefinition.
+try:
+    domain.guard_replace(exists=True, replace=parsed.replace)
+    domain.guard_fresh_varstore(exists=True, keyed_varstore=parsed.keyed_varstore)
+    real_guards_pass = True
+except domain.DomainError as exc:
+    real_guards_pass = False
+    print(f"  (domain.py real guard raised: {exc})")
+check("the redefinition's own flags pass domain.py's REAL guards, with "
+      "the varstore already existing - the exact state READY finds it in",
+      real_guards_pass, True)
+
+# The other half of the same proof: WITHOUT --keyed-varstore (i.e. the
+# pre-fix argv), the same state is refused by the REAL guard - this is
+# what "the domain would keep its install media forever" actually meant.
+pre_fix_refused = False
+try:
+    domain.guard_fresh_varstore(exists=True, keyed_varstore=False)
+except domain.DomainError:
+    pre_fix_refused = True
+check("the PRE-FIX argv (no --keyed-varstore) is refused by the same real "
+      "guard, with the same varstore-exists state - this is the bug",
+      pre_fix_refused, True)
 
 
 # --- probe_port: a real loopback socket, not a mocked one --------------- #
@@ -202,7 +280,7 @@ check("a closed port is unreachable",
 # never a real virsh/systemctl/domain.py. Proves the timer stops itself
 # EXACTLY on a terminal state, and that READY (and only READY) redefines. #
 
-def run_main(domstate, port_open, elapsed_s):
+def run_main(domstate, port_open, elapsed_s, redefine_ok=True):
     """Drive main() with fully injected fakes and a throwaway state file.
 
     `elapsed_s` is made exact, not approximate: first_running_at is seeded
@@ -210,7 +288,10 @@ def run_main(domstate, port_open, elapsed_s):
     here - each scenario gets its own fresh state directory), and now_fn is
     pinned to that same reference plus elapsed_s, so classify() sees
     exactly the elapsed_s the test asked for regardless of wall-clock
-    timing. Returns (combined stdout+stderr text, stop_called, redefine_called).
+    timing. `redefine_ok` controls what the injected redefine_fn reports -
+    the round-1 fix under test is that main() must NOT stop the timer on
+    READY when this is False. Returns (combined stdout+stderr text,
+    stop_called, redefine_called).
     """
     import contextlib
     import io
@@ -230,7 +311,7 @@ def run_main(domstate, port_open, elapsed_s):
 
     def redefine_fn():
         redefine_calls_.append(True)
-        return True
+        return redefine_ok
 
     def stop_fn():
         stop_calls.append(True)
@@ -270,15 +351,30 @@ check("FAILED: no redefinition attempted (the guest never answered)",
 check("FAILED: the failure is explained in the journal text",
       "echec" in out.lower() or "ferme" in out.lower(), True)
 
-out, stopped, redefined = run_main("running", True, 600)
-check("READY: the timer stops (terminal state)", stopped, True)
+out, stopped, redefined = run_main("running", True, 600, redefine_ok=True)
+check("READY + redefine succeeds: the timer stops (NOW actually terminal)",
+      stopped, True)
 check("READY: the domain is redefined without the install media", redefined, True)
+
+# --- round-1 fix, proven directly: a READY guest whose redefinition FAILS
+# must NOT stop the timer - otherwise the media-less redefinition is never
+# retried and the domain keeps its install media forever, which is exactly
+# the failure combining defect 1 (guard refusal) and defect 2 (unconditional
+# stop) produced before this fix.
+out, stopped, redefined = run_main("running", True, 600, redefine_ok=False)
+check("READY + redefine FAILS: the timer keeps polling, NOT terminal yet",
+      stopped, False)
+check("READY + redefine FAILS: a redefinition was still attempted",
+      redefined, True)
+check("READY + redefine FAILS: the failure and the retry are explained",
+      "echoue" in out.lower() and "medias" in out.lower(), True)
 
 if failures:
     for item in failures:
         print(f"FAIL - {item}")
     sys.exit(1)
 print("OK - the four states classify for the right reason, IP discovery "
-      "reuses handle-vm-start.sh's own method, READY redefines the domain "
-      "without its install media, and the timer stops itself only on a "
-      "terminal state")
+      "reuses handle-vm-start.sh's own method, the redefinition argv "
+      "survives domain.py's REAL guards (--keyed-varstore fix), and the "
+      "timer stops on READY only once that redefinition has actually "
+      "succeeded")

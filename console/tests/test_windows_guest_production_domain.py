@@ -360,6 +360,18 @@ check_raises(
 check("define proceeds when varstore is absent",
       domain.guard_fresh_varstore(exists=False), None)
 
+# keyed_varstore=True is the documented escape hatch for exactly one
+# caller (guest-ready-watch.py's media-less redefinition once WinRM
+# answers, see the guard's own docstring) - it must let an existing
+# varstore through, without weakening the default (still refused above).
+check("define proceeds when the caller asserts the varstore is its own",
+      domain.guard_fresh_varstore(exists=True, keyed_varstore=True), None)
+check_raises(
+    "keyed_varstore defaults to False: an existing varstore is still refused",
+    domain.DomainError,
+    lambda: domain.guard_fresh_varstore(exists=True, keyed_varstore=False),
+)
+
 # vm-cpu-partition.sh derives the HOST cpuset from cputune, reading the domain
 # XML libvirt feeds it on stdin. It parses cputune/{vcpupin,emulatorpin,
 # iothreadpin}@cpuset with ElementTree. Replicate that parse here: if the
