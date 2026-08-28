@@ -100,6 +100,28 @@ PACKAGE_REPOS="$PWD/console $HOME/Projects/Nivuus/packages/media-manager" \
   sudo -E make build-iso
 ```
 
+### Dependencies between packages
+
+A package may declare the packages that must be installed **before** it:
+
+```yaml
+requires:
+  packages: [home-manager]
+```
+
+The engine then orders installs topologically — a package always follows its
+dependencies, whatever the alphabetical order of their names. This matters:
+installs used to be ordered by `sorted(selected)`, which put a satellite like
+`home-desk` ahead of the `home-manager` base it drops files into.
+
+A prerequisite that is unticked in the wizard, absent from the medium, or part
+of a cycle is refused **before partitioning** — in the wizard, not on a disk
+that has already been erased.
+
+The only keys admitted under `requires:` are `capabilities`, `features` and
+`packages`. Any other key is a manifest error: a `package:` in the singular,
+silently dropped, would install a package before the one it needs.
+
 ### Three phases, named relative to the reboot
 
 | Phase | When | Receives | May |
