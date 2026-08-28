@@ -301,6 +301,25 @@ Three properties carry the design and are easy to break by accident:
   delegate. It stays coarse (`iommu`, `gpu-discrete`, `nvme-dedicated`,
   `cpu-hybrid`); the precise work — PCI functions, IOMMU groups, `vfio-pci.ids`
   — belongs to `resolve`.
+* **A fourth event carries what `resolve` measured across the reboot
+  (`installer/packages/facts.py`, 2026-08-28).** `{"event":"facts","facts":{…}}`
+  — `resolve` **returns** facts, the engine persists them into
+  `etc/nivuus/packages.json` (same 0600 file as the answers, mode unchanged),
+  and `activate_cli.py` merges them into the `hw` it hands the activate hook.
+  It exists because a `platform` package routinely measures something the
+  install itself destroys — the console's dedicated NVMe is bound to
+  `vfio-pci` by the very cmdline this installer writes, so at first boot
+  `/sys/block` no longer lists it. **Precedence is settled and enforced in
+  code: the fresh snapshot wins, a fact only fills a key detection did not
+  produce** — a fact describes the world *before* the reboot, so it may never
+  mask a measurement that can still be taken; a package wanting the
+  pre-reboot value of something still observable must name its fact
+  distinctly (`dedicated_nvme_size_bytes`, not `size_bytes`). A dropped fact
+  is warned about, never silent. Facts are **not** gated on tier: unlike
+  `kernel-cmdline`/`modules`/`hugepages-mib` they reach no boot chain, only
+  the activate phase of the package that produced them. The channel has three
+  links (runner → state file → activate_cli) and each has its own named
+  assertion in the suites: cutting one names it.
 
 Two more findings from implementing the engine, both worth knowing before
 touching it:

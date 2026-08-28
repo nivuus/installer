@@ -114,6 +114,10 @@ def dedicated_nvme_size_bytes(nvme: dict, wanted: str) -> int | None:
     block device is found by reversing the same sysfs lookup
     pci_address_for_device() uses.
 
+    What carries it across the reboot is the engine's facts channel, not the
+    platform block: see installer/packages/facts.py, and main() below for the
+    event this becomes.
+
     Never raises and never turns into a `refuse` on its own: an unreadable
     size here must not withhold GPU/NVMe passthrough from an otherwise valid
     machine. guest_steps.py falls back to sysfs by itself later, and refuses
@@ -237,18 +241,23 @@ def main() -> int:
         cmdline.append(f"nohz_full={plan['nohz_full']}")
 
     emit({"event": "progress", "pct": 80, "msg": "Plan materiel resolu"})
-    platform_event = {"event": "platform",
-                      "kernel-cmdline": cmdline,
-                      "modules": [],
-                      "hugepages-mib": guest_mib}
+    emit({"event": "platform",
+          "kernel-cmdline": cmdline,
+          "modules": [],
+          "hugepages-mib": guest_mib})
     if nvme_size_bytes is not None:
-        # snake_case, unlike the three kernel-facing keys above: this one is
-        # never going to end up on the command line, it is meant for the
-        # `hw` dict guest_steps.plan_steps() reads (see _disk_bytes() there),
-        # which speaks the same snake_case as the rest of a hw snapshot
-        # (memory_mib, total_cpus, ...).
-        platform_event["dedicated_nvme_size_bytes"] = nvme_size_bytes
-    emit(platform_event)
+        # A `facts` event, NOT a fourth key of the platform block: this one
+        # never reaches the kernel command line. It is a measurement the
+        # reboot destroys - the kernel command line emitted just above binds
+        # this very disk to vfio-pci, after which no /sys/block entry
+        # describes it - so it travels through the engine's facts channel
+        # (installer/packages/facts.py): resolve returns it, the engine
+        # persists it in etc/nivuus/packages.json, activate gets it back
+        # inside its `hw`. snake_case, like the rest of a hw snapshot
+        # (memory_mib, total_cpus, ...), because that is where it lands:
+        # guest_steps.plan_steps() reads it there, see _disk_bytes().
+        emit({"event": "facts",
+              "facts": {"dedicated_nvme_size_bytes": nvme_size_bytes}})
     emit({"event": "done"})
     return 0
 

@@ -82,6 +82,18 @@ def platform_event(events):
     return None
 
 
+def facts(events):
+    """The `facts` event's payload, or {} - the engine's resolve->activate
+    channel (installer/packages/facts.py). The size of the dedicated NVMe
+    travels there and NOT in the platform block: it never reaches the kernel
+    command line, it is a measurement the reboot destroys.
+    """
+    for event in events:
+        if event.get("event") == "facts":
+            return event.get("facts") or {}
+    return {}
+
+
 # --- le manifeste est valide au sens du contrat -------------------------- #
 m = load_manifest(str(CONSOLE / "nivuus-package.yaml"))
 check("nom", m.name, "console")
@@ -416,13 +428,15 @@ with tempfile.TemporaryDirectory() as tmp:
         check("ISO live : le NVMe choisi est celui repondu par l operateur",
               "vfio-pci.ids=10de:2786,10de:22bc,144d:a808"
               in plat.get("kernel-cmdline", []), True)
-        # C EST LA CLEF DE LA TACHE 1 : resolve tourne avant que le disque ne
-        # soit lie a vfio-pci - c est le seul moment ou /sys/block le connait
-        # encore. guest_steps.py::_disk_bytes() prefere cette valeur a un
-        # nouveau passage par sysfs a l activation, quand le disque a deja
-        # disparu de /sys/block (mesure sur cet hote, cf. rapport de tache).
-        check("ISO live : la taille du NVMe dedie est emise",
-              plat.get("dedicated_nvme_size_bytes"), DEDICATED_NVME_BYTES)
+    # C EST LA CLEF DE LA TACHE 1 : resolve tourne avant que le disque ne
+    # soit lie a vfio-pci - c est le seul moment ou /sys/block le connait
+    # encore. guest_steps.py::_disk_bytes() prefere cette valeur a un
+    # nouveau passage par sysfs a l activation, quand le disque a deja
+    # disparu de /sys/block (mesure sur cet hote, cf. rapport de tache).
+    check("ISO live : la taille du NVMe dedie est emise comme un fait",
+          facts(events).get("dedicated_nvme_size_bytes"), DEDICATED_NVME_BYTES)
+    check("ISO live : le fait ne pollue pas le bloc platform",
+          "dedicated_nvme_size_bytes" in (plat or {}), False)
 
     # Une reponse qui ne designe aucun controleur NVMe : refus motive, pas un
     # choix de repli silencieux sur un autre disque.
@@ -472,9 +486,8 @@ with tempfile.TemporaryDirectory() as tmp:
     plat = platform_event(events)
     check("ISO live sans fichier size : un plan platform est emis quand meme",
           plat is not None, True)
-    if plat:
-        check("ISO live sans fichier size : la clef est absente, pas a None ni fausse",
-              "dedicated_nvme_size_bytes" in plat, False)
+    check("ISO live sans fichier size : aucun fait n est emis, ni None ni faux",
+          facts(events), {})
 
 # --- la taille suit aussi la selection AUTOMATIQUE (pas de reponse) ------ #
 # Sur un hote DEJA INSTALLE (racine tracable), select_passthrough_nvme()
@@ -518,9 +531,8 @@ with tempfile.TemporaryDirectory() as tmp:
     plat = platform_event(events)
     check("hote installe, selection auto : un plan platform est emis",
           plat is not None, True)
-    if plat:
-        check("hote installe, selection auto : la taille suit via l adresse PCI",
-              plat.get("dedicated_nvme_size_bytes"), DEDICATED_NVME_BYTES)
+    check("hote installe, selection auto : la taille suit via l adresse PCI",
+          facts(events).get("dedicated_nvme_size_bytes"), DEDICATED_NVME_BYTES)
 
 # --- non-regression : les refus deja verifies plus haut restent verts ---- #
 rc, events = call_hook(
