@@ -378,6 +378,13 @@ def apply_packages(plan, target: str, nivuus_dir: str, hw: dict, emit) -> None:
         except HookError as exc:
             raise StepError(str(exc)) from exc
         state[manifest.name] = {"version": manifest.version, "answers": answers}
+        # 0600, not the default 0644: this file records each package's answers
+        # VERBATIM so the activate phase can replay them after the reboot, and
+        # a `secret` question lands here in cleartext - the console's Windows
+        # administrator password today. World-readable would publish it to
+        # every local account. activate_cli.py runs as root from a systemd
+        # oneshot, so nothing needs the wider mode.
         write_file(state_path,
-                   json.dumps(state, indent=2, ensure_ascii=False) + "\n")
+                   json.dumps(state, indent=2, ensure_ascii=False) + "\n",
+                   mode=0o600)
         _enable_activation(target, manifest.name)

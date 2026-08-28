@@ -24,6 +24,7 @@ import json
 import os
 import pathlib
 import shutil
+import stat
 import sys
 import tempfile
 
@@ -340,6 +341,15 @@ with tempfile.TemporaryDirectory() as tmp:
           state["demo"]["answers"]["greeting"], "salut")
     check("the recorded version matches the manifest",
           state["demo"]["version"], "1.0.0")
+
+    # THE STATE FILE HOLDS SECRETS. It records each package's answers verbatim
+    # so the activate phase can replay them after the reboot - and a `secret`
+    # question (the console's Windows administrator password, and its product
+    # key later) lands there in cleartext. 0644 would publish it to every local
+    # account. activate_cli.py runs as root from a systemd oneshot, so 0600
+    # costs nothing and is the only mode that can be right here.
+    mode = stat.S_IMODE((target / "etc/nivuus/packages.json").stat().st_mode)
+    check("the state file is not world-readable", oct(mode), oct(0o600))
 
 # --- the activate phase's own apt requirements are fatal, unlike the ------- #
 # --- packages' own declared apt --------------------------------------------- #
