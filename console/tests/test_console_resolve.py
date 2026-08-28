@@ -119,8 +119,11 @@ by_key = {q.key: q.to_dict() for q in qs}
 check("le media Windows est demande", by_key["windows_iso"]["type"], "texte")
 check("le media est requis", by_key["windows_iso"].get("required"), True)
 check("la cle produit est un secret", by_key["ltsc_key"]["type"], "secret")
+check("la cle produit est requise", by_key["ltsc_key"].get("required"), True)
 check("le mot de passe Apollo est un secret",
       by_key["apollo_password"]["type"], "secret")
+check("le mot de passe Apollo est requis",
+      by_key["apollo_password"].get("required"), True)
 check("le repertoire de travail est facultatif",
       by_key["guest_workdir"].get("required", False), False)
 
