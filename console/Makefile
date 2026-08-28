@@ -20,13 +20,15 @@ help:
 # console/ imports it; the single pydantic-dependent suite (test_webapp_models)
 # stayed in installer/Makefile with the portal.
 #
-# 20 suites run here (2026-08-28): the 6 test_console_* suites,
-# test_retro_marker_bridge and test_vm_wake_gate (the wake-on-demand gate
-# and the units that arm it), the 11 test_windows_guest_* suites, and the
-# shell suite test_handle_vm_start. All moved here from scripts/tests/ so
-# the package carries its own tests ahead of the git filter-repo --path
-# console split (see installer/Makefile's test-packages comment for why that
-# split needs this done first).
+# 22 suites run here (2026-08-28): the 8 test_console_* suites (the 8th,
+# test_console_guest_ready, guards the four-way installing/failed/ready
+# classification that makes activate's Windows build observable after it
+# hands back control), test_retro_marker_bridge and test_vm_wake_gate (the
+# wake-on-demand gate and the units that arm it), the 11 test_windows_guest_*
+# suites, and the shell suite test_handle_vm_start. All moved here from
+# scripts/tests/ so the package carries its own tests ahead of the git
+# filter-repo --path console split (see installer/Makefile's test-packages
+# comment for why that split needs this done first).
 #
 # test_handle_vm_start.sh is shell, not Python, so it gets its own loop below
 # rather than a `.py` entry. The old scripts/tests aggregator never ran it -
@@ -39,6 +41,7 @@ PYTHON ?= python3
 test:
 	@for t in test_console_hardware test_console_resolve test_console_install \
 	          test_console_host_files test_console_wake_units test_console_activate \
+	          test_console_guest_steps test_console_guest_ready \
 	          test_vm_wake_gate \
 	          test_retro_marker_bridge \
 	          test_windows_guest_apollo test_windows_guest_autounattend \

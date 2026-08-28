@@ -31,6 +31,10 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 from retro import retro_state_path  # noqa: E402
+from guest_steps import (  # noqa: E402
+    DEFAULT_GUEST_WORKDIR, GuestBuildError, copy_windows_medium,
+    require_windows_iso_answer, windows_media_path,
+)
 
 VM_NAME = "Windows"
 
@@ -67,6 +71,7 @@ HOST_SCRIPTS = [
     ("host/handle-vm-start.sh", "usr/local/sbin/handle-vm-start.sh"),
     ("host/vm-idle-shutdown.sh", "usr/local/sbin/vm-idle-shutdown.sh"),
     ("host/winvm", "usr/local/bin/winvm"),
+    ("host/guest-ready-watch.py", "usr/local/sbin/guest-ready-watch.py"),
 ]
 
 # Units are DATA, not programs: mode 0644. A unit file with the execute bit
@@ -75,6 +80,7 @@ UNITS = [
     "vm-trigger-47984.socket", "vm-trigger-47984.service",
     "vm-trigger-47989.socket", "vm-trigger-47989.service",
     "vm-idle-shutdown.service", "vm-idle-shutdown.timer",
+    "nivuus-guest-ready.service", "nivuus-guest-ready.timer",
 ]
 
 # The same drop-in serves both wake services; systemd reads it from each
@@ -134,6 +140,9 @@ def main() -> int:
     answers = ctx.get("answers") or {}
     root = args.root.rstrip("/") or "/"
 
+    def under(rel: str) -> str:
+        return os.path.join(root, rel.lstrip("/"))
+
     # Fail fast, before a single byte lands on the target: a caller and the
     # package disagreeing about 'retro' is a contract error, not something
     # to work around mid-placement.
@@ -143,8 +152,26 @@ def main() -> int:
         print(f"console install: {exc}", file=sys.stderr)
         return 1
 
-    def under(rel: str) -> str:
-        return os.path.join(root, rel.lstrip("/"))
+    # THE ISO MUST SURVIVE THE REBOOT. The wizard's 'windows_iso' answer
+    # names a file on the LIVE medium this hook is currently running from -
+    # after the reboot that medium is unmounted, gone along with the boot
+    # medium it lived on, and activate (see guest_steps.py's own comment on
+    # source_iso in plan_steps) never sees it again, only the target. This
+    # install phase is the ONLY moment the two roots coexist, so it is the
+    # only place this copy can ever happen. Refused HERE, NOW - while the
+    # operator is still watching the wizard - if the medium cannot be read
+    # or the target has no room for it (about 5 GB): see
+    # copy_windows_medium's own docstring for both refusals, and for why an
+    # already-complete copy is skipped rather than redone.
+    try:
+        source_iso = require_windows_iso_answer(answers)
+        guest_workdir = str(answers.get("guest_workdir") or DEFAULT_GUEST_WORKDIR)
+        medium_dest = under(str(windows_media_path(guest_workdir)))
+        emit({"event": "progress", "pct": 10, "msg": "Copie du media Windows"})
+        copy_windows_medium(source_iso, medium_dest)
+    except GuestBuildError as exc:
+        print(f"console install: {exc}", file=sys.stderr)
+        return 1
 
     emit({"event": "progress", "pct": 20,
           "msg": "Deploiement des hooks libvirt"})

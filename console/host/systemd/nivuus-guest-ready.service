@@ -1,0 +1,6 @@
+[Unit]
+Description=Classify Windows guest provisioning readiness (not started / installing / failed / ready)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/guest-ready-watch.py

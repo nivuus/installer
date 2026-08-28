@@ -97,7 +97,7 @@ check("iommu statique dans la cmdline",
 
 # --- les questions sont valides au sens du vocabulaire ------------------- #
 qs = load_questions(str(CONSOLE / m.questions_file))
-check("trois questions", len(qs), 3)
+check("sept questions", len(qs), 7)
 check("le disque est un selecteur materiel",
       [q.type for q in qs if q.key == "dedicated_nvme"], ["disque"])
 check("le mot de passe est un secret",
@@ -106,8 +106,32 @@ check("le secret n expose pas de defaut",
       "default" in [q for q in qs if q.key == "admin_password"][0].to_dict(),
       False)
 answers = validate_answers(qs, {"dedicated_nvme": "/dev/nvme1n1",
-                                "admin_password": "hunter2hunter2"})
+                                "admin_password": "hunter2hunter2",
+                                "windows_iso": "/media/data/win-ltsc.iso",
+                                "ltsc_key": "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX",
+                                "apollo_password": "another-secret"})
 check("retro prend son defaut", answers["retro"], False)
+
+# Four answers now reach the guest build. The two secrets must be typed as
+# such: a `texte` would come back in the portal's payload with its default,
+# and land in a log. The engine's own vocabulary check is the other half.
+by_key = {q.key: q.to_dict() for q in qs}
+check("le media Windows est demande", by_key["windows_iso"]["type"], "texte")
+check("le media est requis", by_key["windows_iso"].get("required"), True)
+check("la cle produit est un secret", by_key["ltsc_key"]["type"], "secret")
+check("la cle produit est requise", by_key["ltsc_key"].get("required"), True)
+check("le mot de passe Apollo est un secret",
+      by_key["apollo_password"]["type"], "secret")
+check("le mot de passe Apollo est requis",
+      by_key["apollo_password"].get("required"), True)
+check("le repertoire de travail est facultatif",
+      by_key["guest_workdir"].get("required", False), False)
+
+# No default on the medium: the only automatic download available serves an
+# Evaluation edition whose MAK conversion is unmeasured, and a console that
+# installs then expires is worse than one that refuses with a reason.
+check("le media n a pas de valeur par defaut",
+      by_key["windows_iso"].get("default"), None)
 
 # --- resolve refuse une machine SANS GPU dedie --------------------------- #
 # Deterministe : ce chemin ne depend que du snapshot injecte, jamais du

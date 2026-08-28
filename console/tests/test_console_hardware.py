@@ -324,6 +324,55 @@ with tempfile.TemporaryDirectory() as fake_block:
                                           sysfs_root=fake_block),
           None)
 
+# --- block_device_size_bytes : la taille reelle, pas une supposition ----- #
+# /sys/block/<name>/size is ALWAYS in 512-byte sectors, whatever the disk's
+# physical sector size. A 4 KiB-formatted NVMe still reports here in units of
+# 512; multiplying by the physical size would claim eight times the truth.
+#
+# TWO disks live in this fake tree on purpose: a tree with only one disk
+# cannot exercise the membership check at all (a "just take the first disk
+# found" mutant is indistinguishable from the real containment check when
+# there is only one disk to find). "nvme0n1" sorts alphabetically BEFORE
+# "nvme1n1", so for the nvme1n1 partition check below, the wrong disk is
+# the one os.listdir would likely see named first - a test that only passed
+# because the right disk happened to enumerate first would not prove
+# anything. Sizes are picked far apart so a mix-up shows up unmistakably in
+# the failure message rather than as a subtle off-by-one.
+with tempfile.TemporaryDirectory() as tmp:
+    fake = pathlib.Path(tmp) / "nvme1n1"
+    fake.mkdir()
+    (fake / "size").write_text("1953525168\n")      # 931.5 GiB in 512B sectors
+    got = hardware.block_device_size_bytes("/dev/nvme1n1", sysfs_root=tmp)
+    check("la taille vient des secteurs de 512 octets", got, 1953525168 * 512)
+
+    other = pathlib.Path(tmp) / "nvme0n1"
+    other.mkdir()
+    (other / "size").write_text("234441648\n")      # 111.8 GiB - clearly different
+
+    # A partition, not the whole disk: the passthrough hands over the entire
+    # PCI device, so sizing must resolve to the parent - and to the RIGHT
+    # parent, not merely to a disk that happens to exist in the tree.
+    part = fake / "nvme1n1p1"
+    part.mkdir()
+    (part / "size").write_text("2048\n")
+    check("une partition remonte au disque entier",
+          hardware.block_device_size_bytes("/dev/nvme1n1p1", sysfs_root=tmp),
+          1953525168 * 512)
+
+    # Same check, mirrored onto the other disk, so neither disk can be the
+    # one silently hardcoded as "the" answer regardless of which partition
+    # was actually asked for.
+    other_part = other / "nvme0n1p1"
+    other_part.mkdir()
+    (other_part / "size").write_text("4096\n")
+    check("une partition du second disque ne remonte pas au premier",
+          hardware.block_device_size_bytes("/dev/nvme0n1p1", sysfs_root=tmp),
+          234441648 * 512)
+
+check_raises("un peripherique inconnu est refuse", hardware.HardwareError,
+             lambda: hardware.block_device_size_bytes("/dev/nexistepas",
+                                                      sysfs_root="/nowhere"))
+
 # --- la selection du NVMe, de facon DETERMINISTE ------------------------- #
 # Sur du texte lspci capture, pas sur le materiel de cette machine : c est
 # ce qui rend ce test vrai partout. LSPCI est deja defini plus haut dans ce

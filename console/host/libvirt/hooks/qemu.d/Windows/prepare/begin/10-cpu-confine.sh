@@ -31,7 +31,7 @@ systemctl start nivuus-cpu-mode@gaming.service >> /var/log/libvirt-cpu-hook.log 
 # Le pendant se trouve dans release/end/10-cpu-release.sh, qui tourne aussi
 # quand un hook « prepare » REFUSE le demarrage : rien ne reste arrete par un
 # demarrage avorte.
-docker compose -f /opt/nivuus/MediaManager/docker-compose.yml \
-    --env-file /opt/nivuus/MediaManager/.env stop -t 5 tdarr-node \
+docker compose -f /opt/nivuus/media-manager/docker-compose.yml \
+    --env-file /opt/nivuus/media-manager/.env stop -t 5 tdarr-node \
     >> /var/log/libvirt-cpu-hook.log 2>&1 || true
 exit 0

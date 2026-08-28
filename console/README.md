@@ -10,7 +10,7 @@ enough for anyone.
 |---|---|
 | `resolve` | Read-only. Derives `vfio-pci.ids` from the discrete GPU's PCI slot and the dedicated NVMe, `nohz_full` from the CPU topology, and the hugepage budget from host RAM. **Refuses**, with a reason, a machine with no discrete GPU or no properly isolated NVMe. |
 | `install` | Places files on the target — exactly the list below, no more. |
-| `activate` | Arms three of the six systemd units `install` placed (the two wake sockets, the idle-shutdown timer) with a symlink into their `.wants/` directory, then reloads systemd and starts them. It does **not** build the guest: the Windows VM is still made by hand with `console/guest/build.py` (phase 2d). |
+| `activate` | Arms four of the eight systemd units `install` placed (the two wake sockets, the idle-shutdown timer, the guest-readiness timer) with a symlink into their `.wants/` directory, then reloads systemd and starts them. Then runs five steps to build and start the Windows guest — write the three secrets, fetch the offline payload, build the unattended ISO, define the libvirt domain with both install media, and issue one `virsh start` — each skippable when its own observation says it is already done. It **returns as soon as the VM has been told to start**; Windows Setup itself runs unattended for up to an hour afterwards, and only `nivuus-guest-ready.timer` says how it went. See below. |
 
 ## What `install` actually deploys
 
@@ -31,7 +31,8 @@ package author builds against:
 | `host/handle-vm-start.sh` | `/usr/local/sbin/handle-vm-start.sh` |
 | `host/vm-idle-shutdown.sh` | `/usr/local/sbin/vm-idle-shutdown.sh` |
 | `host/winvm` | `/usr/local/bin/winvm` |
-| `vm-trigger-47984.socket` + `.service`, `vm-trigger-47989.socket` + `.service`, `vm-idle-shutdown.service` + `.timer` (6 units) | `/etc/systemd/system/` |
+| `host/guest-ready-watch.py` | `/usr/local/sbin/guest-ready-watch.py` |
+| `vm-trigger-47984.socket` + `.service`, `vm-trigger-47989.socket` + `.service`, `vm-idle-shutdown.service` + `.timer`, `nivuus-guest-ready.service` + `.timer` (8 units) | `/etc/systemd/system/` |
 | the shared no-start-limit drop-in, copied twice | `/etc/systemd/system/vm-trigger-{47984,47989}.service.d/no-start-limit.conf` |
 | the retrogaming answer | `/etc/nivuus/retro.json` |
 
@@ -48,16 +49,16 @@ the libvirtd AppArmor profile grants `/etc/libvirt/hooks/** rmix` but not
 `/usr/local/sbin/*`, so a copy placed there dies at VM start with a
 misleading `bad interpreter: Permission denied` and no DENIED line in dmesg.
 
-The six units are placed by `install` at mode `0644` and **not enabled** —
+The eight units are placed by `install` at mode `0644` and **not enabled** —
 arming a `0.0.0.0` wake socket for a VM that does not exist yet would be
-exposure with no counterpart. `activate` arms three of them afterwards (the
-two wake sockets and the idle-shutdown timer) with a symlink into their
-`.wants/` directory; the two `vm-trigger-*.service` units and
-`vm-idle-shutdown.service` are never enabled directly, they run via socket
-and timer activation.
+exposure with no counterpart. `activate` arms four of them afterwards (the
+two wake sockets, the idle-shutdown timer, and the guest-readiness timer)
+with a symlink into their `.wants/` directory; the two `vm-trigger-*.service`
+units, `vm-idle-shutdown.service` and `nivuus-guest-ready.service` are never
+enabled directly, they run via socket and timer activation.
 
 The link is what makes the **next boot** correct; `activate` also reloads
-systemd and starts the three units, because the unit that runs it is
+systemd and starts the four units, because the unit that runs it is
 `WantedBy=multi-user.target` and therefore fires *after* `sockets.target` and
 `timers.target` have been reached — without the explicit start, the wake
 sockets would not listen and the timer would not tick until a second reboot,
@@ -66,17 +67,145 @@ while the activation stamp already claimed success. That start is best-effort
 skipped entirely when `--root` points somewhere other than `/`: driving the
 installer's own systemd from a target root would be the wrong machine.
 
-## What `install` does NOT deploy yet (phase 2d)
+## What `activate` does to build the guest (phase 2d)
 
 The libvirt hooks, the wake path, and the host scripts are all wired and
 armed — with the host-specific constants listed under **Limites connues**
-below. What is left is the Windows guest itself: `activate` does not build
-it. The console can manage a `Windows` domain **if one already exists** —
-it cannot create one. `console/guest/build.py` + `domain.py` already live
-in this package (moved from `installer/windows-guest/` in an earlier
-phase) and `domain.py` produces real domain XML on this hardware — but
-both are still run by hand. Wiring `activate` to drive them is phase 2d's
-work, not this one's.
+below. Beyond arming the four units above, `activate` runs
+`console/guest_steps.py`'s five steps in order, each guarded by its own
+`already_done()` predicate so a re-run after a partial failure only replays
+what did not finish:
+
+1. **secrets** — write the three `0600` files (`windows-ltsc.key`,
+   `windows-admin.pass`, `apollo-ui.pass`) `guest/build.py` reads its secrets
+   from, never on argv.
+2. **payload** — `guest/fetch_payload.py` fetches the offline driver/tool
+   binaries.
+3. **build** — `guest/build.py` renders the unattended ISO (answer file +
+   payload), fingerprinted (medium identity, payload tree, answers, package
+   code) so any change — not just a date — forces a rebuild.
+4. **define** — `guest/domain.py define` declares the libvirt domain with
+   **both** install media attached: the official Windows medium (the one
+   that boots) and the ISO `build` just produced (the answer/payload medium
+   Setup reads once running — not itself bootable). `--replace` is added
+   only when a domain is already defined, never blindly.
+5. **start** — one `virsh start Windows`.
+
+**`activate` returns as soon as `start` succeeds — it does not wait for
+Windows Setup to finish.** That install runs unattended for up to an hour.
+A separate mechanism says how it went: `nivuus-guest-ready.timer` (armed
+above, 2-minute period, self-stopping) polls `virsh domstate` and reads a
+**version-stamped marker file over WinRM** —
+`C:\nivuus\state\PROVISION.done`, written by `provision/99-marker.ps1` as
+its very last act, checked against `payload.py`'s `PROVISION_VERSION` and
+never by mere presence, since a rebuilt disk can still carry a *previous*
+run's marker. **A reachable WinRM port (5985) is NOT the readiness signal —
+this document said otherwise until 2026-08-28, and that stale claim caused
+a full redesign of this timer.** Since 2026-08-26 `provision/00-bootstrap.ps1`
+opens that port at the very first provisioning stage, deliberately, so a
+later stage throwing still leaves a remote door open into the guest — the
+port only ever proves the guest is alive enough to accept a command, never
+that provisioning finished. The timer logs one of four states to the
+journal: `not_started`, `installing`, `failed` (past a 2h timeout with the
+marker still absent or stale), or `ready`. On `ready` it also redefines the
+domain **without** either install medium (`domain.py define --replace
+--keyed-varstore`), so the next boot does not risk re-running Setup; the
+timer only stops itself once that redefinition has actually succeeded, not
+merely on `ready`, so a transient failure there is retried rather than
+leaving the media attached forever.
+
+**That regime redefinition used to feed a silent, permanent replay loop
+(fixed 2026-08-28).** Once the guest is provisioned and redefined without
+media, `activate`'s own `define` step re-runs on every later activation
+retry — its predicate used to look only for the two install-media ISO
+paths, which a regime domain no longer carries, so it read the domain as
+"not done" and replayed `domain.py define` without `--keyed-varstore` (that
+flag is guest-ready-watch.py's own escape hatch, never this step's), which
+hit `domain.py`'s varstore guard *forever* — the varstore the earlier
+media-carrying `define` created already exists — and refused with a remedy,
+`virsh undefine Windows --nvram`, that would have **reinstalled Windows
+over a console that already works.** `guest_steps.domain_defined()` now
+checks what actually identifies the domain: the passthrough disk's own PCI
+address, read from the `<hostdev>`'s `<source>` element, never the ISO
+paths alone (which are fixed regardless of which `dedicated_nvme` was
+chosen — a changed answer used to leave a stale disk wired up unnoticed
+too, the same predicate gap from the other side). A media-less domain that
+already carries the right disk is now read as a **terminal, legitimate
+outcome**, not work still to do.
+
+**The readiness timer used to log "installation non demarree" every two
+minutes, forever, on a console doing nothing wrong (fixed 2026-08-28).**
+Most of a console's life is spent shut off or hibernated between sessions
+— that is the nominal state, not an anomaly. `guest-ready-watch.py` now
+logs the transition into "not running" once and stays silent for as long
+as it holds, logging again only on a genuine transition (the guest started,
+then stopped again).
+
+**This chain has never run for real.** Every step is proven individually
+against a fake `virsh`/filesystem (`test_console_guest_steps`) and the
+readiness classification is proven the same way
+(`test_console_guest_ready`) — but nothing here has actually built an ISO,
+defined the production domain, or started it, deliberately: on the
+reference host `Windows` is the production gaming VM, and starting it
+detaches the GPU from the host.
+
+Known gaps in this chain, named rather than hidden:
+
+- **`--replace` on the `define` step is a real risk on a machine that
+  already has a production VM.** `domain.py`'s `guard_replace()` still
+  refuses to redefine an existing domain without `--replace`, and the step
+  only adds it when one is already defined — but redefining `Windows` on a
+  host where it is already the owner's VM discards a hibernated session.
+  The guard is a backstop against an *accidental* redefinition, not a
+  substitute for an operator choosing not to run this against that machine.
+- **The first reboot inside Setup is unmeasured.** The reasoning holds — the
+  test bench ran two full unattended LTSC installs with this exact shape of
+  domain (both media attached, then redefined without them) — but the only
+  thing standing between a normal install and a boot loop is the "Press any
+  key to boot from CD or DVD" prompt on the operator-supplied medium itself,
+  and the bench has never installed onto an NVMe passed through as a PCI
+  device, only onto a disk image.
+- **A `windows_iso` answer given as a URL is not fetched.** `media_identity()`
+  only ever `stat()`s a local path; nothing in this chain downloads a
+  multi-gigabyte ISO, which would need resume, integrity checking and free
+  space accounting this phase did not build. Point it at a path that already
+  exists on the target — see the wizard table below.
+- **The `payload` step's own "already done" check is shallow**: a directory
+  with at least one file in it counts as done, even if `fetch_payload.py`
+  was interrupted mid-fetch. A partial payload is not caught here — it is
+  caught, and repaired, by the `build` step re-running against it.
+- **`retro: true` cannot succeed on a target, even though the wizard offers
+  it.** `fetch_payload.py`'s `RETRO_SRC` default is derived from its own
+  deployed path (`Path(__file__).resolve().parents[2].parent / "retro"`),
+  which resolves to `/opt/retro` once this package is copied to
+  `/opt/nivuus-packages/console/` — and nothing creates that directory on a
+  target. `build_retro_wheels()` refuses by name (`no retro package at
+  /opt/retro`) the moment it does not find a `pyproject.toml` there, which
+  fails the whole `payload` step. Wiring `packages/retro`'s own checkout
+  onto the target (or overriding `--retro-src`) is unfinished work, not a
+  hidden default that happens to work.
+- **The WinRM password-file path `guest-ready-watch.py` passes to
+  `winrm_exec.py` is deduced from the pipeline, never measured against a
+  real guest.** `GUEST_PASS_FILE` is hardcoded to
+  `/var/lib/nivuus/guest/secrets/windows-admin.pass` because that is where
+  `guest_steps.py`'s own `secrets` step writes it — reasoned from reading
+  both files side by side, not observed on a running install, since running
+  one is exactly what this whole chain is forbidden from doing (see above).
+
+## The wizard's questions
+
+Seven answers total; the first three predate this phase, the last four are
+what it took to actually build and boot the guest:
+
+| Key | Type | What it drives |
+|---|---|---|
+| `dedicated_nvme` | disque | the PCI device handed whole to the VM |
+| `retro` | bool | whether `fetch_payload.py`/`build.py` stage RetroArch |
+| `admin_password` | secret | the guest Administrator's password |
+| `windows_iso` | texte | the official Windows medium — a **local path only** (see above); the wizard's own label still reads "chemin local ou URL", ahead of the fetch this phase does not implement |
+| `ltsc_key` | secret | the LTSC product key baked into the answer file |
+| `apollo_password` | secret | the Apollo streaming UI's password |
+| `guest_workdir` | texte | where secrets/payload/the built ISO live, default `/var/lib/nivuus/guest` |
 
 ## Limites connues
 
@@ -101,7 +230,7 @@ file by file:
   bridge.
 - **Hooks reference `/opt/nivuus/…` paths that do not exist on a fresh
   target.** `bind-vfio-gpu.sh` and `rebind-host-gpu.sh` drive
-  `docker compose -f /opt/nivuus/{ollama,MediaManager}/docker-compose.yml`,
+  `docker compose -f /opt/nivuus/{ollama,media-manager}/docker-compose.yml`,
   the two CPU wrappers stop and restart the Tdarr CPU node from the same
   place, and `vm-idle-shutdown.sh` tries to bring ollama up on every idle
   cycle. All of these are guarded (`|| true`, or their failure is ignored),
@@ -140,9 +269,13 @@ Beyond `hooks/` and `host/`, the package also carries:
 
 | Directory | What it holds |
 |---|---|
-| `guest/` | The unattended LTSC build, the libvirt domain generator (`domain.py`), the retrogaming sync, and the provisioning scripts — 41 files, moved here from `installer/windows-guest/` so the package is self-contained. `activate` does not drive any of it yet (see above). |
-| `tests/` | The package's own test suites — 20 files (19 Python plus the shell suite `test_handle_vm_start.sh`), all run by `console/Makefile`'s `test` target, which `installer/Makefile`'s `test-packages` delegates to. |
+| `guest/` | The unattended LTSC build, the libvirt domain generator (`domain.py`), the retrogaming sync, and the provisioning scripts — 41 files, moved here from `installer/windows-guest/` so the package is self-contained. `activate` now drives `fetch_payload.py`, `build.py` and `domain.py` through `guest_steps.py` (see above). |
+| `tests/` | The package's own test suites — 22 files (21 Python plus the shell suite `test_handle_vm_start.sh`), all run by `console/Makefile`'s `test` target, which `installer/Makefile`'s `test-packages` delegates to. |
 
-No file under `console/` imports from `installer/common` or anywhere else
-in `installer/` — the package is self-contained, which is what makes a
-future `git filter-repo --path console` mechanical rather than a rewrite.
+No file under `console/` **source** imports from `installer/common` or
+anywhere else in `installer/` — the package is self-contained, which is what
+makes a future `git filter-repo --path console` mechanical rather than a
+rewrite. The boundary does not (yet) hold for the tests: `tests/test_console_resolve.py`
+adds `installer/` to `sys.path` and imports `packages.manifest`/`packages.runner`/
+`packages.wizard` to exercise `resolve` through the real engine contract —
+a dated blocker for a future extraction, not a source-code exception.

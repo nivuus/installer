@@ -163,6 +163,172 @@ check("no vBIOS override", root.find("devices/hostdev/rom") is None, True)
 check("no i6300esb watchdog",
       [w.get("model") for w in root.findall("devices/watchdog")], ["itco"])
 
+# --- les deux medias d installation -------------------------------------- #
+# Le gabarit de production ne montait AUCUN cdrom et son unique <boot order>
+# portait sur le NVMe : `define` puis `start` auraient donc demarre un disque
+# vierge et Windows Setup ne se serait jamais lance. Et il en faut DEUX, pas
+# un : l ISO que build.py produit n est PAS amorcable, c est le media de
+# reponses et de charge utile que Setup lit une fois demarre depuis le media
+# officiel. C est pour cela que seul le media officiel porte un ordre.
+xml_install = domain.domain_xml(gpu_functions=GPU, nvme=NVME, plan=plan,
+                                windows_iso="/media/backup/ltsc.iso",
+                                unattend_iso="/var/lib/nivuus/guest/nivuus-unattend.iso")
+install_root = ET.fromstring(xml_install)
+
+install_cdroms = [d for d in install_root.findall("devices/disk")
+                  if d.get("device") == "cdrom"]
+check("le domaine d installation monte deux medias", len(install_cdroms), 2)
+check("les deux medias sont bien ceux demandes",
+      sorted(c.find("source").get("file") for c in install_cdroms),
+      ["/media/backup/ltsc.iso",
+       "/var/lib/nivuus/guest/nivuus-unattend.iso"])
+# Forme reprise telle quelle de domain-test.xml.j2, qui a servi a de vraies
+# installations : bus sata, cibles sdb/sdc, readonly sur les deux.
+check("les deux medias sont sur le bus sata",
+      [c.find("target").get("bus") for c in install_cdroms], ["sata", "sata"])
+# APPARIE, pas ensembliste : « sdb et sdc sont tous deux presents » reste vrai
+# si les deux medias sont intervertis, et un media officiel monte sur sdc
+# derriere une ISO de reponses sur sdb est un domaine qui n installe rien.
+# Meme trou que --password-file / --apollo-password-file a la tache 3.
+_par_lecteur = {c.find("target").get("dev"): c.find("source").get("file")
+                for c in install_cdroms}
+check("chaque media est sur SON lecteur", _par_lecteur,
+      {"sdb": "/media/backup/ltsc.iso",
+       "sdc": "/var/lib/nivuus/guest/nivuus-unattend.iso"})
+check("les deux medias sont en lecture seule",
+      [c.find("readonly") is not None for c in install_cdroms], [True, True])
+
+# UN SEUL ordre de demarrage dans tout le domaine. Deux pieges se cachent
+# ici : si le NVMe garde le sien, il amorce le disque vierge ; si l ISO de
+# reponses en recoit un, le firmware tente d amorcer un media qui n est pas
+# amorcable.
+check("un seul ordre de demarrage dans le domaine d installation",
+      xml_install.count("<boot order="), 1)
+booting = [c for c in install_cdroms if c.find("boot") is not None]
+check("et il porte sur le media Windows, pas sur l ISO de reponses",
+      [c.find("source").get("file") for c in booting],
+      ["/media/backup/ltsc.iso"])
+check("le NVMe n amorce pas pendant l installation",
+      [h.find("boot") for h in install_root.findall("devices/hostdev")],
+      [None, None, None])
+
+# Le domaine de regime : aucun media, et c est le NVMe qui amorce a nouveau.
+check("le domaine de regime ne monte aucun cdrom", "cdrom" in xml_text, False)
+check("le domaine de regime a un seul ordre de demarrage",
+      xml_text.count("<boot order="), 1)
+_nvme_boot = [h for h in root.findall("devices/hostdev")
+              if h.find("source/address").get("bus") == "0x03"]
+check("et c est le NVMe qui le porte",
+      _nvme_boot[0].find("boot").get("order"), "1")
+
+# Les deux medias vont ENSEMBLE : le media officiel seul bloque Setup sur sa
+# premiere question (il n y a pas de clavier sur une console sans ecran), et
+# l ISO de reponses seule n est pas amorcable du tout. Une paire incomplete
+# est donc un refus, jamais un domaine a moitie configure.
+check_raises("le media officiel seul est refuse", domain.DomainError,
+             lambda: domain.domain_xml(gpu_functions=GPU, nvme=NVME, plan=plan,
+                                       windows_iso="/m/w.iso"))
+check_raises("l ISO de reponses seule est refusee", domain.DomainError,
+             lambda: domain.domain_xml(gpu_functions=GPU, nvme=NVME, plan=plan,
+                                       unattend_iso="/v/u.iso"))
+try:
+    domain.install_media("/m/w.iso", None)
+except domain.DomainError as exc:
+    check("le refus nomme le media manquant", "answer ISO" in str(exc), True)
+check("aucun media donne veut dire regime, pas refus",
+      domain.install_media(None, None), None)
+# Une chaine vide est un « pas de media », pas un chemin : sans cela une
+# reponse vide du magasinier produirait <source file=''/>, que libvirt accepte
+# et que QEMU refuse ensuite au demarrage.
+check("une chaine vide compte comme absente",
+      domain.install_media("", "   "), None)
+check("la paire complete est rendue telle quelle",
+      domain.install_media("/m/w.iso", "/v/u.iso"),
+      {"windows_iso": "/m/w.iso", "unattend_iso": "/v/u.iso"})
+
+
+# --- le cablage argv -> XML, medias compris ------------------------------ #
+# main() n etait exerce qu en mode REGIME, et deux mutations passaient alors
+# TOUTE la suite au vert (mesurees a la revue) :
+#   * build_domain_xml() transmettant windows_iso aux DEUX medias - l invite
+#     n a plus d autounattend.xml et Setup reste sur l ecran de langue,
+#     indefiniment ;
+#   * main() intervertissant les deux drapeaux - l ordre d amorcage atterrit
+#     sur une ISO qui n est pas amorcable.
+# Les deux vivent ENTRE argv et domain_xml(), segment que rien ne traversait.
+# Le materiel est simule pour que ce controle vaille sur n importe quel
+# constructeur ; tout le reste du chemin est reel, du parse des arguments au
+# rendu du gabarit.
+_orig_hw = {name: getattr(hardware, name) for name in
+            ("list_gpus", "cpu_topology", "passthrough_nvme",
+             "pci_slot_functions")}
+_orig_uuid = domain.existing_uuid
+try:
+    hardware.list_gpus = lambda: [{"discrete": True, "slot": "0000:01:00.0"}]
+    hardware.cpu_topology = lambda: {"performance_cpus": list(range(16)),
+                                     "total_cpus": 24}
+    hardware.passthrough_nvme = lambda: dict(NVME)
+    hardware.pci_slot_functions = lambda slot: [dict(g) for g in GPU]
+    domain.existing_uuid = lambda *a, **k: None
+
+    def _main_xml(argv):
+        """Run main() on this argv and return (rc, stdout)."""
+        out, err = io.StringIO(), io.StringIO()
+        saved = sys.argv
+        sys.argv = argv
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = domain.main()
+        finally:
+            sys.argv = saved
+        return rc, out.getvalue()
+
+    _rc, _out = _main_xml(["domain.py", "xml",
+                           "--windows-iso", "/m/officiel.iso",
+                           "--unattend-iso", "/v/reponses.iso"])
+    check("main() rend 0 avec les deux medias", _rc, 0)
+    # Un XML absent doit produire un ECHEC NOMME, jamais une trace : une
+    # mutation qui fait refuser main() (deux fois le meme media, par exemple)
+    # laisse stdout vide, et un ET.fromstring("") nu tuerait tout le fichier
+    # avant que la moindre ligne d echec ne soit imprimee.
+    _mcd = []
+    if _rc == 0 and _out.strip():
+        _mcd = [d for d in ET.fromstring(_out).findall("devices/disk")
+                if d.get("device") == "cdrom"]
+    else:
+        failures.append(
+            f"argv -> XML : main() n a produit aucun XML exploitable (code "
+            f"{_rc}), donc l appariement des medias n a pas pu etre verifie")
+    # APPARIEMENT, pas presence : c est precisement ce que les deux mutations
+    # cassent sans qu aucune assertion ensembliste ne bronche.
+    check("argv -> XML : chaque media atterrit sur SON lecteur",
+          {c.find("target").get("dev"): c.find("source").get("file")
+           for c in _mcd},
+          {"sdb": "/m/officiel.iso", "sdc": "/v/reponses.iso"})
+    check("argv -> XML : un seul ordre d amorcage",
+          _out.count("<boot order="), 1)
+    check("argv -> XML : et il porte sur le media Windows, pas sur les reponses",
+          [c.find("source").get("file")
+           for c in _mcd if c.find("boot") is not None],
+          ["/m/officiel.iso"])
+
+    # Le meme main(), sans drapeau, rend le domaine de regime.
+    _rc2, _out2 = _main_xml(["domain.py", "xml"])
+    check("main() sans drapeau rend le domaine de regime", _rc2, 0)
+    check("et ce domaine ne monte aucun cdrom", "cdrom" in _out2, False)
+
+    # Les refus traversent main() en code 1, jamais en trace.
+    check("main() refuse une paire incomplete",
+          _main_xml(["domain.py", "xml", "--windows-iso", "/m/officiel.iso"])[0], 1)
+    check("main() refuse deux fois le meme fichier",
+          _main_xml(["domain.py", "xml", "--windows-iso", "/m/x.iso",
+                     "--unattend-iso", "/m/x.iso"])[0], 1)
+finally:
+    for _name, _fn in _orig_hw.items():
+        setattr(hardware, _name, _fn)
+    domain.existing_uuid = _orig_uuid
+
+
 # domain_in_listing() must correctly parse virsh list --all --name output
 # and reject partial matches (a domain named "Windows-LTSC-test" must not
 # satisfy a query for "Windows").
@@ -193,6 +359,18 @@ check_raises(
 )
 check("define proceeds when varstore is absent",
       domain.guard_fresh_varstore(exists=False), None)
+
+# keyed_varstore=True is the documented escape hatch for exactly one
+# caller (guest-ready-watch.py's media-less redefinition once WinRM
+# answers, see the guard's own docstring) - it must let an existing
+# varstore through, without weakening the default (still refused above).
+check("define proceeds when the caller asserts the varstore is its own",
+      domain.guard_fresh_varstore(exists=True, keyed_varstore=True), None)
+check_raises(
+    "keyed_varstore defaults to False: an existing varstore is still refused",
+    domain.DomainError,
+    lambda: domain.guard_fresh_varstore(exists=True, keyed_varstore=False),
+)
 
 # vm-cpu-partition.sh derives the HOST cpuset from cputune, reading the domain
 # XML libvirt feeds it on stdin. It parses cputune/{vcpupin,emulatorpin,

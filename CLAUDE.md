@@ -32,6 +32,7 @@ as `~/Projects/Nivuus/packages/<name>`.
 | `nivuus/home-stock` | Garde-manger — household stock as an HA integration |
 | `nivuus/shell` | ZSH environment |
 | `nivuus/design` | Brand identity, mockups and design tokens |
+| `nivuus/media-manager` | Médiathèque (Plex, *arr, Tdarr) — package `nivuus.dev/v1`, tier `userspace` |
 | `nivuus/home-agent` | **archived** — autonomous AI agent (Gemini + ChromaDB) |
 | `nivuus/voice-agent` | **archived** — OpenAI-compatible shim adding HA tool-calling to ollama |
 
@@ -133,13 +134,118 @@ things about it are easy to break:
   still missing: **`vm-idle-shutdown.sh` was never versioned anywhere before
   this plan** — same class of gap as `handle-vm-start.sh` before
   2026-08-24, a script that existed only deployed on the production host.
-  Both are now source in `console/host/`. The console is **still not
-  functional from an install alone**: `activate` arms the wake/idle units
-  but does not build the Windows guest — it can manage a `Windows` domain
-  if one already exists, not create one. `console/guest/` (the former
-  `installer/windows-guest/`, 41 files) and `domain.py` are already inside
-  the package and `domain.py` works (see below) — what is still missing is
-  `activate` driving them, which is phase 2d, tracked separately.
+  Both are now source in `console/host/`. **At that point (tasks 1-4) the
+  console was still not functional from an install alone**: `activate`
+  armed only the wake/idle units and could manage a `Windows` domain if one
+  already existed, not create one.
+
+* **`activate` now builds and starts the guest too — phase 2d, plan
+  `2026-08-28-console-activate-invite`, done 2026-08-28.** `install` places
+  two more units (`nivuus-guest-ready.service`+`.timer`, eight total) and a
+  new script, `guest-ready-watch.py`; `activate` arms four of the eight
+  (adding the guest-readiness timer to the three above), then runs
+  `console/guest_steps.py`'s five ordered steps — write the three 0600
+  secrets, fetch the offline payload, build the unattended ISO, `domain.py
+  define` with **both** install media (the official Windows medium, which
+  boots, plus the just-built answer ISO, which does not), and one `virsh
+  start` — each skippable on its own `already_done()` observation, and each
+  failure classified into one of three causes (a refused input, a libvirt
+  hook refusal at `start`, or an unnamed command failure) by
+  `console/hooks/activate.py`'s `classify()`. **`activate` returns as soon
+  as `start` succeeds — it does not wait for Windows Setup to finish.**
+  `nivuus-guest-ready.timer` (2-minute period, self-stopping) is what says
+  the real outcome: it polls `virsh domstate` and reads a version-stamped
+  marker file over WinRM (`C:\nivuus\state\PROVISION.done`, written by
+  `provision/99-marker.ps1` as its last act, checked against `payload.py`'s
+  `PROVISION_VERSION` so a rebuilt disk's PREVIOUS run's marker never reads
+  as ready). **A reachable WinRM port (5985) is NOT the readiness signal —
+  this file said so until 2026-08-28, and that stale claim caused the whole
+  redesign this bullet documents**: since 2026-08-26 `provision/00-bootstrap.ps1`
+  opens 5985 at the FIRST provisioning stage, deliberately, so a reachable
+  port only ever proves the guest is alive enough to accept a command, never
+  that provisioning finished. The timer logs
+  `not_started`/`installing`/`failed` (2h timeout)/`ready`. On `ready` it
+  redefines the domain **without** either install medium
+  (`domain.py define --replace --keyed-varstore`), stopping the timer only
+  once that redefinition itself has actually succeeded, so a transient
+  failure there is retried rather than leaving the media attached forever.
+  `console/guest/` and `domain.py` are no longer merely "already inside the
+  package" — `activate` now drives both.
+  **Named residuals, not silently accepted**: (1) `--replace` on `define`
+  is a real risk on a host where `Windows` is already the production VM —
+  `guard_replace()`/`guard_fresh_varstore()` remain the backstop, not a
+  substitute for an operator's own judgment; (2) the first reboot inside
+  Setup on this exact domain shape (both media, then redefined without
+  them) is unmeasured — the bench ran two full LTSC installs this way, but
+  the only guard against a boot loop is the "Press any key" prompt on the
+  operator's own medium, and the bench never installed onto an NVMe passed
+  through as PCI; (3) a `windows_iso` answer given as a URL is never
+  fetched — `media_identity()` only `stat()`s a local path, the wizard's own
+  label still says otherwise, and downloading 5 GB with resume/integrity
+  was deliberately left out of scope; (4) the `payload` step's
+  `already_done()` is shallow — an interrupted fetch still counts as done,
+  and it is the `build` step re-running against it that repairs the gap;
+  (5) `retro: true` cannot succeed on a target even though the wizard
+  offers it — `fetch_payload.py`'s `RETRO_SRC` default resolves to
+  `/opt/retro` once this package is copied to `/opt/nivuus-packages/console/`,
+  and nothing creates that directory there, so `build_retro_wheels()`
+  refuses by name the moment `payload` runs with retro on; (6) the WinRM
+  password-file path `guest-ready-watch.py` passes to `winrm_exec.py`
+  (`GUEST_PASS_FILE`) is deduced from reading `guest_steps.py`'s own
+  `secrets` step side by side with it, never measured against a real guest
+  — running one is exactly what this whole chain is forbidden from doing.
+  **None of this chain has ever run for real** — every step is proven
+  against a fake `virsh`/filesystem, never on the reference host, because
+  starting `Windows` there detaches the GPU from the host. The host-specific
+  constants this paragraph does NOT re-litigate (hard-coded GPU PCI address,
+  the wake path's wrong bridge, `/opt/nivuus/…` paths, the missing `winrm`
+  client) are unchanged and stay documented in `console/README.md`'s
+  **Limites connues** — a separate, still-open item.
+
+* **Three run-time-only defects fixed 2026-08-28, task 4 of
+  `2026-08-28-console-observabilite`** — none visible from reading either
+  file alone, all found by tracing what the OTHER phase's own code does to
+  this one's state:
+  1. **The regime domain used to feed a silent, permanent replay loop.**
+     Once `guest-ready-watch.py` redefines the domain without install media
+     (see the `activate` bullet above), `guest_steps.domain_defined()` used
+     to look only for the two install-media ISO paths — absent on a regime
+     domain — so it read "not done" and replayed `domain.py define`
+     *without* `--keyed-varstore` (that flag is `guest-ready-watch.py`'s own
+     escape hatch, never this step's), which hit `guard_fresh_varstore()`
+     forever (the varstore the earlier media-carrying `define` already
+     created never goes away) and refused with a remedy —
+     `virsh undefine Windows --nvram` — that would have **reinstalled
+     Windows over a console that already works**. `domain_defined()` now
+     also checks the passthrough disk's own PCI address, read from the
+     `<hostdev>`'s `<source>` element (`hostdev_source_addresses()`,
+     measured 2026-08-28 against `virsh dumpxml Windows` on the real
+     production domain: the source address is exactly
+     `domain='0x0000' bus='0x03' slot='0x00' function='0x0'`, matching
+     `lspci`'s `144d:a808` at `0000:03:00.0`, and libvirt never touches its
+     attribute order the way it does the SIBLING guest-side `<address
+     type='pci' .../>` a few lines below, which is not this identity and is
+     deliberately never read as it) — and treats a media-less domain
+     already carrying the right disk as a **terminal, legitimate** outcome.
+  2. **The same predicate never noticed a changed `dedicated_nvme`.**
+     `source_iso`/`iso_out` are FIXED paths under the guest workdir,
+     unrelated to which physical disk was chosen — build reruns, `define`
+     silently didn't. The PCI-address check above fixes both defects at
+     once: media match alone is no longer sufficient, the disk must also
+     agree.
+  3. **`guest-ready-watch.py` logged "installation non demarree" every 2
+     minutes forever, on a console that was simply resting** (most of a
+     console's life, between sessions) — the timer never distinguished "just
+     went not-running" from "still not running, same as last tick". It now
+     logs the transition once, via a `not_started_reported` flag in its own
+     persisted state, and stays silent until a genuine transition (running,
+     then not-running again) clears it.
+  Tests: `test_console_guest_steps.py` (regime-domain and changed-disk
+  cases, plus `hostdev_source_addresses()`/`domain_matches_disk()` directly)
+  and `test_console_guest_ready.py` (silence across repeated ticks, a
+  resumed message after a genuine transition) — both proven to fail against
+  the pre-fix code (`git stash` the two implementation files, rerun) before
+  being proven to pass against it, `__pycache__` purged, `python -B`.
 
 `hardware.py` is now split by that same principle: `installer/common/hardware.py`
 detects **capabilities** (coarse: is there an IOMMU, a discrete GPU, a spare
@@ -278,19 +384,27 @@ wizard is deliberately deferred, not forgotten.
 
 Tests: `cd installer && make test-packages` (needs a Python with `pydantic`
 and `jinja2` — not the Debian base — via `PYTHON=/path/to/venv/bin/python`).
-**31 suites, measured 2026-08-28, exit 0**: 11 run directly by
+**33 suites, measured 2026-08-28 (after phase 2d), exit 0**: 11 run directly by
 `installer/Makefile` (the engine/webapp/packages suites that stay outside
-`console/`), and 20 delegated to `console/Makefile`'s own `test` target —
-the 6 `test_console_*` suites, `test_vm_wake_gate`, `test_retro_marker_bridge`,
-the 11 `test_windows_guest_*` suites and the shell suite
-`test_handle_vm_start.sh`, all of them living under `console/tests/`. That
-last one was wired up on 2026-08-28 (it has its own loop in
-`console/Makefile`, since the Python loop only runs `.py` files): it is the
-only guard on the 2026-08-24 infinite-wake bug, and reintroducing that bug
-was measured to leave every Python suite green. No file under `console/` imports from
-`installer/common` or anywhere else in `installer/` — verified with
-`grep -rn 'from common\|import common' console/`, which returns nothing.
-Spec: `docs/superpowers/specs/2026-08-27-decoupage-installer-console-design.md`.
+`console/`), and 22 delegated to `console/Makefile`'s own `test` target —
+the 8 `test_console_*` suites (`test_console_guest_steps` and
+`test_console_guest_ready` are phase 2d's own), `test_vm_wake_gate`,
+`test_retro_marker_bridge`, the 11 `test_windows_guest_*` suites and the
+shell suite `test_handle_vm_start.sh`, all of them living under
+`console/tests/`. That last one was wired up on 2026-08-28 (it has its own
+loop in `console/Makefile`, since the Python loop only runs `.py` files): it
+is the only guard on the 2026-08-24 infinite-wake bug, and reintroducing
+that bug was measured to leave every Python suite green. No file under
+`console/` **source** imports from `installer/common` or anywhere else in
+`installer/` — verified with `grep -rn 'from common\|import common' console/`,
+which returns nothing. **That grep is too narrow to prove the whole
+boundary, and does not**: `console/tests/test_console_resolve.py` puts
+`installer/` on `sys.path` and imports `packages.manifest`/`packages.runner`/
+`packages.wizard` to exercise `resolve` through the real engine contract —
+a real, dated blocker for the day this package is extracted with
+`git filter-repo`, not a source-code exception.
+Spec: `docs/superpowers/specs/2026-08-27-decoupage-installer-console-design.md`,
+phase 2d's own design: `docs/superpowers/specs/2026-08-28-console-activate-invite-design.md`.
 
 **Build & test:** `cd installer && sudo make build-iso` (needs `live-build`).
 `make test-portal` (portal on :8080), `make test-vm` (QEMU UEFI, portal via
@@ -698,4 +812,8 @@ The WAN is a PPPoE session over VLAN 835. **The physical WAN port is now `enp5s0
 - **Firewall Config**: `/configs/firewall/` - firewalld and nftables rules
 - **VM Config**: `/docs/vm-configuration.md` - QEMU/KVM setup with GPU passthrough
 - **Specs & plans**: `/docs/superpowers/` - design documents and implementation plans
+- **Console debts**: `/docs/console-dettes.md` - known gaps on the Windows guest
+  (gamepad rumble, X360-only pad so no motion sensor, off-brand wallpaper). Its
+  counterpart is `docs/dettes.md` in `nivuus/retro`; three of those debts cross
+  the repo boundary, the pad being created here and consumed there.
 - **MQTT agent**: now `nivuus/mqtt` - its CLAUDE.md holds the agent-side documentation

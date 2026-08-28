@@ -311,6 +311,105 @@ ne les lance pas, ce qui rend l ensemble testable sans construire d ISO."
 
 ---
 
+### Task 3b : le domaine d'installation attache les deux médias
+
+**Files:**
+- Modify: `console/guest/domain.py`
+- Modify: `console/guest/templates/domain.xml.j2`
+- Modify: `console/guest_steps.py`
+- Test: `console/tests/test_console_guest_steps.py`, `console/tests/test_windows_guest_domain.py`
+
+**Interfaces:**
+- Consomme : `plan_steps` et les étapes `define`/`start` de la tâche 3.
+- Produit : un `domain.py` capable d'émettre le domaine **avec** les médias d'installation. La tâche 5 le redéfinira **sans** eux une fois l'invité prêt.
+
+**Cette tâche existe parce que le plan était faux, et la mesure le dit.** Le gabarit de production `templates/domain.xml.j2` ne contient **aucun** `cdrom`, et l'unique `<boot order='1'/>` porte sur le NVMe — vérifié aussi sur le domaine `Windows` réellement défini sur l'hôte de référence. `define` puis `start`, tels que la tâche 3 les construit, démarreraient donc un disque vierge : Windows Setup ne se lancerait jamais.
+
+**Et le piège est plus profond qu'il n'y paraît : il faut DEUX médias, pas un.** `templates/domain-test.xml.j2` — le seul gabarit du dépôt qui attache quoi que ce soit — en monte deux :
+
+```xml
+<disk type='file' device='cdrom'>          <!-- le media Windows officiel -->
+  <source file='{{ windows_iso }}'/>
+  <target dev='sdb' bus='sata'/>
+  <readonly/>
+  <boot order='1'/>                        <!-- c est LUI qui amorce -->
+</disk>
+<disk type='file' device='cdrom'>          <!-- l ISO construite par build.py -->
+  <source file='{{ unattend_iso }}'/>
+  <target dev='sdc' bus='sata'/>
+  <readonly/>                              <!-- pas d ordre: elle n amorce pas -->
+</disk>
+```
+
+L'ISO que `build.py` produit **n'est pas amorçable** : c'est le média de réponses et de charge utile, que Windows Setup lit une fois démarré depuis le média officiel. La docstring de `build.py` le dit — « The Windows medium is only read: it is never rebuilt ». Ne fabrique donc pas un domaine à un seul lecteur.
+
+**Ce que la tâche ne fait pas** : elle ne retire pas les médias après l'installation. C'est la tâche 5 qui le fera, quand elle saura que l'invité est prêt.
+
+- [ ] **Step 1: mesurer l'écart avant de le combler**
+
+```bash
+command grep -c cdrom console/guest/templates/domain.xml.j2        # attendu: 0
+command grep -c cdrom console/guest/templates/domain-test.xml.j2   # attendu: >0
+command grep -n "boot order" console/guest/templates/domain.xml.j2
+```
+
+Rapporte les trois sorties. C'est la référence contre laquelle la correction se juge.
+
+- [ ] **Step 2: écrire les tests qui échouent**
+
+Dans `console/tests/test_windows_guest_domain.py`, vérifie que le domaine émis **en mode installation** monte les deux médias, que seul le média Windows porte un ordre de démarrage, et que le mode **normal** n'en monte aucun :
+
+```python
+# Two media, not one. build.py's output is the ANSWER medium - Windows Setup
+# reads it once booted from the official ISO, which is why only that one
+# carries a boot order. A single-drive install domain boots into a blank NVMe.
+xml_install = domain.domain_xml(..., windows_iso="/m/w.iso",
+                                unattend_iso="/v/nivuus-unattend.iso")
+check("le media Windows est monte", "/m/w.iso" in xml_install, True)
+check("l ISO de reponses est montee",
+      "/v/nivuus-unattend.iso" in xml_install, True)
+check("seul le media Windows amorce", xml_install.count("<boot order="), 1)
+
+xml_steady = domain.domain_xml(...)            # sans media
+check("le domaine de regime ne monte aucun cdrom",
+      "cdrom" in xml_steady, False)
+```
+
+Adapte à la signature réelle de `domain_xml()` — **lis-la**, elle prend des arguments nommés explicites.
+
+Dans `console/tests/test_console_guest_steps.py`, vérifie que l'étape `define` passe bien les deux chemins.
+
+- [ ] **Step 3: implémenter**
+
+`domain.xml.j2` accepte les deux médias, conditionnellement. `domain.py` gagne le moyen de les fournir. `guest_steps.py` les passe. Reprends la forme exacte de `domain-test.xml.j2` — bus, cibles, `readonly`, ordre — plutôt que d'en inventer une : elle a servi à des installations réelles.
+
+- [ ] **Step 4: le garde-fou de dérive de l'empreinte**
+
+`package_inputs()` de `console/guest_steps.py` est une **liste explicite**. Un nouveau module de `console/guest/` entrant dans l'image sans y être ajouté échapperait à l'empreinte, **silencieusement** — et une mise à jour du paquet réutiliserait alors une ISO périmée. C'est la même classe de dérive qu'une table de placement incomplète, et ce dépôt l'a déjà payée une fois.
+
+Ajoute une vérification exigeant que **chaque** `.py` directement sous `console/guest/` figure soit dans la liste des entrées, soit dans une liste d'exclusions **explicite et commentée**. Le message d'échec doit **nommer** le fichier orphelin.
+
+- [ ] **Step 5: prouver que tout cela peut échouer**
+
+Trois épreuves, chacune restaurée : retirer le média de réponses du domaine d'installation ; donner un ordre de démarrage à l'ISO de réponses ; ajouter un `.py` bidon sous `console/guest/` sans le déclarer. Chacune doit produire un échec **nommé**.
+
+- [ ] **Step 6: agrégateur et commit**
+
+Run: `cd installer && make test-packages PYTHON="$PY"` → 32 suites, exit 0, 0 `FAIL`, 0 `✗`.
+
+```bash
+git add console/guest/domain.py console/guest/templates/domain.xml.j2 \
+        console/guest_steps.py console/tests/
+git commit -m "feat(console): le domaine d installation attache les deux medias
+
+Le gabarit de production n avait aucun cdrom et amorcait sur le NVMe: define
+puis start auraient demarre un disque vierge. Et il en faut DEUX — l ISO que
+build.py produit n est pas amorcable, c est le media de reponses que Windows
+Setup lit une fois demarre depuis le media officiel."
+```
+
+---
+
 ### Task 4 : `activate` orchestre, et classe ses échecs
 
 **Files:**

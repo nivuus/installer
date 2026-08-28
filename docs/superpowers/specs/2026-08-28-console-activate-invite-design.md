@@ -137,6 +137,70 @@ Elle doit distinguer deux échecs que rien ne sépare aujourd'hui :
 Le second est le cas intéressant, et le seul que le journal de l'hôte puisse
 rendre lisible : l'invité, lui, ne peut rien dire tant que WinRM est fermé.
 
+### 5 bis. AMENDEMENT du 2026-08-28 — la décision 5 reposait sur deux prémisses fausses
+
+La décision 5 ci-dessus **est révoquée**. Elle disait de sonder le port 5985 et
+citait `99-marker.ps1` comme autorité. Les deux moitiés étaient fausses, et la
+revue finale les a mesurées sur l'hôte :
+
+**Le port 5985 n'est plus le témoin de fin, et ne l'est plus depuis le
+2026-08-26.** `console/guest/provision/00-bootstrap.ps1` l'ouvre désormais à
+l'étape **00**, délibérément, et son en-tête explique pourquoi : le port fermé
+était un proxy qui « failed exactly where it mattered » — quand une étape
+échoue, `99-marker.ps1` n'est jamais atteint, la règle reste fermée, et la seule
+porte d'entrée disparaît précisément quand il faudrait regarder. Trois
+provisionnements sont morts ainsi ce jour-là. **« The marker file IS the truth
+about readiness; the port never was. »** Seul l'en-tête de `99-marker.ps1` dit
+encore le contraire : il est périmé, et c'est lui que le spec citait.
+
+**La découverte d'IP par `virsh domifaddr` ne peut aboutir sur cette
+topologie.** Mesuré sur la VM de production en marche : `--source agent` échoue
+(aucun agent invité n'est configuré, le domaine ne déclare aucun `<channel>`),
+`--source lease` et `--source arp` rendent des tables vides, et
+`virsh net-list --all` ne déclare **aucun** réseau libvirt — le domaine est sur
+un pont externe. `handle-vm-start.sh`, dont la méthode avait été reprise, porte
+le même défaut ; il ne l'a jamais trahi parce que le hook
+`started/begin/rules.sh` pose les redirections de toute façon.
+
+#### Ce qui les remplace, mesuré avant d'être écrit
+
+**L'IP vient de la table de voisinage de l'hôte.** Le domaine déclare son MAC et
+son pont ; `ip neigh show dev <pont>` associe l'un à l'autre dès que l'invité a
+parlé. Vérifié sur la VM de production :
+
+```
+192.168.3.2 dev internalBridge lladdr 52:54:00:48:e0:3e REACHABLE
+```
+
+Aucun réseau libvirt n'est requis. Une entrée absente signifie « l'invité n'a pas
+encore parlé », ce qui est exactement l'état à distinguer.
+
+**Le témoin est un fichier, lu par-dessus WinRM, et vérifié en version.**
+`console/guest/winrm_exec.py` existe, lit son mot de passe dans un **fichier et
+jamais depuis `argv`** — même discipline que `build.py` — et prend `GUEST_IP`,
+`GUEST_USER`, `GUEST_PASS_FILE` dans l'environnement. `testdomain.py` s'en sert
+déjà exactement ainsi.
+
+**La vérification de version n'est pas un raffinement.** `testdomain.py` le dit :
+« a rebuild boots a disk that already holds the PREVIOUS run's marker, so its
+mere presence proves nothing ». Le témoin doit porter
+`provision_version=<PROVISION_VERSION courant>` — `B3` à ce jour, défini dans
+`console/guest/payload.py`. Sans ce contrôle, une réinstallation lirait le témoin
+de l'installation précédente et se déclarerait prête avant d'avoir commencé.
+
+**`pywinrm` entre au manifeste.** Le paquet Debian est `python3-winrm`
+(0.5.0-2). C'est le quatrième trou de dépendance de cette série, après
+`firewalld`, `python3-jinja2` et `xorriso` : un package doit déclarer ce dont
+son propre code a besoin.
+
+#### La leçon, qui vaut au-delà de ce spec
+
+J'ai cité un commentaire comme autorité sans vérifier qu'il était encore vrai.
+Il datait de deux jours avant, et le fichier qui le contredisait était à côté.
+**Un commentaire décrit l'intention de son auteur au moment où il l'a écrit ;
+seul le code dit ce qui se passe aujourd'hui.** Quand deux fichiers se
+contredisent, c'est une mesure qui tranche, pas le ton du plus affirmatif.
+
 ### 6. Les chemins de sortie ont un défaut portable
 
 `/var/lib/nivuus/guest/` par défaut — payload, ISO produite, empreintes —

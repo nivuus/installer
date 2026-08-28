@@ -38,8 +38,29 @@ apt:
   # not generate its own domain without this. Declared here for the same
   # reason as firewalld above: a package carries its own dependencies.
   - python3-jinja2
+  # xorriso: guest/unattend_iso.py builds the unattended ISO by calling the
+  # `xorriso` BINARY directly (`xorriso -as mkisofs ...`, and `xorriso -indev`
+  # to verify what was staged). The `-as mkisofs` is xorriso's own emulation
+  # mode, NOT the separate mkisofs/genisoimage binary, so `xorriso` is the one
+  # and only package needed - and the Debian package is named `xorriso`
+  # (verified: dpkg -S /usr/bin/xorriso). Without it the activate phase gets
+  # all the way through fetching the payload before dying at image creation.
+  # Declared here for the same reason as firewalld and python3-jinja2 above:
+  # a package carries its own dependencies, so that a standalone install on
+  # an ordinary Debian works.
+  - xorriso
   - virtiofsd
   - bridge-utils
+  # python3-winrm: guest/winrm_exec.py imports it as `winrm` to run commands
+  # in the guest over WinRM with the ntlm transport (the guest only offers
+  # Negotiate, not Basic - measured 2026-08-22). host/guest-ready-watch.py
+  # depends on it too, to read the provisioning marker once the watch
+  # timer runs, and guest/testdomain.py's _marker_present() does the same
+  # for the same reason. Package name verified with `apt-cache show
+  # python3-winrm` (source: pywinrm). Declared here for the same reason as
+  # firewalld, python3-jinja2 and xorriso above: a package carries its own
+  # dependencies, so that a standalone install on an ordinary Debian works.
+  - python3-winrm
 
 wizard:
   questions: wizard.yaml
