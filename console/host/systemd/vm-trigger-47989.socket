@@ -1,0 +1,11 @@
+[Unit]
+Description=Socket listener to trigger VM start for port 47989
+
+[Socket]
+ListenStream=0.0.0.0:47989
+Accept=false
+TriggerLimitIntervalSec=2
+TriggerLimitBurst=200
+
+[Install]
+WantedBy=sockets.target

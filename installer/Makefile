@@ -59,13 +59,14 @@ test-vm:
 # is the only aggregator there is - and an aggregator that fails for a missing
 # dependency reads as "the engine is broken", which is the wrong thing to learn.
 #
-# 27 suites (2026-08-28): the original 9, the 6 the console-package phase
+# 28 suites (2026-08-28): the original 9, the 6 the console-package phase
 # created or touched, test_console_host_files for versioned-not-deployed files,
-# and all 11 test_windows_guest_* suites, which run clean standalone (no root,
-# no network, no mounted Windows medium) and were simply never wired into any
-# aggregator before. NOTE: a green run here is not proof that
-# installer/windows-guest/domain.py works - see CLAUDE.md, Installer
-# Architecture, for the coverage gap both domain suites share.
+# test_console_wake_units for the VM wake socket units, and all 11
+# test_windows_guest_* suites, which run clean standalone (no root, no network,
+# no mounted Windows medium) and were simply never wired into any aggregator
+# before. NOTE: a green run here is not proof that installer/windows-guest/domain.py
+# works - see CLAUDE.md, Installer Architecture, for the coverage gap both domain
+# suites share.
 PYTHON ?= python3
 
 test-packages:
@@ -75,7 +76,8 @@ test-packages:
 	          test_install_engine_bootloader test_install_engine_packages \
 	          test_webapp_models \
 	          test_common_hardware test_console_hardware test_console_resolve \
-	          test_console_install test_console_host_files test_install_engine_features \
+	          test_console_install test_console_host_files test_console_wake_units \
+	          test_install_engine_features \
 	          test_retro_marker_bridge \
 	          test_windows_guest_apollo test_windows_guest_autounattend \
 	          test_windows_guest_build test_windows_guest_domain \
