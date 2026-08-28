@@ -96,7 +96,8 @@ with tempfile.TemporaryDirectory() as tmp:
 
     for rel in ("usr/local/sbin/vm-wake-gate.py",
                 "usr/local/sbin/handle-vm-start.sh",
-                "usr/local/bin/winvm"):
+                "usr/local/bin/winvm",
+                "usr/local/sbin/guest-ready-watch.py"):
         check(f"{rel} depose", (root / rel).is_file(), True)
         check(f"{rel} executable", os.access(root / rel, os.X_OK), True)
 
@@ -133,7 +134,9 @@ with tempfile.TemporaryDirectory() as tmp:
                       ("libvirt/hooks/qemu.d/Windows/release/end/10-cpu-release.sh",
                        "etc/libvirt/hooks/qemu.d/Windows/release/end/10-cpu-release.sh"),
                       ("libvirt/hooks/qemu", "etc/libvirt/hooks/qemu"),
-                      ("vm-idle-shutdown.sh", "usr/local/sbin/vm-idle-shutdown.sh")):
+                      ("vm-idle-shutdown.sh", "usr/local/sbin/vm-idle-shutdown.sh"),
+                      ("guest-ready-watch.py",
+                       "usr/local/sbin/guest-ready-watch.py")):
         origin = CONSOLE / "host" / src
         target = root / dest
         try:
@@ -154,6 +157,8 @@ with tempfile.TemporaryDirectory() as tmp:
         "etc/systemd/system/vm-trigger-47989.service",
         "etc/systemd/system/vm-idle-shutdown.service",
         "etc/systemd/system/vm-idle-shutdown.timer",
+        "etc/systemd/system/nivuus-guest-ready.service",
+        "etc/systemd/system/nivuus-guest-ready.timer",
         "etc/systemd/system/vm-trigger-47984.service.d/no-start-limit.conf",
         "etc/systemd/system/vm-trigger-47989.service.d/no-start-limit.conf",
     ]

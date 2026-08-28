@@ -67,6 +67,7 @@ WANTS = {
     "vm-trigger-47984.socket": "sockets.target.wants",
     "vm-trigger-47989.socket": "sockets.target.wants",
     "vm-idle-shutdown.timer": "timers.target.wants",
+    "nivuus-guest-ready.timer": "timers.target.wants",
 }
 
 UNIT_DIR = "etc/systemd/system"

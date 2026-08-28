@@ -47,6 +47,8 @@ LINKS = {
         "/etc/systemd/system/vm-trigger-47989.socket",
     "etc/systemd/system/timers.target.wants/vm-idle-shutdown.timer":
         "/etc/systemd/system/vm-idle-shutdown.timer",
+    "etc/systemd/system/timers.target.wants/nivuus-guest-ready.timer":
+        "/etc/systemd/system/nivuus-guest-ready.timer",
 }
 
 failures = []
@@ -114,7 +116,7 @@ with tempfile.TemporaryDirectory() as root:
     units = os.path.join(root, "etc/systemd/system")
     os.makedirs(units)
     for name in ("vm-trigger-47984.socket", "vm-trigger-47989.socket",
-                 "vm-idle-shutdown.timer"):
+                 "vm-idle-shutdown.timer", "nivuus-guest-ready.timer"):
         open(os.path.join(units, name), "w").write("[Unit]\n")
 
     bin_dir = os.path.join(root, "stub-bin")
@@ -165,11 +167,12 @@ spec = importlib.util.spec_from_file_location("console_activate", HOOK)
 activate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(activate)
 
-check("start_now covers exactly the three armed units",
+check("start_now covers exactly the four armed units",
       sorted(activate.WANTS) == sorted([
           "vm-idle-shutdown.timer",
           "vm-trigger-47984.socket",
-          "vm-trigger-47989.socket"]))
+          "vm-trigger-47989.socket",
+          "nivuus-guest-ready.timer"]))
 
 with tempfile.TemporaryDirectory() as bin_dir:
     log = stub_systemctl(bin_dir)

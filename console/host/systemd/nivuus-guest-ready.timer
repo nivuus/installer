@@ -1,0 +1,9 @@
+[Unit]
+Description=Periodic Windows guest readiness probe (self-stops once ready or failed)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target

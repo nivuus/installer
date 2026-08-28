@@ -67,6 +67,7 @@ HOST_SCRIPTS = [
     ("host/handle-vm-start.sh", "usr/local/sbin/handle-vm-start.sh"),
     ("host/vm-idle-shutdown.sh", "usr/local/sbin/vm-idle-shutdown.sh"),
     ("host/winvm", "usr/local/bin/winvm"),
+    ("host/guest-ready-watch.py", "usr/local/sbin/guest-ready-watch.py"),
 ]
 
 # Units are DATA, not programs: mode 0644. A unit file with the execute bit
@@ -75,6 +76,7 @@ UNITS = [
     "vm-trigger-47984.socket", "vm-trigger-47984.service",
     "vm-trigger-47989.socket", "vm-trigger-47989.service",
     "vm-idle-shutdown.service", "vm-idle-shutdown.timer",
+    "nivuus-guest-ready.service", "nivuus-guest-ready.timer",
 ]
 
 # The same drop-in serves both wake services; systemd reads it from each
