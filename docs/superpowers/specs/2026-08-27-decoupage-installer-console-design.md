@@ -249,6 +249,20 @@ L'instinct est de découper git d'abord et de réparer ensuite. C'est l'inverse.
 | **3** | `git filter-repo` → `nivuus/console` avec son historique. Suppression des mêmes chemins côté `installer`. `build.sh` apprend `CONSOLE_REPO_DIR` | Mécanique |
 | **4** | Le runner autonome de `console` : détection, questions en CLI, bootloader existant (GRUB **et** systemd-boot) | Indépendant |
 
+**Note a posteriori (2026-08-28) : la phase 2 ci-dessus, écrite comme une seule
+ligne, s'est exécutée en quatre étapes distinctes — 2a à 2d — mais ce
+découpage est venu APRÈS ce spec, à l'exécution, pas ici.** Ce document ne les
+a jamais nommées ; l'historique git le fait (`phase 2a` : la console devient
+un package côté hôte ; `2b` : câblage du cycle de vie de la VM côté hôte ;
+`2c` : l'invité entre dans le package ; `2d` : `activate` construit l'invité).
+Le volet invité de la phase 2 — `activate` sait désormais construire et
+démarrer l'invité Windows, pas seulement gérer un domaine déjà défini — est
+**fait**, daté 2026-08-28 : voir `2026-08-28-console-activate-invite-design.md`
+pour sa conception et `CLAUDE.md` pour l'état mesuré (33 suites, exit 0) et les
+résidus qu'il laisse ouverts. Cela ne clôt pas la phase 2 dans son ensemble —
+2a à 2c avaient déjà leurs propres livraisons — seulement le morceau que ce
+spec-ci décrivait encore comme à faire.
+
 La phase 2 porte tout le risque, et c'est pourquoi elle se fait **avec les deux
 moitiés encore dans la même suite de tests**. Quand la phase 3 arrive, la
 frontière est déjà prouvée : il ne reste qu'à déplacer des fichiers dont on sait
