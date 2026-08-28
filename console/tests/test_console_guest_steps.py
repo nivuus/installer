@@ -658,6 +658,103 @@ for state, up in (("running", True), ("idle", True), ("paused", True),
         check(f"domstate '{state}' compte comme demarre", st["start"].already_done(), up)
 
 
+# --- l aide au demarrage : KEY_ENTER pour passer l invite du media --------
+# Sans elle, mesure sur la console reelle le 2026-08-28 : 42 MINUTES sur
+# "Press any key to boot from CD or DVD......", disque fige a 194 Ko, puis
+# "BdsDxe: No bootable option or device was found" - Setup ne demarre
+# jamais. C est ce defaut precis que start_run() corrige.
+#
+# runner EST TOUJOURS un faux ici, jamais steps.default_runner : celui-ci
+# lancerait un vrai `virsh start Windows` en sous-processus, exactement
+# l appel interdit contre le domaine de production (voir la consigne de la
+# tache).
+def _run_start(tmp, virsh_answers):
+    """Lance l etape start avec des faux virsh/runner/sleep, et rend les
+    appels observes : (calls du virsh, argv lances par le runner,
+    duree de chaque pause)."""
+    fake_virsh = FakeVirsh(virsh_answers)
+    launched = []
+    slept = []
+    given = dict(ANSWERS, guest_workdir=tmp)
+    st = by_name(steps.plan_steps(
+        given, {}, tmp, virsh=fake_virsh, runner=launched.append,
+        size_of=lambda d: DISK_BYTES, pci_address_of=_default_pci_address_of,
+        qemu_owner=lambda: (0, 0), chown=_inert_chown, sleep=slept.append))
+    st["start"].run()
+    return fake_virsh.calls, launched, slept
+
+
+OFF_AND_KEYABLE = {"dumpxml": (0, "<domain/>"), "domstate": (0, "shut off\n"),
+                   "send-key": (0, "")}
+
+with tempfile.TemporaryDirectory() as tmp:
+    calls, launched, slept = _run_start(tmp, OFF_AND_KEYABLE)
+    send_key_calls = [c for c in calls if c[0] == "send-key"]
+
+    check("virsh start est bien lance", launched, [["virsh", "start", "Windows"]])
+    check("start envoie KEY_ENTER apres avoir demarre un domaine eteint",
+          len(send_key_calls) > 0, True)
+    # BORNE, exactement - pas "au moins", pas "a peu pres". Un envoi non
+    # borne finirait par frapper Windows Setup une fois l invite passee
+    # (voir recette-b.md : un ENTER de trop y a valide un bouton Annuler
+    # focus et gele une construction a 8%).
+    check("l envoi est borne A EXACTEMENT BOOT_KEY_ATTEMPTS frappes",
+          len(send_key_calls), steps.BOOT_KEY_ATTEMPTS)
+    check("BOOT_KEY_ATTEMPTS vaut 12, comme la recette acceptee",
+          steps.BOOT_KEY_ATTEMPTS, 12)
+    check("chaque frappe cible le bon domaine, codeset linux, KEY_ENTER",
+          all(c == ["send-key", steps.DOMAIN_NAME, "--codeset", "linux",
+                    "KEY_ENTER"] for c in send_key_calls), True)
+    check("une pause separe chaque frappe, autant que de frappes",
+          len(slept), steps.BOOT_KEY_ATTEMPTS)
+    # domstate (le was_up interne) precede les frappes ; aucune frappe
+    # n arrive avant que le demarrage ait ete evalue.
+    check("le premier appel a virsh est la lecture d etat, avant toute frappe",
+          calls[0][0] == "domstate" and calls[1][0] == "send-key", True)
+
+with tempfile.TemporaryDirectory() as tmp:
+    # Le domaine tournait DEJA : run() ne doit envoyer AUCUNE frappe. Une
+    # ENTER dans une session vivante irait a ce qui s y joue, pas a un
+    # firmware. Ce test appelle .run() DIRECTEMENT, sans passer par
+    # already_done() (que le pipeline reel consulte avant d appeler run())
+    # - c est le garde-fou interne a start_run() qui est ici sous epreuve,
+    # pas seulement le comportement du pipeline autour de lui.
+    running_and_keyable = dict(RUNNING, **{"send-key": (0, "")})
+    calls, launched, slept = _run_start(tmp, running_and_keyable)
+    send_key_calls = [c for c in calls if c[0] == "send-key"]
+    check("un domaine deja demarre ne recoit AUCUNE frappe",
+          send_key_calls, [])
+    check("et rien n a dormi entre des frappes qui n existent pas",
+          slept, [])
+
+with tempfile.TemporaryDirectory() as tmp:
+    # Un send-key qui echoue (virsh injoignable, domaine disparu) est une
+    # aide, pas une condition : le demarrage ne doit PAS echouer pour ca,
+    # et les 12 tentatives doivent quand meme toutes avoir lieu (la
+    # premiere tentative ratee n arrete pas les suivantes).
+    fails_send_key = {"dumpxml": (0, "<domain/>"), "domstate": (0, "shut off\n"),
+                      "send-key": (1, "error: Domain not found")}
+    try:
+        calls, launched, slept = _run_start(tmp, fails_send_key)
+    except steps.GuestBuildError:
+        failures.append("un send-key en echec a fait echouer le demarrage "
+                        "(ce n est qu une aide, pas une condition)")
+    else:
+        send_key_calls = [c for c in calls if c[0] == "send-key"]
+        check("un send-key qui echoue n empeche pas les tentatives suivantes",
+              len(send_key_calls), steps.BOOT_KEY_ATTEMPTS)
+
+# send_boot_keys() directement : la fonction elle-meme, sans passer par
+# plan_steps - la meme regle de bornage doit valoir isolement.
+fake_virsh = FakeVirsh({"send-key": (0, "")})
+slept = []
+steps.send_boot_keys(fake_virsh, slept.append, domain="Windows")
+check("send_boot_keys seule envoie exactement BOOT_KEY_ATTEMPTS frappes",
+      len(fake_virsh.calls), steps.BOOT_KEY_ATTEMPTS)
+check("send_boot_keys seule cible le domaine passe en argument",
+      all(c[1] == "Windows" for c in fake_virsh.calls), True)
+
+
 # --- un echec nomme la commande, pas son premier argument ---------------- #
 check("un script est nomme par son fichier",
       steps.command_label(["/usr/bin/python3", "/opt/x/guest/build.py", "--a"]),

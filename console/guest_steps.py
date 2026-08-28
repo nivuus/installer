@@ -33,6 +33,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
@@ -601,6 +602,54 @@ def default_runner(argv: list[str], *,
             f"{' '.join(argv)}")
 
 
+# --- the boot-key assist -------------------------------------------------- #
+# The LTSC medium shows "Press any key to boot from CD or DVD......" and the
+# firmware only waits a few seconds for it. Measured on the real console,
+# 2026-08-28: left untouched, the guest sat on that prompt for 42 MINUTES,
+# disk usage frozen at 194 KiB (nothing had been written), until the prompt
+# expired and UEFI gave up with "BdsDxe: No bootable option or device was
+# found" - there being no OTHER bootable device, the blank target disk. A
+# single KEY_ENTER sent by hand is what got Setup running and the disk
+# growing. This is not a superstition: it is the measured answer to a real
+# prompt on this exact medium.
+#
+# BOUNDED, and the bound is not an elegance, it is the correctness. The
+# prompt is live for a few seconds only; docs/superpowers/plans/recette-b.md
+# (the accepted recipe this mirrors) records what unbounded ENTERs hit once
+# it is gone - Windows Setup, mid-install, is showing screens of its own,
+# and a "Are you sure you want to quit?" dialog once froze a build at 8%
+# because the extra ENTER activated the focused Cancel button. Past the
+# boot window a "helpful" keystroke is not help, it is blind input into a
+# live installer.
+BOOT_KEY_ATTEMPTS = 12
+BOOT_KEY_INTERVAL_S = 1.0
+
+
+def send_boot_keys(virsh: Callable[..., object],
+                   sleep: Callable[[float], None] = time.sleep,
+                   domain: str = DOMAIN_NAME) -> None:
+    """Nudge past the CD boot prompt: KEY_ENTER, once a second, BOOT_KEY_ATTEMPTS times.
+
+    Never raises: this is an aid for a medium that shows the prompt, not a
+    condition the start step depends on - a medium with no such prompt is
+    completely unaffected by it (send-key lands on nothing, harmlessly), and
+    a `virsh send-key` failure (domain gone, libvirtd unreachable) is logged
+    and skipped rather than turned into a failed guest start.
+    """
+    for attempt in range(1, BOOT_KEY_ATTEMPTS + 1):
+        try:
+            proc = virsh("send-key", domain, "--codeset", "linux", "KEY_ENTER")
+            rc = getattr(proc, "returncode", 1)
+            if rc != 0:
+                print(f"send-key {attempt}/{BOOT_KEY_ATTEMPTS} to {domain}: "
+                     f"virsh exited {rc} (ignored, boot-prompt aid only)",
+                     file=sys.stderr)
+        except OSError as exc:
+            print(f"send-key {attempt}/{BOOT_KEY_ATTEMPTS} to {domain}: "
+                 f"{exc} (ignored, boot-prompt aid only)", file=sys.stderr)
+        sleep(BOOT_KEY_INTERVAL_S)
+
+
 # libvirtd's own per-domain runtime-state directory. The libvirt-daemon
 # package chowns it, at install time, to the EXACT user/group its qemu
 # processes run as - libvirt-qemu on Debian/Arch, qemu on Fedora/RHEL, and
@@ -734,20 +783,24 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
                build_inputs: Mapping[str, str] | None = None,
                pci_address_of: Callable[[str], str | None] | None = None,
                qemu_owner: Callable[[], tuple[int, int]] | None = None,
-               chown: Callable[[str, int, int], None] | None = None
+               chown: Callable[[str, int, int], None] | None = None,
+               sleep: Callable[[float], None] | None = None
                ) -> list[Step]:
     """The five steps, in order, for this host's answers. Runs nothing.
 
-    `virsh`, `runner`, `size_of`, `pci_address_of`, `qemu_owner` and `chown`
-    are injectable so tests can replace them: the real ones read - and, for
-    `start`, drive - the production domain, walk the real /sys/block tree,
-    read /var/lib/libvirt/qemu's owner, or actually chown a file only root
-    can hand off.
+    `virsh`, `runner`, `size_of`, `pci_address_of`, `qemu_owner`, `chown` and
+    `sleep` are injectable so tests can replace them: the real ones read -
+    and, for `start`, drive - the production domain, walk the real
+    /sys/block tree, read /var/lib/libvirt/qemu's owner, actually chown a
+    file only root can hand off, or actually wait a second twelve times
+    (see send_boot_keys) - none of which a test suite can afford to do for
+    real.
     """
     virsh = virsh or default_virsh
     runner = runner or default_runner
     qemu_owner = qemu_owner or resolve_qemu_owner
     chown = chown or os.chown
+    sleep = sleep or time.sleep
     python = python or sys.executable or "python3"
 
     secrets = {key: _secret(answers, key) for key in SECRET_FILES}
@@ -984,6 +1037,26 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
             return False        # unreachable libvirtd is not "already done"
         return (proc.stdout or "").strip() in DOMAIN_UP_STATES
 
+    def start_run() -> None:
+        """Start the domain, then help it past the CD boot prompt - IF, and
+        only if, THIS call is the one that started it.
+
+        `domain_up()` is read BEFORE `runner(start_cmd)`, never after: the
+        question is not "is the guest up now" (true the instant `virsh
+        start` returns), it is "was it already up before I touched it".
+        Skipping on that earlier read is what keeps a KEY_ENTER out of an
+        already-live session - a desktop, a game - which is the one case
+        send_boot_keys must never reach. In the normal pipeline
+        (activate.py's run_steps) this is already guaranteed by
+        already_done() gating whether run() is even called; the check is
+        repeated here so this step is safe on its own, not only behind that
+        caller.
+        """
+        was_up = domain_up()
+        runner(start_cmd)
+        if not was_up:
+            send_boot_keys(virsh, sleep)
+
     return [
         Step("secrets", secrets_done, write_secrets, None, None,
              "write the three 0600 files build.py reads its secrets from"),
@@ -995,7 +1068,7 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         # --replace at run time when a stale domain is actually there.
         Step("define", domain_defined, lambda: runner(define_argv()), define_cmd,
              None, "define the libvirt domain from detected hardware"),
-        Step("start", domain_up, lambda: runner(start_cmd), start_cmd, None,
+        Step("start", domain_up, start_run, start_cmd, None,
              "start the guest so Windows Setup runs unattended"),
     ]
 
