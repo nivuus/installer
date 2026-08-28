@@ -123,6 +123,19 @@ check("deux manques rapportés", len(deux), 2)
 check("triés par demandeur",
       [m.package for m in deux], ["home-desk", "home-stock"])
 
+# --- exposition au portail ----------------------------------------------
+# Le portail doit pouvoir écrire « nécessite : home-manager » à côté de la
+# case. Pas d'auto-cochage : cocher à la place de l'opérateur sur une machine
+# sans écran est un comportement magique, hors périmètre v1.
+# Le source est LU, pas importé : webapp/main.py tire fastapi, et les suites
+# de ce dépôt ne demandent rien d'autre que python3 et PyYAML.
+source = (REPO / "installer" / "webapp" / "main.py").read_text()
+check("describe() expose requires_packages",
+      "requires_packages" in source, True)
+check("la valeur exposée vient bien du manifeste",
+      "manifest.packages" in source, True)
+
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
