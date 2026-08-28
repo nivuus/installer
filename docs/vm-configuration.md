@@ -459,8 +459,8 @@ lspci -nnk -d 10de:2786
 
 Pour une nouvelle installation Nivuus, utilisez ce template minimal:
 
-**Généré par:** `installer/windows-guest/domain.py` depuis
-`installer/windows-guest/templates/domain.xml.j2` — il n'existe plus de XML
+**Généré par:** `console/guest/domain.py` depuis
+`console/guest/templates/domain.xml.j2` — il n'existe plus de XML
 de référence à recopier, le domaine est construit depuis le matériel détecté.
 
 ```xml

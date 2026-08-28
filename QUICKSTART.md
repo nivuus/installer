@@ -89,8 +89,8 @@ Vous devriez voir:
 
 ```bash
 # Générer et définir le domaine depuis le matériel détecté
-python3 installer/windows-guest/domain.py xml     # inspecter
-sudo python3 installer/windows-guest/domain.py define
+python3 console/guest/domain.py xml     # inspecter
+sudo python3 console/guest/domain.py define
 ```
 
 #### Trouver les Adresses PCI du GPU

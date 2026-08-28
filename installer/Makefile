@@ -68,9 +68,10 @@ test-vm:
 # this count, since it is shell, not Python, and this loop only ever ran
 # .py files - see console/Makefile for why it stays unwired. PYTHON is
 # propagated to the sub-make so the console suites that need pydantic don't
-# silently fall back to a bare python3. NOTE: a green run here is not proof
-# that installer/windows-guest/domain.py works - see CLAUDE.md, Installer
-# Architecture, for the coverage gap both domain suites share.
+# silently fall back to a bare python3. console/guest/domain.py is exercised
+# for real by test_windows_guest_production_domain.py, which calls main()
+# end-to-end rather than stubbing it out - see CLAUDE.md, Installer
+# Architecture, "domain.py is REPAIRED", for how that suite closed the gap.
 PYTHON ?= python3
 
 test-packages:
@@ -92,7 +93,7 @@ test-packages:
 windows-unattend:
 	@test -n "$(WINDOWS_ISO)" || { echo "Set WINDOWS_ISO=/path/to/ltsc.iso"; exit 1; }
 	@test -n "$(DRIVERS_DIR)" || { echo "Set DRIVERS_DIR=/path/to/payload"; exit 1; }
-	python3 $(INSTALLER_DIR)/windows-guest/build.py \
+	python3 $(dir $(INSTALLER_DIR))console/guest/build.py \
 	  --windows-iso "$(WINDOWS_ISO)" --drivers-dir "$(DRIVERS_DIR)" \
 	  $(if $(OUTPUT),--output "$(OUTPUT)",)
 
