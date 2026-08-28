@@ -416,7 +416,7 @@ check("a closed port is unreachable",
 # EXACTLY on a terminal state, and that READY (and only READY) redefines. #
 
 def run_main(domstate, marker_text, elapsed_s, redefine_ok=True,
-            expected="B3"):
+            expected="B3", state_path=None, seed_first_running_at=True):
     """Drive main() with fully injected fakes and a throwaway state file.
 
     `marker_text` stands in for what marker_fn (read_marker) would have
@@ -429,13 +429,21 @@ def run_main(domstate, marker_text, elapsed_s, redefine_ok=True,
 
     `elapsed_s` is made exact, not approximate: first_running_at is seeded
     to a fixed reference time on the FIRST call (prior_state is always None
-    here - each scenario gets its own fresh state directory), and now_fn is
-    pinned to that same reference plus elapsed_s, so classify() sees
-    exactly the elapsed_s the test asked for regardless of wall-clock
-    timing. `redefine_ok` controls what the injected redefine_fn reports -
-    the round-1 fix under test is that main() must NOT stop the timer on
-    READY when this is False. Returns (combined stdout+stderr text,
-    stop_called, redefine_called).
+    here - each scenario gets its own fresh state directory, unless a
+    caller passes its OWN `state_path` to drive several successive ticks -
+    see the defect-3 tests below), and now_fn is pinned to that same
+    reference plus elapsed_s, so classify() sees exactly the elapsed_s the
+    test asked for regardless of wall-clock timing. `redefine_ok` controls
+    what the injected redefine_fn reports - the round-1 fix under test is
+    that main() must NOT stop the timer on READY when this is False.
+    `state_path`, when given, is used AS-IS (never wiped first) so a caller
+    can chain several run_main() calls over the same persisted state - the
+    defect-3 "the timer goes quiet" tests need exactly that, since the
+    behaviour under test only shows up across two ticks reading the SAME
+    file. `seed_first_running_at` can be turned off so a chained call does
+    not clobber a first_running_at an earlier tick in the same chain
+    already recorded. Returns (combined stdout+stderr text, stop_called,
+    redefine_called).
     """
     import contextlib
     import io
@@ -466,12 +474,11 @@ def run_main(domstate, marker_text, elapsed_s, redefine_ok=True,
     def stop_fn():
         stop_calls.append(True)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        state_path = os.path.join(tmp, "state.json")
-        if domstate == "running":
+    def _drive(path):
+        if domstate == "running" and seed_first_running_at:
             # Seed first_running_at so elapsed_s above is exactly what
             # classify() sees, instead of "now - now" == 0 on a fresh state.
-            watch.save_state(state_path, {"first_running_at": base})
+            watch.save_state(path, {"first_running_at": base})
         now_fn = lambda: base + elapsed_s  # noqa: E731
 
         buf = io.StringIO()
@@ -480,8 +487,15 @@ def run_main(domstate, marker_text, elapsed_s, redefine_ok=True,
             watch.main(domstate_fn=domstate_fn, ip_fn=ip_fn, probe_fn=probe_fn,
                       marker_fn=marker_fn, version_fn=version_fn,
                       redefine_fn=redefine_fn, stop_fn=stop_fn,
-                      state_path=state_path, now_fn=now_fn)
-    return buf.getvalue() + errbuf.getvalue(), bool(stop_calls), bool(redefine_calls_)
+                      state_path=path, now_fn=now_fn)
+        return buf.getvalue() + errbuf.getvalue()
+
+    if state_path is not None:
+        text = _drive(state_path)
+    else:
+        with tempfile.TemporaryDirectory() as tmp:
+            text = _drive(os.path.join(tmp, "state.json"))
+    return text, bool(stop_calls), bool(redefine_calls_)
 
 
 out, stopped, redefined = run_main("shut off", None, 60)
@@ -490,6 +504,42 @@ check("NOT_STARTED: no redefinition attempted", redefined, False)
 check("NOT_STARTED: the message names the domain state", "shut off" in out, True)
 check("NOT_STARTED: the message says the guest was never started",
       "non actif" in out, True)
+
+
+# --- defaut 3 : une VM au repos est l etat nominal, pas une anomalie - le
+# minuteur (toutes les 2 minutes, voir host/systemd/nivuus-guest-ready.timer)
+# ne doit journaliser la transition qu UNE fois, puis se taire tant que rien
+# ne change - jamais "toutes les deux minutes, indefiniment". -------------- #
+with tempfile.TemporaryDirectory() as tmp:
+    state_path = os.path.join(tmp, "state.json")
+
+    out1, stopped1, _ = run_main("shut off", None, 60, state_path=state_path)
+    check("premier passage a l arret : la transition est journalisee",
+          "non actif" in out1, True)
+    check("premier passage : le minuteur ne s arrete pas pour autant "
+          "(ce n est pas un etat terminal)", stopped1, False)
+
+    out2, stopped2, _ = run_main("shut off", None, 180, state_path=state_path)
+    check("deuxieme passage, meme etat de repos : PLUS RIEN n est ecrit - "
+          "c est le coeur du defaut 3", out2.strip(), "")
+    check("le minuteur continue de tourner en silence (pas un etat terminal "
+          "au sens de main())", stopped2, False)
+
+    out3, _, _ = run_main("shut off", None, 300, state_path=state_path)
+    check("troisieme passage, toujours a l arret : toujours silencieux",
+          out3.strip(), "")
+
+# A genuine transition - the guest started, then stopped again - is still
+# worth a line: silence covers an UNCHANGED rest, never every future tick.
+with tempfile.TemporaryDirectory() as tmp:
+    state_path = os.path.join(tmp, "state.json")
+    run_main("shut off", None, 60, state_path=state_path)
+    run_main("running", "", 30, state_path=state_path)  # installing, briefly
+    out_again, _, _ = run_main("shut off", None, 400, state_path=state_path,
+                               seed_first_running_at=False)
+    check("apres une vraie transition (redemarree puis re-arretee), le "
+          "message revient - ce n est pas le meme repos qu avant",
+          "non actif" in out_again, True)
 
 # --- Step 1 from the brief, fourth case: "WinRM injoignable" and "temoin
 # absent" both classify INSTALLING, but must NOT read the same in the

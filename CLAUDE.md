@@ -154,9 +154,16 @@ things about it are easy to break:
   `console/hooks/activate.py`'s `classify()`. **`activate` returns as soon
   as `start` succeeds — it does not wait for Windows Setup to finish.**
   `nivuus-guest-ready.timer` (2-minute period, self-stopping) is what says
-  the real outcome: it polls `virsh domstate` plus a plain TCP connect to
-  WinRM (5985) — the port `provision/99-marker.ps1` opens only once the
-  other thirteen provisioning stages already succeeded — and logs
+  the real outcome: it polls `virsh domstate` and reads a version-stamped
+  marker file over WinRM (`C:\nivuus\state\PROVISION.done`, written by
+  `provision/99-marker.ps1` as its last act, checked against `payload.py`'s
+  `PROVISION_VERSION` so a rebuilt disk's PREVIOUS run's marker never reads
+  as ready). **A reachable WinRM port (5985) is NOT the readiness signal —
+  this file said so until 2026-08-28, and that stale claim caused the whole
+  redesign this bullet documents**: since 2026-08-26 `provision/00-bootstrap.ps1`
+  opens 5985 at the FIRST provisioning stage, deliberately, so a reachable
+  port only ever proves the guest is alive enough to accept a command, never
+  that provisioning finished. The timer logs
   `not_started`/`installing`/`failed` (2h timeout)/`ready`. On `ready` it
   redefines the domain **without** either install medium
   (`domain.py define --replace --keyed-varstore`), stopping the timer only
@@ -177,7 +184,16 @@ things about it are easy to break:
   label still says otherwise, and downloading 5 GB with resume/integrity
   was deliberately left out of scope; (4) the `payload` step's
   `already_done()` is shallow — an interrupted fetch still counts as done,
-  and it is the `build` step re-running against it that repairs the gap.
+  and it is the `build` step re-running against it that repairs the gap;
+  (5) `retro: true` cannot succeed on a target even though the wizard
+  offers it — `fetch_payload.py`'s `RETRO_SRC` default resolves to
+  `/opt/retro` once this package is copied to `/opt/nivuus-packages/console/`,
+  and nothing creates that directory there, so `build_retro_wheels()`
+  refuses by name the moment `payload` runs with retro on; (6) the WinRM
+  password-file path `guest-ready-watch.py` passes to `winrm_exec.py`
+  (`GUEST_PASS_FILE`) is deduced from reading `guest_steps.py`'s own
+  `secrets` step side by side with it, never measured against a real guest
+  — running one is exactly what this whole chain is forbidden from doing.
   **None of this chain has ever run for real** — every step is proven
   against a fake `virsh`/filesystem, never on the reference host, because
   starting `Windows` there detaches the GPU from the host. The host-specific
@@ -185,6 +201,51 @@ things about it are easy to break:
   the wake path's wrong bridge, `/opt/nivuus/…` paths, the missing `winrm`
   client) are unchanged and stay documented in `console/README.md`'s
   **Limites connues** — a separate, still-open item.
+
+* **Three run-time-only defects fixed 2026-08-28, task 4 of
+  `2026-08-28-console-observabilite`** — none visible from reading either
+  file alone, all found by tracing what the OTHER phase's own code does to
+  this one's state:
+  1. **The regime domain used to feed a silent, permanent replay loop.**
+     Once `guest-ready-watch.py` redefines the domain without install media
+     (see the `activate` bullet above), `guest_steps.domain_defined()` used
+     to look only for the two install-media ISO paths — absent on a regime
+     domain — so it read "not done" and replayed `domain.py define`
+     *without* `--keyed-varstore` (that flag is `guest-ready-watch.py`'s own
+     escape hatch, never this step's), which hit `guard_fresh_varstore()`
+     forever (the varstore the earlier media-carrying `define` already
+     created never goes away) and refused with a remedy —
+     `virsh undefine Windows --nvram` — that would have **reinstalled
+     Windows over a console that already works**. `domain_defined()` now
+     also checks the passthrough disk's own PCI address, read from the
+     `<hostdev>`'s `<source>` element (`hostdev_source_addresses()`,
+     measured 2026-08-28 against `virsh dumpxml Windows` on the real
+     production domain: the source address is exactly
+     `domain='0x0000' bus='0x03' slot='0x00' function='0x0'`, matching
+     `lspci`'s `144d:a808` at `0000:03:00.0`, and libvirt never touches its
+     attribute order the way it does the SIBLING guest-side `<address
+     type='pci' .../>` a few lines below, which is not this identity and is
+     deliberately never read as it) — and treats a media-less domain
+     already carrying the right disk as a **terminal, legitimate** outcome.
+  2. **The same predicate never noticed a changed `dedicated_nvme`.**
+     `source_iso`/`iso_out` are FIXED paths under the guest workdir,
+     unrelated to which physical disk was chosen — build reruns, `define`
+     silently didn't. The PCI-address check above fixes both defects at
+     once: media match alone is no longer sufficient, the disk must also
+     agree.
+  3. **`guest-ready-watch.py` logged "installation non demarree" every 2
+     minutes forever, on a console that was simply resting** (most of a
+     console's life, between sessions) — the timer never distinguished "just
+     went not-running" from "still not running, same as last tick". It now
+     logs the transition once, via a `not_started_reported` flag in its own
+     persisted state, and stays silent until a genuine transition (running,
+     then not-running again) clears it.
+  Tests: `test_console_guest_steps.py` (regime-domain and changed-disk
+  cases, plus `hostdev_source_addresses()`/`domain_matches_disk()` directly)
+  and `test_console_guest_ready.py` (silence across repeated ticks, a
+  resumed message after a genuine transition) — both proven to fail against
+  the pre-fix code (`git stash` the two implementation files, rerun) before
+  being proven to pass against it, `__pycache__` purged, `python -B`.
 
 `hardware.py` is now split by that same principle: `installer/common/hardware.py`
 detects **capabilities** (coarse: is there an IOMMU, a discrete GPU, a spare

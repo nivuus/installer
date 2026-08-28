@@ -463,10 +463,27 @@ def main(*, domstate_fn=None, ip_fn=None, probe_fn=None, marker_fn=None,
         # The domain is not (or no longer) running: whatever elapsed clock
         # was being kept no longer means anything - the next time it starts
         # running is a fresh attempt.
-        save_state(state_path, {})
-        label = domstate or "injoignable"
-        print(f"guest-ready: domaine {VM_NAME!r} non actif (etat={label!r}) "
-             "- installation non demarree, voir les hooks libvirt")
+        #
+        # A resting VM is the NOMINAL state, not an anomaly - most of a
+        # console's life is spent shut off or hibernated between sessions,
+        # once provisioning finished cleanly long ago. Logging this line on
+        # every tick (this timer runs every 2 minutes, see
+        # host/systemd/nivuus-guest-ready.timer) would mean permanent,
+        # unbounded noise on a console that is doing perfectly well - so it
+        # is printed once, on the transition INTO not-running, and then
+        # stays silent for as long as that stays true. already_reported is
+        # read from the state THIS run loaded, before it gets overwritten
+        # below - a domain that starts running again drops the whole dict
+        # (see the running branch's own save_state call), so the flag
+        # naturally reappears absent the next time it stops, and the line
+        # is printed again: a genuine transition is still worth a line, only
+        # the repeat of an unchanged rest is not.
+        already_reported = bool(state.get("not_started_reported"))
+        save_state(state_path, {"not_started_reported": True})
+        if not already_reported:
+            label = domstate or "injoignable"
+            print(f"guest-ready: domaine {VM_NAME!r} non actif (etat={label!r}) "
+                 "- installation non demarree, voir les hooks libvirt")
         return 0
 
     first_running_at = state.get("first_running_at")

@@ -243,12 +243,25 @@ class FakeVirsh:
         return subprocess.CompletedProcess(list(args), rc, out, "")
 
 
-def plan(tmp, virsh, answers=None, disk_bytes=DISK_BYTES):
+# The physical NVMe address ANSWERS["dedicated_nvme"] ("/dev/nvme1n1")
+# resolves to by default in this suite - measured on the real production
+# domain (2026-08-28: `virsh dumpxml Windows` shows this exact address on
+# the NVMe hostdev). Kept as the default so most tests never have to think
+# about it; the identity tests below deliberately point elsewhere.
+DEFAULT_NVME_PCI = "0000:03:00.0"
+
+
+def _default_pci_address_of(_disk):
+    return DEFAULT_NVME_PCI
+
+
+def plan(tmp, virsh, answers=None, disk_bytes=DISK_BYTES, pci_address_of=None):
     given = dict(ANSWERS)
     given.update(answers or {})
     given["guest_workdir"] = tmp
     return steps.plan_steps(given, {}, tmp, virsh=virsh,
-                            size_of=lambda device: disk_bytes)
+                            size_of=lambda device: disk_bytes,
+                            pci_address_of=pci_address_of or _default_pci_address_of)
 
 
 def by_name(plan_list):
@@ -440,13 +453,32 @@ with tempfile.TemporaryDirectory() as tmp:
 # - le cas nominal d une console qu on reinstalle, et le cas de toute machine
 # qui en a deja fait tourner un - ferait sinon sauter l etape, et `start`
 # amorcerait un NVMe vierge sans que rien ne le signale.
-def installed_xml(tmp, windows_iso=None):
+def nvme_hostdev(pci_address=DEFAULT_NVME_PCI):
+    """Le fragment <hostdev> mesure sur le domaine de production reel
+    (2026-08-28, `virsh dumpxml Windows`) : la SOURCE porte l adresse PCI
+    HOTE, sans l attribut 'type' que libvirt ajoute a l adresse INVITE
+    (alias/bus virtuel) qui suit - deux elements distincts, et seul le
+    premier dit quel disque PHYSIQUE est passe a la VM.
+    """
+    domain, bus, rest = pci_address.split(":")
+    slot, func = rest.split(".")
+    return ("<hostdev mode='subsystem' type='pci' managed='yes'>"
+            "<driver name='vfio'/><source>"
+            f"<address domain='0x{domain}' bus='0x{bus}' slot='0x{slot}' "
+            f"function='0x{func}'/>"
+            "</source><alias name='hostdev0'/>"
+            "<address type='pci' domain='0x0000' bus='0x07' slot='0x00' "
+            "function='0x0'/></hostdev>")
+
+
+def installed_xml(tmp, windows_iso=None, nvme_pci=DEFAULT_NVME_PCI):
     """Le XML que virsh rendrait pour un domaine d installation correct."""
     windows = windows_iso or str(steps.windows_media_path(tmp))
     unattend = os.path.join(tmp, "nivuus-unattend.iso")
     return ("<domain><devices>"
             f"<disk device='cdrom'><source file='{windows}'/></disk>"
             f"<disk device='cdrom'><source file='{unattend}'/></disk>"
+            f"{nvme_hostdev(nvme_pci)}"
             "</devices></domain>")
 
 
@@ -492,6 +524,72 @@ with tempfile.TemporaryDirectory() as tmp:
     st = by_name(plan(tmp, FakeVirsh(autre)))
     check("un domaine portant un autre media source n est pas fait",
           st["define"].already_done(), False)
+
+
+# --- defaut 2 : les chemins d ISO sont FIXES, changer 'dedicated_nvme' ---
+# reconstruit l ISO mais ne change ni source_iso ni iso_out - le predicat
+# doit donc verifier le disque REELLEMENT branche, pas seulement les medias.
+AUTRE_NVME = "0000:02:00.0"  # une autre carte NVMe, mesuree sur le meme hote
+
+with tempfile.TemporaryDirectory() as tmp:
+    xml = installed_xml(tmp, nvme_pci=AUTRE_NVME)
+    st = by_name(plan(tmp, FakeVirsh({"dumpxml": (0, xml),
+                                      "domstate": (0, "shut off\n")})))
+    check("les deux medias sont bons mais le NVMe est celui d avant : "
+          "define n est PAS fait (defaut 2)",
+          st["define"].already_done(), False)
+
+
+# --- defaut 1 : le domaine de regime (sans medias, redefini par
+# guest-ready-watch.py une fois l invite pret) est un etat TERMINAL
+# legitime, pas un travail a refaire - a condition que le disque soit le bon.
+with tempfile.TemporaryDirectory() as tmp:
+    regime = "<domain><devices>" + nvme_hostdev() + "</devices></domain>"
+    st = by_name(plan(tmp, FakeVirsh({"dumpxml": (0, regime),
+                                      "domstate": (0, "shut off\n")})))
+    check("domaine de regime (sans medias) avec le bon disque : define est "
+          "fait - sinon la phase rejoue a chaque activation, pour toujours "
+          "(defaut 1)",
+          st["define"].already_done(), True)
+
+# Le meme domaine de regime, mais avec le MAUVAIS disque, n est PAS un etat
+# terminal pour autant : ce n est le cas que si le disque correspond.
+with tempfile.TemporaryDirectory() as tmp:
+    regime_autre = "<domain><devices>" + nvme_hostdev(AUTRE_NVME) + "</devices></domain>"
+    st = by_name(plan(tmp, FakeVirsh({"dumpxml": (0, regime_autre),
+                                      "domstate": (0, "shut off\n")})))
+    check("domaine de regime avec le mauvais disque n est pas fait",
+          st["define"].already_done(), False)
+
+# L identite ne peut pas etre verifiee (adresse PCI illisible) : lu comme un
+# desaccord, jamais comme un laissez-passer - meme regle que l empreinte du
+# build ("cannot tell => rebuild, never skip", voir le docstring du module).
+with tempfile.TemporaryDirectory() as tmp:
+    regime = "<domain><devices>" + nvme_hostdev() + "</devices></domain>"
+    st = by_name(plan(tmp, FakeVirsh({"dumpxml": (0, regime),
+                                      "domstate": (0, "shut off\n")}),
+                      pci_address_of=lambda disk: None))
+    check("une adresse PCI illisible n est jamais lue comme une correspondance",
+          st["define"].already_done(), False)
+
+
+# --- les fonctions pures elles-memes, directement --------------------------
+check("hostdev_source_addresses lit l adresse HOTE, pas l adresse invite",
+      steps.hostdev_source_addresses(nvme_hostdev()), {DEFAULT_NVME_PCI})
+check("l adresse invite (bus 0x07, tamponnee par libvirt) n est jamais "
+      "confondue avec l adresse hote",
+      "0000:07:00.0" in steps.hostdev_source_addresses(nvme_hostdev()), False)
+check("domain_matches_disk compare correctement",
+      steps.domain_matches_disk(nvme_hostdev(), "/dev/nvme1n1",
+                                pci_address_of=lambda d: DEFAULT_NVME_PCI), True)
+check("domain_matches_disk rend False sur un disque different",
+      steps.domain_matches_disk(nvme_hostdev(), "/dev/nvme1n1",
+                                pci_address_of=lambda d: AUTRE_NVME), False)
+check("domain_matches_disk rend False quand l adresse est introuvable",
+      steps.domain_matches_disk(nvme_hostdev(), "/dev/nvme1n1",
+                                pci_address_of=lambda d: None), False)
+check("un domaine sans le moindre hostdev ne rend aucune adresse",
+      steps.hostdev_source_addresses("<domain><devices/></domain>"), set())
 
 # --- --replace : seulement quand il y a vraiment quelque chose a remplacer - #
 # guard_replace() refuse de redefinir un domaine existant sans lui, donc sans

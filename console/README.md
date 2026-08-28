@@ -94,16 +94,52 @@ what did not finish:
 **`activate` returns as soon as `start` succeeds — it does not wait for
 Windows Setup to finish.** That install runs unattended for up to an hour.
 A separate mechanism says how it went: `nivuus-guest-ready.timer` (armed
-above, 2-minute period, self-stopping) polls `virsh domstate` and a plain
-TCP connect to WinRM (5985) — the same port `provision/99-marker.ps1` opens
-only once the other thirteen provisioning stages have already succeeded —
-and logs one of four states to the journal: `not_started`, `installing`,
-`failed` (past a 2h timeout with the port still closed), or `ready`. On
-`ready` it also redefines the domain **without** either install medium
-(`domain.py define --replace --keyed-varstore`), so the next boot does not
-risk re-running Setup; the timer only stops itself once that redefinition
-has actually succeeded, not merely on `ready`, so a transient failure there
-is retried rather than leaving the media attached forever.
+above, 2-minute period, self-stopping) polls `virsh domstate` and reads a
+**version-stamped marker file over WinRM** —
+`C:\nivuus\state\PROVISION.done`, written by `provision/99-marker.ps1` as
+its very last act, checked against `payload.py`'s `PROVISION_VERSION` and
+never by mere presence, since a rebuilt disk can still carry a *previous*
+run's marker. **A reachable WinRM port (5985) is NOT the readiness signal —
+this document said otherwise until 2026-08-28, and that stale claim caused
+a full redesign of this timer.** Since 2026-08-26 `provision/00-bootstrap.ps1`
+opens that port at the very first provisioning stage, deliberately, so a
+later stage throwing still leaves a remote door open into the guest — the
+port only ever proves the guest is alive enough to accept a command, never
+that provisioning finished. The timer logs one of four states to the
+journal: `not_started`, `installing`, `failed` (past a 2h timeout with the
+marker still absent or stale), or `ready`. On `ready` it also redefines the
+domain **without** either install medium (`domain.py define --replace
+--keyed-varstore`), so the next boot does not risk re-running Setup; the
+timer only stops itself once that redefinition has actually succeeded, not
+merely on `ready`, so a transient failure there is retried rather than
+leaving the media attached forever.
+
+**That regime redefinition used to feed a silent, permanent replay loop
+(fixed 2026-08-28).** Once the guest is provisioned and redefined without
+media, `activate`'s own `define` step re-runs on every later activation
+retry — its predicate used to look only for the two install-media ISO
+paths, which a regime domain no longer carries, so it read the domain as
+"not done" and replayed `domain.py define` without `--keyed-varstore` (that
+flag is guest-ready-watch.py's own escape hatch, never this step's), which
+hit `domain.py`'s varstore guard *forever* — the varstore the earlier
+media-carrying `define` created already exists — and refused with a remedy,
+`virsh undefine Windows --nvram`, that would have **reinstalled Windows
+over a console that already works.** `guest_steps.domain_defined()` now
+checks what actually identifies the domain: the passthrough disk's own PCI
+address, read from the `<hostdev>`'s `<source>` element, never the ISO
+paths alone (which are fixed regardless of which `dedicated_nvme` was
+chosen — a changed answer used to leave a stale disk wired up unnoticed
+too, the same predicate gap from the other side). A media-less domain that
+already carries the right disk is now read as a **terminal, legitimate
+outcome**, not work still to do.
+
+**The readiness timer used to log "installation non demarree" every two
+minutes, forever, on a console doing nothing wrong (fixed 2026-08-28).**
+Most of a console's life is spent shut off or hibernated between sessions
+— that is the nominal state, not an anomaly. `guest-ready-watch.py` now
+logs the transition into "not running" once and stays silent for as long
+as it holds, logging again only on a genuine transition (the guest started,
+then stopped again).
 
 **This chain has never run for real.** Every step is proven individually
 against a fake `virsh`/filesystem (`test_console_guest_steps`) and the
@@ -138,6 +174,23 @@ Known gaps in this chain, named rather than hidden:
   with at least one file in it counts as done, even if `fetch_payload.py`
   was interrupted mid-fetch. A partial payload is not caught here — it is
   caught, and repaired, by the `build` step re-running against it.
+- **`retro: true` cannot succeed on a target, even though the wizard offers
+  it.** `fetch_payload.py`'s `RETRO_SRC` default is derived from its own
+  deployed path (`Path(__file__).resolve().parents[2].parent / "retro"`),
+  which resolves to `/opt/retro` once this package is copied to
+  `/opt/nivuus-packages/console/` — and nothing creates that directory on a
+  target. `build_retro_wheels()` refuses by name (`no retro package at
+  /opt/retro`) the moment it does not find a `pyproject.toml` there, which
+  fails the whole `payload` step. Wiring `packages/retro`'s own checkout
+  onto the target (or overriding `--retro-src`) is unfinished work, not a
+  hidden default that happens to work.
+- **The WinRM password-file path `guest-ready-watch.py` passes to
+  `winrm_exec.py` is deduced from the pipeline, never measured against a
+  real guest.** `GUEST_PASS_FILE` is hardcoded to
+  `/var/lib/nivuus/guest/secrets/windows-admin.pass` because that is where
+  `guest_steps.py`'s own `secrets` step writes it — reasoned from reading
+  both files side by side, not observed on a running install, since running
+  one is exactly what this whole chain is forbidden from doing (see above).
 
 ## The wizard's questions
 

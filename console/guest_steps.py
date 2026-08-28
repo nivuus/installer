@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -69,6 +70,93 @@ DOMAIN_NAME = "Windows"
 # untouched and the console dark. virsh emits them in English under LC_ALL=C,
 # which default_virsh forces.
 DOMAIN_UP_STATES = frozenset({"running", "idle", "paused", "pmsuspended"})
+
+# --- what actually identifies the domain: its hostdevs' HOST pci addresses -#
+# Matches the host address libvirt keeps verbatim inside <hostdev><source>
+# (measured on the running production domain, 2026-08-28: `virsh dumpxml
+# Windows` shows `<source><address domain='0x0000' bus='0x03' slot='0x00'
+# function='0x0'/></source>` for the NVMe hostdev, exactly the fields
+# domain.xml.j2 renders, in the same order, no extra attribute). This is
+# NOT the same element as the GUEST-side bus position libvirt also stamps as
+# a sibling <address type='pci' .../> right after <alias> - that one only
+# says where the device sits on the VIRTUAL bus, so it changes across
+# defines even when the PHYSICAL device passed through does not, and must
+# never be read as identity. Restricting the search to the text inside
+# <hostdev>...</hostdev> keeps the two apart without depending on attribute
+# order elsewhere in the document.
+_HOSTDEV_BLOCK_RE = re.compile(r"<hostdev\b.*?</hostdev>", re.DOTALL)
+_HOSTDEV_SOURCE_ADDR_RE = re.compile(
+    r"<source>\s*<address\s+domain=['\"]0x([0-9a-fA-F]+)['\"]\s+"
+    r"bus=['\"]0x([0-9a-fA-F]+)['\"]\s+slot=['\"]0x([0-9a-fA-F]+)['\"]\s+"
+    r"function=['\"]0x([0-9a-fA-F]+)['\"]", re.DOTALL)
+_PCI_ADDRESS_RE = re.compile(
+    r"([0-9a-fA-F]+):([0-9a-fA-F]+):([0-9a-fA-F]+)\.([0-9a-fA-F]+)")
+
+
+def _normalize_pci_address(groups: tuple[str, str, str, str]) -> str:
+    """(domain, bus, slot, function) hex strings -> 'dddd:bb:ss.f', lower
+    case, canonical width - so a '0x01' from the XML and a '1' from sysfs
+    compare equal instead of failing on formatting alone."""
+    domain, bus, slot, func = (int(part, 16) for part in groups)
+    return f"{domain:04x}:{bus:02x}:{slot:02x}.{func:x}"
+
+
+def hostdev_source_addresses(xml: str) -> set[str]:
+    """Every HOST pci address a <hostdev> in `xml` passes through.
+
+    Pure string parsing, no libvirt call: `xml` is whatever defined_xml()
+    already read via `virsh dumpxml`. Restricted to <hostdev> blocks (see
+    the comment above _HOSTDEV_BLOCK_RE) so the guest-side bus position
+    libvirt also stamps on the same element is never mistaken for the
+    physical device identity.
+    """
+    out = set()
+    for block in _HOSTDEV_BLOCK_RE.findall(xml):
+        match = _HOSTDEV_SOURCE_ADDR_RE.search(block)
+        if match:
+            out.add(_normalize_pci_address(match.groups()))
+    return out
+
+
+def domain_matches_disk(xml: str, disk: str, *,
+                        pci_address_of: Callable[[str], str | None] | None = None
+                        ) -> bool:
+    """Is `disk` the SAME physical device `xml` actually passes through?
+
+    ISO paths alone cannot answer this - see domain_defined()'s own
+    docstring for why: they are FIXED paths under the workdir, unchanged by
+    which physical disk was selected, so a domain built for a PREVIOUS
+    'dedicated_nvme' answer would satisfy the media check forever while
+    still wiring up the OLD disk to the guest.
+
+    `pci_address_of` defaults to console.hardware.pci_address_for_device (a
+    pure /sys/block read, imported lazily - see _sysfs_size below for the
+    same convention and the same reason). ANY resolution failure - an
+    unrecognised device path, a symlink sysfs cannot walk - reads as "no
+    match", never as "cannot tell so assume yes": the module's own WHEN IN
+    DOUBT rule (see the module docstring) applies here exactly as it does to
+    the build fingerprint.
+    """
+    resolver = pci_address_of or _disk_pci_address
+    address = resolver(disk)
+    if not address:
+        return False
+    match = _PCI_ADDRESS_RE.fullmatch(address)
+    if not match:
+        return False
+    return _normalize_pci_address(match.groups()) in hostdev_source_addresses(xml)
+
+
+def _disk_pci_address(disk: str) -> str | None:
+    """console.hardware.pci_address_for_device, imported only when needed -
+    same lazy-import convention as _sysfs_size below (pure /sys/block read,
+    no subprocess, no dependency this module cannot promise a target has)."""
+    sys.path.insert(0, str(HERE))
+    from hardware import pci_address_for_device  # noqa: PLC0415
+
+    return pci_address_for_device(disk)
+
+
 # guest/build.py's own defaults for the two answers the wizard does not ask.
 DEFAULT_APOLLO_USER = "nivuus"
 DEFAULT_HOSTNAME = "NIVUUS-WIN"
@@ -547,11 +635,14 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
                runner: Callable[[list[str]], None] | None = None,
                size_of: Callable[[str], int] | None = None,
                python: str | None = None,
-               build_inputs: Mapping[str, str] | None = None) -> list[Step]:
+               build_inputs: Mapping[str, str] | None = None,
+               pci_address_of: Callable[[str], str | None] | None = None
+               ) -> list[Step]:
     """The five steps, in order, for this host's answers. Runs nothing.
 
-    `virsh`, `runner` and `size_of` are injectable so tests can replace them:
-    the real ones read - and, for `start`, drive - the production domain.
+    `virsh`, `runner`, `size_of` and `pci_address_of` are injectable so
+    tests can replace them: the real ones read - and, for `start`, drive -
+    the production domain, or walk the real /sys/block tree.
     """
     virsh = virsh or default_virsh
     runner = runner or default_runner
@@ -678,21 +769,53 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         return proc.stdout or ""
 
     def domain_defined() -> bool:
-        """Is the INSTALL domain defined - not merely "a domain named Windows".
+        """Is the domain ALREADY what it should be - not merely "a domain
+        named Windows", and not merely "carries the right ISOs".
 
-        The distinction is the whole point. This step now emits a domain
-        carrying BOTH install media; "it exists" was a sufficient predicate
-        only while it emitted one single XML. A pre-existing Windows domain
-        without the media - the nominal case when reinstalling a console, and
-        the case on any host that has ever run one - would otherwise let the
-        step skip, and `start` would boot a blank NVMe with no error anywhere.
-        So compare what IS defined against what SHOULD be: both media, by
-        path, in the definition libvirt holds.
+        Two things identify the domain, and neither alone is enough:
+
+          * WHICH MEDIA it carries - both, matching this run's own paths, or
+            neither. "It exists" was a sufficient predicate only while this
+            step emitted one single, unchanging XML shape; it now emits the
+            INSTALL domain, so a pre-existing Windows domain without media -
+            the nominal case when reinstalling a console, and the case on
+            any host that has ever run one - must NOT read as done unless
+            hardware also agrees (see the next point), or `start` would boot
+            whatever disk that stale domain happened to carry, silently.
+          * WHICH PHYSICAL DISK it hands the guest - domain_matches_disk(),
+            never the ISO paths for this: they are FIXED paths under the
+            workdir, unchanged by which 'dedicated_nvme' answer was given,
+            so changing that answer rebuilds the ISO but, without this
+            check, leaves an already-defined domain pointing at the OLD
+            disk - exactly the gap round-2 review found.
+
+        A domain carrying NEITHER medium, with the RIGHT disk wired up, is
+        the STEADY-STATE (regime) domain guest-ready-watch.py's own
+        redefine_steady_state() produces once the guest is provisioned - and
+        that is a TERMINAL, LEGITIMATE outcome, not work still to do.
+        Treating it as "not done" replays this step at every activation
+        retry, without --keyed-varstore (that flag is guest-ready-watch.py's
+        own escape hatch, never this step's - see domain.py's
+        guard_fresh_varstore() docstring for why); domain.py's varstore
+        guard then refuses FOREVER, since the varstore the earlier
+        media-carrying `define` created already exists - and the guard's own
+        documented remedy, `virsh undefine Windows --nvram`, would
+        REINSTALL Windows over a console that already works. A domain
+        carrying exactly ONE medium, or the right disk but the wrong media
+        state otherwise, is never a state to accept - see the branches
+        below.
         """
         xml = defined_xml()
         if xml is None:
             return False
-        return source_iso in xml and str(iso_out) in xml
+        has_windows_iso = source_iso in xml
+        has_unattend_iso = str(iso_out) in xml
+        identity_ok = domain_matches_disk(xml, disk, pci_address_of=pci_address_of)
+        if has_windows_iso and has_unattend_iso:
+            return identity_ok
+        if not has_windows_iso and not has_unattend_iso:
+            return identity_ok  # the regime domain: terminal when it agrees
+        return False             # exactly one medium: half-defined, never done
 
     def define_argv() -> list[str]:
         """The argv to define with, --replace added only when one is there.
