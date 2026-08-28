@@ -358,9 +358,15 @@ LSPCI_LIVE = """\
 """
 
 
-def live_iso_env(root, disk_to_address):
+def live_iso_env(root, disk_to_address, sizes=None):
     """A fake live medium: no traceable host root, a captured lspci, a fake
     sysfs block tree mapping device names to PCI addresses.
+
+    `sizes` (device name -> byte size) is optional and only needed by the
+    dedicated_nvme_size_bytes() tests below: it writes the sysfs `size` file
+    (in 512-byte sectors, the unit /sys/block/<disk>/size always uses -
+    hardware.block_device_size_bytes() does the same conversion back) that
+    the existing tests never needed because they never read a size.
 
     Returns the env overlay to hand call_hook().
     """
@@ -382,6 +388,9 @@ def live_iso_env(root, disk_to_address):
         os.makedirs(os.path.join(pci, address), exist_ok=True)
         os.symlink(os.path.join(pci, address),
                    os.path.join(block, device, "device", "device"))
+        if sizes and device in sizes:
+            with open(os.path.join(block, device, "size"), "w") as fh:
+                fh.write(str(sizes[device] // 512) + "\n")
 
     return {"PATH": binaries + os.pathsep + os.environ.get("PATH", ""),
             "NIVUUS_SYSFS_BLOCK": block}
@@ -389,9 +398,12 @@ def live_iso_env(root, disk_to_address):
 
 HW_LIVE = {"gpus": [GPU_OK], "cpu": CPU_OK, "memory_mib": 65536}
 
+DEDICATED_NVME_BYTES = 500 * 1024 ** 3
+
 with tempfile.TemporaryDirectory() as tmp:
     env = live_iso_env(tmp, {"nvme9n1": "0000:03:00.0",
-                             "nvme8n1": "0000:00:02.0"})
+                             "nvme8n1": "0000:00:02.0"},
+                       sizes={"nvme9n1": DEDICATED_NVME_BYTES})
 
     # Le cas qui refusait sur toutes les machines et doit maintenant reussir.
     rc, events = call_hook(hw=HW_LIVE, answers={"dedicated_nvme": "/dev/nvme9n1"},
@@ -404,6 +416,13 @@ with tempfile.TemporaryDirectory() as tmp:
         check("ISO live : le NVMe choisi est celui repondu par l operateur",
               "vfio-pci.ids=10de:2786,10de:22bc,144d:a808"
               in plat.get("kernel-cmdline", []), True)
+        # C EST LA CLEF DE LA TACHE 1 : resolve tourne avant que le disque ne
+        # soit lie a vfio-pci - c est le seul moment ou /sys/block le connait
+        # encore. guest_steps.py::_disk_bytes() prefere cette valeur a un
+        # nouveau passage par sysfs a l activation, quand le disque a deja
+        # disparu de /sys/block (mesure sur cet hote, cf. rapport de tache).
+        check("ISO live : la taille du NVMe dedie est emise",
+              plat.get("dedicated_nvme_size_bytes"), DEDICATED_NVME_BYTES)
 
     # Une reponse qui ne designe aucun controleur NVMe : refus motive, pas un
     # choix de repli silencieux sur un autre disque.
@@ -436,6 +455,72 @@ with tempfile.TemporaryDirectory() as tmp:
     check("ISO live sans reponse : un refus est emis", reason is not None, True)
     check("ISO live sans reponse : le refus dit qu il manque le disque dedie",
           bool(reason) and "dedicated NVMe" in reason, True)
+
+# --- la taille est BEST-EFFORT : son absence ne doit jamais bloquer ------ #
+# Meme disque, meme reponse, mais AUCUN fichier `size` dans le faux sysfs
+# cette fois (live_iso_env() sans l argument `sizes`) : dedicated_nvme_size_
+# bytes() doit rendre None silencieusement plutot que planter ou refuser -
+# c est exactement ce qui laisse guest_steps.py::_disk_bytes() retomber sur
+# son propre sysfs plus tard, et refuser PAR SON NOM seulement si CA echoue
+# aussi (verifie cote guest_steps dans test_console_guest_steps.py).
+with tempfile.TemporaryDirectory() as tmp:
+    env_no_size = live_iso_env(tmp, {"nvme9n1": "0000:03:00.0"})
+    rc, events = call_hook(hw=HW_LIVE, answers={"dedicated_nvme": "/dev/nvme9n1"},
+                           env=env_no_size)
+    check("ISO live sans fichier size : code de sortie 0", rc, 0)
+    check("ISO live sans fichier size : AUCUN refus", refusal_reason(events), None)
+    plat = platform_event(events)
+    check("ISO live sans fichier size : un plan platform est emis quand meme",
+          plat is not None, True)
+    if plat:
+        check("ISO live sans fichier size : la clef est absente, pas a None ni fausse",
+              "dedicated_nvme_size_bytes" in plat, False)
+
+# --- la taille suit aussi la selection AUTOMATIQUE (pas de reponse) ------ #
+# Sur un hote DEJA INSTALLE (racine tracable), select_passthrough_nvme()
+# choisit seul quand un candidat unique n est pas la racine hote - resolve.py
+# n a alors qu une ADRESSE PCI, jamais un /dev/... : dedicated_nvme_size_
+# bytes() doit retrouver le nom de peripherique par le chemin inverse
+# (hardware.block_device_for_pci_address) avant de pouvoir lire sa taille.
+def installed_host_env(root, host_device, host_address,
+                       guest_device, guest_address, guest_bytes):
+    binaries = os.path.join(root, "bin")
+    os.makedirs(binaries, exist_ok=True)
+    with open(os.path.join(binaries, "findmnt"), "w") as fh:
+        fh.write(f"#!/bin/sh\necho /dev/{host_device}p2\n")
+    with open(os.path.join(binaries, "lspci"), "w") as fh:
+        fh.write("#!/bin/sh\ncat <<'EOF'\n" + LSPCI_LIVE + "EOF\n")
+    for name in ("findmnt", "lspci"):
+        os.chmod(os.path.join(binaries, name), 0o755)
+
+    block = os.path.join(root, "sysfs-block")
+    pci = os.path.join(root, "pci")
+    for device, address in ((host_device, host_address),
+                            (guest_device, guest_address)):
+        os.makedirs(os.path.join(block, device, "device"), exist_ok=True)
+        os.makedirs(os.path.join(pci, address), exist_ok=True)
+        os.symlink(os.path.join(pci, address),
+                   os.path.join(block, device, "device", "device"))
+    with open(os.path.join(block, guest_device, "size"), "w") as fh:
+        fh.write(str(guest_bytes // 512) + "\n")
+
+    return {"PATH": binaries + os.pathsep + os.environ.get("PATH", ""),
+            "NIVUUS_SYSFS_BLOCK": block}
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    env = installed_host_env(tmp, "nvme0n1", "0000:02:00.0",
+                             "nvme1n1", "0000:03:00.0", DEDICATED_NVME_BYTES)
+    rc, events = call_hook(hw=HW_LIVE, answers={"dedicated_nvme": ""}, env=env)
+    check("hote installe, selection auto : code de sortie 0", rc, 0)
+    check("hote installe, selection auto : AUCUN refus",
+          refusal_reason(events), None)
+    plat = platform_event(events)
+    check("hote installe, selection auto : un plan platform est emis",
+          plat is not None, True)
+    if plat:
+        check("hote installe, selection auto : la taille suit via l adresse PCI",
+              plat.get("dedicated_nvme_size_bytes"), DEDICATED_NVME_BYTES)
 
 # --- non-regression : les refus deja verifies plus haut restent verts ---- #
 rc, events = call_hook(
