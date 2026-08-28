@@ -7,11 +7,24 @@ hour. Without this watch, "installation en cours" and "a echoue" are
 indistinguishable: both look, from the host, like a running domain it
 cannot yet talk to - for an hour, then forever.
 
-THE SIGNAL IS NOT INVENTED. console/guest/provision/99-marker.ps1 orders its
-fourteen stages so that everything else is true before port 5985 (WinRM)
-opens - "the host treats a reachable 5985 as 'the guest is provisioned'".
-Building a second signal here would create two truths; this script only
-reads the one that already exists.
+THE SIGNAL IS NOT INVENTED, but it changed on 2026-08-26 and this module
+used to still describe the old one. Port 5985 (WinRM) is no longer the
+witness: console/guest/provision/00-bootstrap.ps1 now opens it at the FIRST
+stage, deliberately - a closed port used to fail exactly where it mattered,
+when a later stage threw, 99-marker.ps1 was never reached, and the only
+remote door into the guest stayed shut precisely when something needed
+looking at. "5985 reachable" therefore now only means the guest is alive
+enough to accept a command - never that provisioning finished.
+
+The real witness is the file 99-marker.ps1 writes as its very last act:
+C:\\nivuus\\state\\PROVISION.done, stamped with the payload's own
+provision_version (see console/guest/payload.py's PROVISION_VERSION). This
+script reads that file over WinRM - through console/guest/winrm_exec.py,
+the same tool console/guest/testdomain.py's _marker_present() already uses
+for the identical reason - and checks its version, never its mere
+presence: a rebuild boots a disk that can still carry the PREVIOUS run's
+marker, so presence alone would declare a console ready before its own
+installation had begun. See marker_says_ready() and read_marker() below.
 
 Four states, not three, because "not started" and "installation en cours"
 call for opposite operator reactions (go look at the libvirt hooks, versus
@@ -19,14 +32,16 @@ just wait) and nothing distinguished them before this script existed:
 
   NOT_STARTED - the domain is not 'running': it never started, or it
                 stopped/crashed. Look at the libvirt hooks/journal.
-  INSTALLING  - the domain is running, 5985 is still closed, and not for
-                unreasonably long yet.
-  FAILED      - the domain is running, 5985 is still closed, past
-                INSTALL_TIMEOUT_S. The guest cannot say why - WinRM is
-                exactly what is closed - so only the host's own journal
-                (this line) can make the failure legible.
-  READY       - 5985 answers. This overrides everything else: a reachable
-                guest IS a provisioned guest, even if it took longer than
+  INSTALLING  - the domain is running, the current-version marker is not
+                there yet (WinRM unreachable, marker absent, or a stale
+                version), and not for unreasonably long yet.
+  FAILED      - the domain is running, the current-version marker is still
+                missing past INSTALL_TIMEOUT_S. The guest cannot say why
+                on its own - so only the host's own journal (this line)
+                can make the failure legible.
+  READY       - the marker carries the CURRENT provision_version. This
+                overrides everything else: a guest that has finished
+                provisioning IS ready, even if it took longer than
                 INSTALL_TIMEOUT_S. The clock only measures a reasonable
                 delay, never a hard deadline.
 
@@ -90,6 +105,36 @@ VM_NAME = "Windows"
 WINRM_PORT = 5985
 PORT_PROBE_TIMEOUT_S = 3
 
+# The provisioning marker's path in the guest, and the tool used to read it
+# over WinRM. Same file 99-marker.ps1 writes, same tool testdomain.py's
+# _marker_present() already uses for the same reason - see the module
+# docstring.
+MARKER_PATH = r"C:\nivuus\state\PROVISION.done"
+WINRM_EXEC = "/opt/nivuus-packages/console/guest/winrm_exec.py"
+
+# The password winrm_exec.py needs is the one console/guest_steps.py's
+# 'secrets' step ALREADY wrote - never re-derived here. That step writes
+# it under activate.py's DEFAULT_GUEST_WORKDIR (/var/lib/nivuus/guest),
+# not winrm_exec.py's OWN default (/root/.config/nivuus/windows-admin.pass,
+# which is build.py's manual-test default, unused by the real activate
+# pipeline): the two just happen to differ, so this must be passed
+# explicitly, never left to winrm_exec.py's default matching by luck.
+# Copied, not imported, same reason as DOMAIN_PY above - this script runs
+# standalone under /usr/local/sbin/.
+GUEST_PASS_FILE = "/var/lib/nivuus/guest/secrets/windows-admin.pass"
+
+# Hardcoded, English, literal strings winrm_exec.py itself prints on stderr
+# when it could not even reach the guest to run the command - as opposed to
+# the remote command's OWN (locale-dependent, unpredictable) error text when
+# WinRM answered but the marker file does not exist. read_marker() below
+# tells the two apart by these prefixes, never by return code: winrm_exec.py
+# returns 1 in both cases (a "file not found" `type` also exits 1), so the
+# return code alone cannot distinguish them - only these fixed messages can.
+_WINRM_UNREACHABLE_PREFIXES = (
+    "error: cannot reach guest",
+    "error: password file not found",
+)
+
 # "a reasonable delay" per the task this script implements: long enough
 # that a normal unattended LTSC install (including the reboots driver
 # installs cause) is never mistaken for a failure, short enough that a
@@ -124,15 +169,16 @@ _MAC_RE = re.compile(r"mac address=['\"]([0-9a-fA-F:]+)['\"]")
 _BRIDGE_RE = re.compile(r"source bridge=['\"]([^'\"]+)['\"]")
 
 
-def classify(*, domstate: str, port_open: bool, elapsed_s: float) -> str:
+def classify(*, domstate: str, ready: bool, elapsed_s: float) -> str:
     """The four-way split. See the module docstring for what each means.
 
-    port_open wins over everything, INCLUDING elapsed_s past the timeout:
-    a reachable guest is a provisioned guest, however long it took to get
-    there - the clock only distinguishes "still waiting" from "give up
-    waiting and say so", it never overrides a guest that answered.
+    ready wins over everything, INCLUDING elapsed_s past the timeout: a
+    guest whose current-version marker is there IS a provisioned guest,
+    however long it took to get there - the clock only distinguishes
+    "still waiting" from "give up waiting and say so", it never overrides
+    a guest that has actually finished.
     """
-    if port_open:
+    if ready:
         return READY
     if domstate != "running":
         return NOT_STARTED
@@ -243,13 +289,80 @@ def find_guest_ip(vm_name: str = VM_NAME, run=subprocess.run,
 def probe_port(ip: str, port: int = WINRM_PORT,
                timeout: float = PORT_PROBE_TIMEOUT_S) -> bool:
     """A plain TCP connect - WinRM's own protocol is not spoken here, only
-    reachability, exactly what 99-marker.ps1 promises ("a reachable
-    5985")."""
+    reachability. Used as a cheap pre-check before attempting the slower
+    WinRM session in read_marker(): since 00-bootstrap.ps1, a reachable
+    port only proves the guest is alive, never that it is done - see the
+    module docstring."""
     try:
         with socket.create_connection((ip, port), timeout=timeout):
             return True
     except OSError:
         return False
+
+
+def marker_says_ready(marker_text: str, expected: str) -> bool:
+    """Pure, no I/O: true iff marker_text carries a WHOLE LINE reading
+    provision_version=<expected>.
+
+    Version-checked on purpose, per the module docstring - a rebuild boots
+    a disk that already holds the PREVIOUS run's marker, so presence alone
+    proves nothing about THIS run. An absent or empty marker_text (the
+    guest never wrote one, or read_marker() below could not reach it)
+    naturally contains no such line and returns False.
+
+    The match is anchored to a full line, not a bare substring: a plain
+    `"provision_version=B3" in text` would also match a marker carrying
+    "provision_version=B30" (B3 is a prefix of B30), which is exactly the
+    kind of false positive this whole check exists to rule out.
+    """
+    pattern = re.compile(
+        r"(?m)^provision_version=" + re.escape(expected) + r"\s*$")
+    return pattern.search(marker_text) is not None
+
+
+def read_marker(ip: str, run=subprocess.run) -> str | None:
+    """The provisioning marker's raw content, read over WinRM - or None
+    when WinRM itself could not be reached (connection failure, or a
+    missing GUEST_PASS_FILE), as opposed to "" (or any text without the
+    expected line) when WinRM DID answer but the marker is not there yet,
+    or not at the expected version. These are deliberately told apart:
+    "the guest has not spoken at all" and "it has spoken but is not done"
+    call for different journal lines - see main().
+
+    Same tool testdomain.py's _marker_present() already uses for the same
+    check: console/guest/winrm_exec.py, which reads its password from a
+    FILE (GUEST_PASS_FILE), never from argv - so GUEST_IP is passed through
+    the environment here too, never on the command line.
+    """
+    proc = run([sys.executable, WINRM_EXEC, "cmd", f"type {MARKER_PATH}"],
+              capture_output=True, text=True,
+              env=dict(os.environ, GUEST_IP=ip, GUEST_PASS_FILE=GUEST_PASS_FILE,
+                       LC_ALL="C"))
+    stderr = getattr(proc, "stderr", "") or ""
+    if stderr.startswith(_WINRM_UNREACHABLE_PREFIXES):
+        return None
+    return getattr(proc, "stdout", "") or ""
+
+
+def expected_provision_version() -> str:
+    """console/guest/payload.py's PROVISION_VERSION, read at call time, not
+    copied here - copying it would silently drift the day payload.py bumps
+    it for a new build.
+
+    Imported lazily, INSIDE this function rather than at module scope, same
+    convention and same reason as domain.py's own lazy HardwareError import
+    (see CLAUDE.md's "the lesson that outlives the bug"): this script is
+    deployed standalone under /usr/local/sbin/, and a module-scope import
+    would make importing THIS FILE depend on guest/payload.py being on
+    sys.path even for callers that never reach READY. DOMAIN_PY already
+    names where apply_packages() puts the whole package tree - payload.py
+    sits right next to domain.py in that same directory.
+    """
+    guest_dir = os.path.dirname(DOMAIN_PY)
+    if guest_dir not in sys.path:
+        sys.path.insert(0, guest_dir)
+    import payload  # local import by design - see the docstring above
+    return payload.PROVISION_VERSION
 
 
 def load_state(path: str = STATE_PATH) -> dict:
@@ -315,11 +428,27 @@ def stop_self(run=subprocess.run) -> None:
        capture_output=True, text=True)
 
 
-def main(*, domstate_fn=None, ip_fn=None, probe_fn=None, redefine_fn=None,
-         stop_fn=None, state_path: str | None = None, now_fn=None) -> int:
+def _marker_detail(marker_text: str | None, expected: str) -> str:
+    """A short French phrase explaining WHY the guest is not ready yet -
+    WinRM unreachable, marker absent, or marker present but stale - the
+    three causes classify() collapses into a single INSTALLING/FAILED
+    state but that an operator reading the journal still needs told apart.
+    """
+    if marker_text is None:
+        return f"WinRM injoignable sur le port {WINRM_PORT}"
+    if not marker_text.strip():
+        return f"temoin absent ({MARKER_PATH})"
+    return f"temoin present mais pas a la version {expected}"
+
+
+def main(*, domstate_fn=None, ip_fn=None, probe_fn=None, marker_fn=None,
+         version_fn=None, redefine_fn=None, stop_fn=None,
+         state_path: str | None = None, now_fn=None) -> int:
     domstate_fn = domstate_fn or query_domstate
     ip_fn = ip_fn or find_guest_ip
     probe_fn = probe_fn or probe_port
+    marker_fn = marker_fn or read_marker
+    version_fn = version_fn or expected_provision_version
     redefine_fn = redefine_fn or redefine_steady_state
     stop_fn = stop_fn or stop_self
     now_fn = now_fn or time.time
@@ -346,16 +475,21 @@ def main(*, domstate_fn=None, ip_fn=None, probe_fn=None, redefine_fn=None,
     elapsed = now - first_running_at
 
     ip = ip_fn()
-    port_open = bool(ip) and probe_fn(ip)
-    result = classify(domstate=domstate, port_open=port_open, elapsed_s=elapsed)
+    # The TCP probe is a cheap pre-check: reading the marker means opening
+    # a real WinRM session, worth skipping when the port is not even open.
+    marker_text = marker_fn(ip) if ip and probe_fn(ip) else None
+    expected = version_fn()
+    ready = marker_text is not None and marker_says_ready(marker_text, expected)
+    result = classify(domstate=domstate, ready=ready, elapsed_s=elapsed)
     save_state(state_path, {"first_running_at": first_running_at,
                             "classification": result})
 
     if result == READY:
-        print(f"guest-ready: invite joignable sur {ip}:{WINRM_PORT} apres "
-             f"{int(elapsed)}s - provisionnement termine")
+        print(f"guest-ready: temoin de provisionnement a jour (version "
+             f"{expected}) sur {ip} apres {int(elapsed)}s - "
+             "provisionnement termine")
         # The timer stops ONLY once the redefinition itself has actually
-        # succeeded - not merely because the port answered. A reachable
+        # succeeded - not merely because the marker was found. A ready
         # guest that still carries its install media is not yet the
         # terminal state this script exists to reach: stopping here
         # unconditionally would mean the domain keeps its install media
@@ -370,15 +504,16 @@ def main(*, domstate_fn=None, ip_fn=None, probe_fn=None, redefine_fn=None,
                  "tentative au prochain passage de ce minuteur",
                  file=sys.stderr)
     elif result == FAILED:
-        print(f"guest-ready: domaine actif depuis {int(elapsed)}s, port "
-             f"{WINRM_PORT} toujours ferme (seuil {INSTALL_TIMEOUT_S}s "
-             "depasse) - l invite ne peut rien dire tant que WinRM est "
-             "ferme ; cette ligne de journal est la seule trace lisible "
-             "de l echec", file=sys.stderr)
+        detail = _marker_detail(marker_text, expected)
+        print(f"guest-ready: domaine actif depuis {int(elapsed)}s, {detail} "
+             f"(seuil {INSTALL_TIMEOUT_S}s depasse) - cette ligne de "
+             "journal est la seule trace lisible de l echec",
+             file=sys.stderr)
         stop_fn()
     else:
+        detail = _marker_detail(marker_text, expected)
         print(f"guest-ready: installation en cours depuis {int(elapsed)}s "
-             f"(port {WINRM_PORT} pas encore ouvert)")
+             f"({detail})")
     return 0
 
 

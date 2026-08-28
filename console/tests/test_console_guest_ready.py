@@ -11,13 +11,23 @@ virsh domifaddr, that a READY guest triggers a media-less redefinition of
 the domain, and that the timer stops itself only once a state is ACTUALLY
 terminal.
 
+Since 2026-08-26 port 5985 is opened at the FIRST provisioning stage
+(00-bootstrap.ps1), not the last - so the readiness signal moved: it is now
+the version-stamped marker file (C:\\nivuus\\state\\PROVISION.done),
+read over WinRM, checked against console/guest/payload.py's
+PROVISION_VERSION - never presence alone, because a rebuild boots a disk
+that can still carry the PREVIOUS run's marker. This suite proves that
+version check is load-bearing (a stale marker must NOT read as ready), and
+that "WinRM unreachable" and "marker absent" are told apart - they mean
+different things to an operator, even though both classify the same.
+
 guest-ready-watch.py's own subprocess calls (virsh, systemctl, domain.py
-define) are never launched for real: every one of those dependencies is
-injected as a fake implementing the FULL interface the code under test
-actually uses (returncode/stdout/stderr for a virsh-shaped call, a plain
-bool for redefine/probe) - a fake missing a field the code reads would make
-the fake, not the code, the thing being measured. That mistake was already
-made once on this plan.
+define, winrm_exec.py) are never launched for real: every one of those
+dependencies is injected as a fake implementing the FULL interface the code
+under test actually uses (returncode/stdout/stderr for a virsh-shaped call,
+a plain bool for redefine/probe) - a fake missing a field the code reads
+would make the fake, not the code, the thing being measured. That mistake
+was already made once on this plan.
 
 Round-1 review found two defects that combine into "the domain keeps its
 install media forever": redefine_steady_state()'s argv hit
@@ -67,36 +77,139 @@ def check(label, got, want):
 
 
 # --- Step 1 from the brief, verbatim: the four states, classified for the
-# right reason. port_open PRIMES over an elapsed clock past the timeout -
+# right reason. `ready` PRIMES over an elapsed clock past the timeout -
 # a late-arriving guest is still a successfully provisioned one. -------- #
 
 check("domaine eteint : la VM n a jamais demarre",
-      watch.classify(domstate="shut off", port_open=False, elapsed_s=60),
+      watch.classify(domstate="shut off", ready=False, elapsed_s=60),
       watch.NOT_STARTED)
-check("domaine actif, port ferme, tot : installation en cours",
-      watch.classify(domstate="running", port_open=False, elapsed_s=60),
+check("domaine actif, pas encore pret, tot : installation en cours",
+      watch.classify(domstate="running", ready=False, elapsed_s=60),
       watch.INSTALLING)
-check("domaine actif, port ferme, trop longtemps : echec",
-      watch.classify(domstate="running", port_open=False, elapsed_s=4 * 3600),
+check("domaine actif, pas encore pret, trop longtemps : echec",
+      watch.classify(domstate="running", ready=False, elapsed_s=4 * 3600),
       watch.FAILED)
-check("port ouvert : provisionne",
-      watch.classify(domstate="running", port_open=True, elapsed_s=600),
+check("pret : provisionne",
+      watch.classify(domstate="running", ready=True, elapsed_s=600),
       watch.READY)
-check("un port ouvert tardif reste un succes",
-      watch.classify(domstate="running", port_open=True, elapsed_s=9 * 3600),
+check("un pret tardif reste un succes",
+      watch.classify(domstate="running", ready=True, elapsed_s=9 * 3600),
       watch.READY)
 
 # The threshold is a NAMED constant, not a number the test recopies: prove
 # the boundary sits exactly where the constant says it does, by referring
 # to watch.INSTALL_TIMEOUT_S rather than writing its value out again.
 check("juste sous le seuil : encore installation",
-      watch.classify(domstate="running", port_open=False,
+      watch.classify(domstate="running", ready=False,
                      elapsed_s=watch.INSTALL_TIMEOUT_S - 1),
       watch.INSTALLING)
 check("au seuil pile : echec",
-      watch.classify(domstate="running", port_open=False,
+      watch.classify(domstate="running", ready=False,
                      elapsed_s=watch.INSTALL_TIMEOUT_S),
       watch.FAILED)
+
+
+# --- marker_says_ready(): pure, version-checked - the CORE of this task. -
+# Step 1 from the brief, verbatim, plus the third case it lists (absent). #
+
+check("un temoin d une version anterieure ne suffit pas",
+      watch.marker_says_ready("provision_version=B2\n", expected="B3"), False)
+check("le temoin de la version courante suffit",
+      watch.marker_says_ready("provision_version=B3\n", expected="B3"), True)
+check("un temoin absent (chaine vide) ne suffit pas",
+      watch.marker_says_ready("", expected="B3"), False)
+check("un temoin sans la ligne attendue, quel que soit son contenu, ne "
+      "suffit pas",
+      watch.marker_says_ready("completed=2026-08-28T00:00:00\n", "B3"), False)
+check("la comparaison ne fait pas de correspondance partielle sur le "
+      "numero de version (B3 ne doit pas matcher B30 ni B3x)",
+      watch.marker_says_ready("provision_version=B30\n", "B3"), False)
+
+
+# --- read_marker(): tells "WinRM unreachable" apart from "WinRM answered,
+# marker absent/stale" - None vs a string, per the brief's fourth case. -- #
+
+class FakeWinrmCall:
+    """Implements the FULL interface read_marker() reads off a
+    subprocess.run() result: returncode, stdout, stderr - same discipline
+    as FakeVirshCall below, and for the same reason (see module docstring:
+    a fake missing a field would make the fake, not the code, the thing
+    measured)."""
+
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def recording_winrm(script):
+    """A fake winrm_exec.py invocation: `script` maps the guest IP to the
+    FakeWinrmCall to answer with. Records every argv/env pair it saw, so
+    tests can assert GUEST_IP/GUEST_PASS_FILE were passed through the
+    environment, never on argv (winrm_exec.py's whole reason to read its
+    password from a file - see the module docstring)."""
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((list(argv), dict(kwargs.get("env") or {})))
+        ip = kwargs["env"]["GUEST_IP"]
+        return script[ip]
+
+    return run, calls
+
+
+# WinRM itself unreachable (connection refused/timeout): None, distinct
+# from an empty/absent marker.
+run, calls = recording_winrm({
+    "192.168.3.2": FakeWinrmCall(
+        1, "", "error: cannot reach guest at 192.168.3.2:5985: timed out"),
+})
+check("WinRM injoignable rend None, pas une chaine vide",
+      watch.read_marker("192.168.3.2", run=run), None)
+
+# The password-file-missing case is ALSO "cannot even try", not "the guest
+# said no" - same reason, same None.
+run, _ = recording_winrm({
+    "192.168.3.2": FakeWinrmCall(
+        1, "", "error: password file not found: /some/path"),
+})
+check("fichier de mot de passe absent : None aussi, pas une chaine vide",
+      watch.read_marker("192.168.3.2", run=run), None)
+
+# WinRM DID answer, but the remote `type` failed (file not found): "" - a
+# STRING, deliberately distinct from None above.
+run, _ = recording_winrm({
+    "192.168.3.2": FakeWinrmCall(
+        1, "", "Le fichier specifie est introuvable."),
+})
+check("temoin absent cote invite (WinRM a repondu) rend une chaine vide, "
+      "PAS None : ce n est pas la meme cause qu un WinRM injoignable",
+      watch.read_marker("192.168.3.2", run=run), "")
+
+# WinRM DID answer and the marker exists: its raw content comes back.
+run, _ = recording_winrm({
+    "192.168.3.2": FakeWinrmCall(0, "provision_version=B3\ncompleted=x\n", ""),
+})
+check("temoin present : le contenu brut est rendu",
+      watch.read_marker("192.168.3.2", run=run),
+      "provision_version=B3\ncompleted=x\n")
+
+# GUEST_IP and GUEST_PASS_FILE travel through the ENVIRONMENT, never argv -
+# the whole reason winrm_exec.py reads its password from a file.
+run, calls = recording_winrm({
+    "192.168.3.2": FakeWinrmCall(0, "provision_version=B3\n", ""),
+})
+watch.read_marker("192.168.3.2", run=run)
+argv, env = calls[0]
+check("l IP du client passe par l environnement, jamais sur argv",
+      "192.168.3.2" in argv, False)
+check("GUEST_IP est bien positionne dans l environnement",
+      env.get("GUEST_IP"), "192.168.3.2")
+check("GUEST_PASS_FILE est bien positionne dans l environnement - c est "
+      "le chemin que l etape secrets a deja ecrit, jamais relu ici",
+      env.get("GUEST_PASS_FILE"), watch.GUEST_PASS_FILE)
+check("la commande lit bien le temoin de provisionnement",
+      watch.MARKER_PATH in " ".join(argv), True)
 
 
 # --- IP discovery: the host's neighbour table, keyed by the domain's own --
@@ -302,8 +415,17 @@ check("a closed port is unreachable",
 # never a real virsh/systemctl/domain.py. Proves the timer stops itself
 # EXACTLY on a terminal state, and that READY (and only READY) redefines. #
 
-def run_main(domstate, port_open, elapsed_s, redefine_ok=True):
+def run_main(domstate, marker_text, elapsed_s, redefine_ok=True,
+            expected="B3"):
     """Drive main() with fully injected fakes and a throwaway state file.
+
+    `marker_text` stands in for what marker_fn (read_marker) would have
+    returned: None means "WinRM unreachable", "" means "WinRM answered,
+    marker absent", any other string is the marker's raw content - matching
+    read_marker()'s own real contract (see its docstring and the tests
+    above). probe_fn always reports the port open here: what this helper
+    exercises is main()'s handling of marker_fn's result, not the TCP
+    pre-check, which is covered separately (see "probe_port" above).
 
     `elapsed_s` is made exact, not approximate: first_running_at is seeded
     to a fixed reference time on the FIRST call (prior_state is always None
@@ -329,7 +451,13 @@ def run_main(domstate, port_open, elapsed_s, redefine_ok=True):
         return "192.168.3.2" if domstate == "running" else None
 
     def probe_fn(_ip):
-        return port_open
+        return True
+
+    def marker_fn(_ip):
+        return marker_text
+
+    def version_fn():
+        return expected
 
     def redefine_fn():
         redefine_calls_.append(True)
@@ -350,30 +478,71 @@ def run_main(domstate, port_open, elapsed_s, redefine_ok=True):
         errbuf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(errbuf):
             watch.main(domstate_fn=domstate_fn, ip_fn=ip_fn, probe_fn=probe_fn,
+                      marker_fn=marker_fn, version_fn=version_fn,
                       redefine_fn=redefine_fn, stop_fn=stop_fn,
                       state_path=state_path, now_fn=now_fn)
     return buf.getvalue() + errbuf.getvalue(), bool(stop_calls), bool(redefine_calls_)
 
 
-out, stopped, redefined = run_main("shut off", False, 60)
+out, stopped, redefined = run_main("shut off", None, 60)
 check("NOT_STARTED: the timer keeps polling", stopped, False)
 check("NOT_STARTED: no redefinition attempted", redefined, False)
 check("NOT_STARTED: the message names the domain state", "shut off" in out, True)
 check("NOT_STARTED: the message says the guest was never started",
       "non actif" in out, True)
 
-out, stopped, redefined = run_main("running", False, 60)
-check("INSTALLING: the timer keeps polling", stopped, False)
-check("INSTALLING: no redefinition attempted", redefined, False)
+# --- Step 1 from the brief, fourth case: "WinRM injoignable" and "temoin
+# absent" both classify INSTALLING, but must NOT read the same in the
+# journal - an operator reading them needs to know which one it is. ----- #
 
-out, stopped, redefined = run_main("running", False, watch.INSTALL_TIMEOUT_S)
+out_unreachable, stopped, redefined = run_main("running", None, 60)
+check("INSTALLING (WinRM injoignable): the timer keeps polling",
+      stopped, False)
+check("INSTALLING (WinRM injoignable): no redefinition attempted",
+      redefined, False)
+check("INSTALLING (WinRM injoignable): the journal names WinRM",
+      "injoignable" in out_unreachable, True)
+
+out_absent, stopped, redefined = run_main("running", "", 60)
+check("INSTALLING (temoin absent): the timer keeps polling", stopped, False)
+check("INSTALLING (temoin absent): the journal says the marker is absent",
+      "absent" in out_absent, True)
+check("les deux causes produisent des messages DIFFERENTS - c est le "
+      "point du brief : ne pas les confondre",
+      out_unreachable != out_absent, True)
+check("le message 'absent' ne dit pas aussi injoignable",
+      "injoignable" in out_absent, False)
+
+out_stale, stopped, redefined = run_main(
+    "running", "provision_version=B2\n", 60, expected="B3")
+check("INSTALLING (temoin obsolete): the timer keeps polling", stopped, False)
+check("INSTALLING (temoin obsolete): no redefinition attempted",
+      redefined, False)
+check("INSTALLING (temoin obsolete): la version attendue apparait dans "
+      "le journal", "B3" in out_stale, True)
+
+out, stopped, redefined = run_main(
+    "running", "provision_version=B2\n", watch.INSTALL_TIMEOUT_S,
+    expected="B3")
 check("FAILED: the timer stops (terminal state)", stopped, True)
-check("FAILED: no redefinition attempted (the guest never answered)",
+check("FAILED: no redefinition attempted (the marker never matched)",
       redefined, False)
 check("FAILED: the failure is explained in the journal text",
-      "echec" in out.lower() or "ferme" in out.lower(), True)
+      "echec" in out.lower() or "depasse" in out.lower(), True)
 
-out, stopped, redefined = run_main("running", True, 600, redefine_ok=True)
+# The core of this task: a STALE marker (previous run's version) must NOT
+# be read as ready, even once the port is open and WinRM answers.
+out, stopped, redefined = run_main(
+    "running", "provision_version=B2\n", 600, redefine_ok=True,
+    expected="B3")
+check("un temoin d une version anterieure ne declenche PAS READY",
+      stopped, False)
+check("un temoin d une version anterieure ne redefinit pas le domaine",
+      redefined, False)
+
+out, stopped, redefined = run_main(
+    "running", "provision_version=B3\n", 600, redefine_ok=True,
+    expected="B3")
 check("READY + redefine succeeds: the timer stops (NOW actually terminal)",
       stopped, True)
 check("READY: the domain is redefined without the install media", redefined, True)
@@ -383,7 +552,9 @@ check("READY: the domain is redefined without the install media", redefined, Tru
 # retried and the domain keeps its install media forever, which is exactly
 # the failure combining defect 1 (guard refusal) and defect 2 (unconditional
 # stop) produced before this fix.
-out, stopped, redefined = run_main("running", True, 600, redefine_ok=False)
+out, stopped, redefined = run_main(
+    "running", "provision_version=B3\n", 600, redefine_ok=False,
+    expected="B3")
 check("READY + redefine FAILS: the timer keeps polling, NOT terminal yet",
       stopped, False)
 check("READY + redefine FAILS: a redefinition was still attempted",
@@ -395,9 +566,11 @@ if failures:
     for item in failures:
         print(f"FAIL - {item}")
     sys.exit(1)
-print("OK - the four states classify for the right reason, IP discovery "
-      "uses the host's neighbour table keyed by the domain's MAC (the only "
-      "source that answers on this topology), the redefinition argv "
-      "survives domain.py's REAL guards (--keyed-varstore fix), and the "
-      "timer stops on READY only once that redefinition has actually "
-      "succeeded")
+print("OK - the four states classify for the right reason, readiness is "
+      "the version-checked marker (a stale marker never reads as ready), "
+      "WinRM-unreachable and marker-absent are told apart in the journal, "
+      "IP discovery uses the host's neighbour table keyed by the domain's "
+      "MAC (the only source that answers on this topology), the "
+      "redefinition argv survives domain.py's REAL guards "
+      "(--keyed-varstore fix), and the timer stops on READY only once "
+      "that redefinition has actually succeeded")
