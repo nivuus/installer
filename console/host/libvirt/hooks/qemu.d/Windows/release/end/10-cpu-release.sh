@@ -12,7 +12,7 @@ systemctl start nivuus-cpu-mode@idle.service >> /var/log/libvirt-cpu-hook.log 2>
 # execute les hooks de release pour defaire un demarrage avorte. C'est
 # volontairement la seule voie de restauration — un demarrage refuse ne doit pas
 # laisser l'hote ampute de son transcodage.
-docker compose -f /opt/nivuus/MediaManager/docker-compose.yml \
-    --env-file /opt/nivuus/MediaManager/.env start tdarr-node \
+docker compose -f /opt/nivuus/media-manager/docker-compose.yml \
+    --env-file /opt/nivuus/media-manager/.env start tdarr-node \
     >> /var/log/libvirt-cpu-hook.log 2>&1 || true
 exit 0

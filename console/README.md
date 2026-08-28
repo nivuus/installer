@@ -101,7 +101,7 @@ file by file:
   bridge.
 - **Hooks reference `/opt/nivuus/…` paths that do not exist on a fresh
   target.** `bind-vfio-gpu.sh` and `rebind-host-gpu.sh` drive
-  `docker compose -f /opt/nivuus/{ollama,MediaManager}/docker-compose.yml`,
+  `docker compose -f /opt/nivuus/{ollama,media-manager}/docker-compose.yml`,
   the two CPU wrappers stop and restart the Tdarr CPU node from the same
   place, and `vm-idle-shutdown.sh` tries to bring ollama up on every idle
   cycle. All of these are guarded (`|| true`, or their failure is ignored),

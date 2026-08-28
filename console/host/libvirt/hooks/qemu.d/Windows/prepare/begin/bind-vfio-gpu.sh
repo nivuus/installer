@@ -11,7 +11,7 @@ systemctl stop nvidia-persistenced
 docker compose -f /opt/nivuus/ollama/docker-compose.yml --env-file /opt/nivuus/ollama/.env stop ollama
 # tdarr-node-nvenc encodes on the same card: stop it too. An in-flight ffmpeg dies with it;
 # Tdarr requeues the file after 300s of limbo and the QSV node picks it up later.
-docker compose -f /opt/nivuus/MediaManager/docker-compose.yml --env-file /opt/nivuus/MediaManager/.env stop tdarr-node-nvenc
+docker compose -f /opt/nivuus/media-manager/docker-compose.yml --env-file /opt/nivuus/media-manager/.env stop tdarr-node-nvenc
 
 # modprobe -r échoue si un process tient encore /dev/nvidia*, et la VM démarrerait alors
 # sans GPU. `fuser` ne voit PAS les process conteneurisés (testé : muet sur llama-server),
@@ -60,7 +60,7 @@ if [ -n "$holders" ]; then
     # detach the card and the host must not be left degraded.
     systemctl start nvidia-persistenced || true
     docker compose -f /opt/nivuus/ollama/docker-compose.yml --env-file /opt/nivuus/ollama/.env start ollama || true
-    docker compose -f /opt/nivuus/MediaManager/docker-compose.yml --env-file /opt/nivuus/MediaManager/.env start tdarr-node-nvenc || true
+    docker compose -f /opt/nivuus/media-manager/docker-compose.yml --env-file /opt/nivuus/media-manager/.env start tdarr-node-nvenc || true
 
     echo "==== [HOOK END - REFUS] ===="
     exit 1
