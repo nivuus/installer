@@ -66,6 +66,12 @@ MIN_GAMES_GIB = 100
 
 # guest/domain.py's DOMAIN_NAME. Same copy-not-import reason.
 DOMAIN_NAME = "Windows"
+
+# The one payload file whose presence proves the CURRENT fetch_payload.py
+# ran, not merely that some payload/ tree exists. Mirrors that script's own
+# `dest = drivers_dir / "agent" / "agent.exe"` - copied, not imported (the
+# module docstring's rule). See payload_done() for why it is this file.
+PAYLOAD_WITNESS = Path("agent") / "agent.exe"
 # The states in which the guest is already up, listed positively rather than
 # excluding "shut off". `in shutdown` and `crashed` are states to get OUT of,
 # not successes: read as "already started" they would leave a crashed guest
@@ -736,6 +742,56 @@ def _grant_qemu_access(paths: list[Path], owner: tuple[int, int],
                 "opening it.") from None
 
 
+def _grant_qemu_traverse(path: Path, chmod: Callable[[str, int], None],
+                         stat_fn: Callable[[str], object] | None = None) -> None:
+    """Let qemu WALK THROUGH `path`, and nothing more: one added `o+x` bit.
+
+    TRAVERSING ASKS FOR LESS THAN OWNING. The first cut of this fix handed
+    the workdir to qemu with the same chown as the two media, which does
+    work - but owning a directory is the right to create, rename and delete
+    its entries, and this directory contains `secrets/` (0700 root: the
+    product key and two passwords in clear). A qemu compromised through one
+    of the many surfaces it exposes to a guest could then rename `secrets/`
+    aside and substitute its own before the next build read them. The
+    execute bit alone grants exactly what qemu actually needs - resolving
+    `<workdir>/nivuus-unattend.iso` down to a file it already owns - and
+    grants no right over the directory's contents. `secrets/` stays
+    unreadable to it on its own 0700.
+
+    Not the READ bit either: listing the directory is not needed to open a
+    path that is known in full, so `o+r` would be one more bit than the job
+    requires.
+
+    Idempotent by observation, not by hope: the mode is read first and the
+    chmod is skipped when the bit is already there, so a workdir an
+    operator deliberately widened is never rewritten by a retry.
+
+    SCOPE, stated because it is a real limit and not an oversight: only
+    THIS directory. qemu resolves the full path, so every ancestor must be
+    traversable too, and this does not walk up - exactly as the chown it
+    replaces did not. On a fresh install the chain is fine (the parents are
+    created by mkdir(parents=True) under the installer's umask, 0755), but
+    a pre-existing `/var/lib/nivuus` left at 0750 by another Nivuus
+    component - this development host has one, created 2026-08-16 by the
+    hardware blackbox - would block qemu one level up, with the same
+    "Permission denied" and nothing here to say so. Widening an ancestor
+    that belongs to another component is deliberately NOT done blind; if
+    the field ever hits it, the fix is to decide the mode of
+    /var/lib/nivuus once, where it is created.
+    """
+    stat_fn = stat_fn or os.stat
+    try:
+        mode = stat_fn(str(path)).st_mode & 0o7777      # type: ignore[attr-defined]
+        if mode & 0o001:
+            return
+        chmod(str(path), mode | 0o001)
+    except OSError as exc:
+        raise GuestBuildError(
+            f"could not make {path} traversable by the qemu user: "
+            f"{exc.strerror or exc}. qemu would get 'Permission denied' "
+            "resolving the media paths under it.") from None
+
+
 def _secret(answers: Mapping[str, object], key: str) -> str:
     value = answers.get(key)
     text = "" if value is None else str(value).strip()
@@ -784,12 +840,14 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
                pci_address_of: Callable[[str], str | None] | None = None,
                qemu_owner: Callable[[], tuple[int, int]] | None = None,
                chown: Callable[[str, int, int], None] | None = None,
+               chmod: Callable[[str, int], None] | None = None,
                sleep: Callable[[float], None] | None = None
                ) -> list[Step]:
     """The five steps, in order, for this host's answers. Runs nothing.
 
-    `virsh`, `runner`, `size_of`, `pci_address_of`, `qemu_owner`, `chown` and
-    `sleep` are injectable so tests can replace them: the real ones read -
+    `virsh`, `runner`, `size_of`, `pci_address_of`, `qemu_owner`, `chown`,
+    `chmod` and `sleep` are injectable so tests can replace them: the real
+    ones read -
     and, for `start`, drive - the production domain, walk the real
     /sys/block tree, read /var/lib/libvirt/qemu's owner, actually chown a
     file only root can hand off, or actually wait a second twelve times
@@ -800,6 +858,7 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
     runner = runner or default_runner
     qemu_owner = qemu_owner or resolve_qemu_owner
     chown = chown or os.chown
+    chmod = chmod or os.chmod
     sleep = sleep or time.sleep
     python = python or sys.executable or "python3"
 
@@ -899,14 +958,25 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
     def payload_done() -> bool:
         # Shallow on purpose: fetch_payload.py is offline-first and cheap to
         # replay, so it re-verifies what is there far better than we could.
-        return payload_dir.is_dir() and any(
-            p.is_file() for p in payload_dir.rglob("*"))
+        #
+        # But shallow is not "anything at all". The witness is agent.exe
+        # SPECIFICALLY, and it is not an arbitrary pick: it is the newest
+        # thing fetch_payload.py places (it is copied out of the package
+        # itself, not downloaded - see guest/fetch_payload.py's
+        # PACKAGED_AGENT_EXE), so it is the one file an inherited payload/
+        # tree - one produced by an OLDER fetch_payload.py, on a host that
+        # has run this before - is guaranteed not to have. "Any file at all"
+        # accepted exactly that tree, skipped the step, and left step 40 of
+        # the provisioning with no agent to install: the void the packaging
+        # of agent.exe had just filled. Whatever ends up being the last
+        # payload piece added, this predicate must name it.
+        return (payload_dir / PAYLOAD_WITNESS).is_file()
 
-    # Ownership is a PROPERTY OF THE ARTEFACTS - the workdir, the copied
+    # ACCESS IS A PROPERTY OF THE ARTEFACTS - the workdir, the copied
     # Windows medium, the built ISO - not a side effect of having just built
-    # them. qemu needs all three readable/traversable every time `start`
-    # runs, whether this run just produced the ISO or found it already
-    # current from a previous one. So this is called from BOTH branches
+    # them. qemu needs the two media openable and the workdir traversable
+    # every time `start` runs, whether this run just produced the ISO or
+    # found it already current from a previous one. So this is called from BOTH branches
     # below: at the end of a fresh build, and from build_done()'s own
     # "already current" branch - the one case a chown-only-in-run() version
     # would silently skip forever (an ISO built once, correctly owned, then
@@ -918,8 +988,16 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
     # here, not only iso_out: `define`/`start` open BOTH media, and the
     # 2026-08-28 field measurement hit "Permission denied" on each of them
     # in turn, one manual chown apiece.
+    #
+    # Two different grants, on purpose, because the two needs differ. The
+    # FILES change owner (qemu opens them; the mode stays 0600, they carry
+    # the product key and two passwords). The DIRECTORY only gains `o+x`:
+    # qemu has to walk through it, not own it - owning it would let a
+    # compromised qemu rename `secrets/` aside and substitute its own. See
+    # _grant_qemu_traverse.
     def ensure_qemu_owned() -> None:
-        _grant_qemu_access([root, source_iso, iso_out], qemu_owner(), chown)
+        _grant_qemu_access([source_iso, iso_out], qemu_owner(), chown)
+        _grant_qemu_traverse(root, chmod)
 
     def build_done() -> bool:
         if not iso_out.is_file():
@@ -1031,6 +1109,19 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
             return define_cmd
         return define_cmd + ["--replace"]
 
+    def carries_install_media() -> bool:
+        """Is the domain, RIGHT NOW, wired to BOTH installation media?
+
+        This is the "am I about to boot an installer?" question, and it is
+        NOT the same question as domain_defined() - which also answers True
+        for the steady-state domain carrying NEITHER medium, a terminal and
+        legitimate state. Here only the media-carrying shape counts.
+        """
+        xml = defined_xml()
+        if xml is None:
+            return False        # unreachable libvirtd proves nothing
+        return source_iso in xml and str(iso_out) in xml
+
     def domain_up() -> bool:
         proc = virsh("domstate", DOMAIN_NAME)
         if getattr(proc, "returncode", 1) != 0:
@@ -1039,22 +1130,44 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
 
     def start_run() -> None:
         """Start the domain, then help it past the CD boot prompt - IF, and
-        only if, THIS call is the one that started it.
+        only if, this start is a start OF THE INSTALLATION MEDIA.
+
+        TWO conditions, and the second one is the load-bearing one.
 
         `domain_up()` is read BEFORE `runner(start_cmd)`, never after: the
         question is not "is the guest up now" (true the instant `virsh
-        start` returns), it is "was it already up before I touched it".
-        Skipping on that earlier read is what keeps a KEY_ENTER out of an
-        already-live session - a desktop, a game - which is the one case
-        send_boot_keys must never reach. In the normal pipeline
-        (activate.py's run_steps) this is already guaranteed by
-        already_done() gating whether run() is even called; the check is
-        repeated here so this step is safe on its own, not only behind that
-        caller.
+        start` returns), it is "was it already up before I touched it". In
+        the normal pipeline (activate.py's run_steps) that is already
+        guaranteed by already_done() gating whether run() is even called;
+        the check is repeated here so this step is safe on its own.
+
+        THAT CHECK ALONE IS NOT ENOUGH, and believing it was is the defect
+        this docstring used to carry. A HIBERNATED CONSOLE IS `shut off`.
+        The whole energy strategy of this host rests on S4 (`shutdown /h
+        /f` from vm-idle-shutdown.sh), and libvirt reports a hibernated
+        domain exactly as it reports one that never booted - so `was_up`
+        answers False for a console whose owner has a session, and games,
+        waiting inside it. `virsh start` RESUMES that session, and twelve
+        KEY_ENTER then land in it. The activation unit re-runs at every
+        boot until the stamp exists, and a GPU hook refusing the `start`
+        step is documented as EXPECTED, so this path is reachable, not
+        theoretical.
+
+        The discriminant that does hold is what the domain is wired to:
+        carries_install_media() is true only while BOTH installation media
+        are attached, which is the shape the `define` step above produces
+        and the shape guest-ready-watch.py's redefine_steady_state()
+        REMOVES once the guest is provisioned. A hibernated production
+        console is the steady-state domain: no media, no keystrokes. A
+        fresh install is about to sit on "Press any key to boot from CD or
+        DVD......": media, keystrokes. Read before the start, like the
+        other one, and for the same reason - it must describe the domain
+        this call found, not the one it leaves behind.
         """
+        booting_media = carries_install_media()
         was_up = domain_up()
         runner(start_cmd)
-        if not was_up:
+        if not was_up and booting_media:
             send_boot_keys(virsh, sleep)
 
     return [

@@ -287,6 +287,20 @@ def arg(cmd, flag):
     return cmd[cmd.index(flag) + 1] if flag in cmd else None
 
 
+# --- le temoin du payload est COPIE de fetch_payload.py, jamais devine --- #
+# guest_steps.py ne peut pas importer fetch_payload.py (regle du module :
+# rien sous console/guest/ n est importable depuis la phase activate, ces
+# fichiers importent jinja2). Le chemin est donc recopie - et une copie qui
+# derive silencieusement redonne exactement le defaut corrige ici : une
+# etape payload sautee alors qu agent.exe manque. Cette assertion lit la
+# SOURCE de fetch_payload.py et exige que le litteral y soit encore.
+_FETCH_SRC = pathlib.Path(CONSOLE, "guest", "fetch_payload.py").read_text()
+check("le temoin du payload est bien agent/agent.exe",
+      str(steps.PAYLOAD_WITNESS), os.path.join("agent", "agent.exe"))
+check("et fetch_payload.py depose TOUJOURS agent.exe a cet endroit",
+      'drivers_dir / "agent" / "agent.exe"' in _FETCH_SRC, True)
+
+
 NO_DOMAIN = {"dumpxml": (1, ""), "domstate": (1, "")}
 RUNNING = {"dumpxml": (0, "<domain/>"), "domstate": (0, "running\n")}
 OFF = {"dumpxml": (0, "<domain/>"), "domstate": (0, "shut off\n")}
@@ -401,16 +415,27 @@ with tempfile.TemporaryDirectory() as tmp:
     check("un secret perime doit etre reecrit",
           other["secrets"].already_done(), False)
 
-    # payload: the predicate is deliberately shallow - fetch_payload.py is
-    # offline-first and cheap to replay, so an existing non-empty tree is
-    # enough. An empty directory is not.
+    # payload: the predicate stays shallow - fetch_payload.py is offline-first
+    # and cheap to replay - but shallow is NOT "any file at all". It names one
+    # witness, agent.exe, because that is the piece an INHERITED payload/ tree
+    # (produced by an older fetch_payload.py, on a host that has run this
+    # before) cannot have: agent.exe is copied out of the package itself, it
+    # is not downloaded. "Any file" accepted such a tree, skipped the step,
+    # and left step 40 of the provisioning with no agent to install.
     payload_dir = pathlib.Path(payload_cmd[payload_cmd.index("--drivers-dir") + 1])
     payload_dir.mkdir(parents=True, exist_ok=True)
     check("un repertoire de payload vide n est pas fait",
           st["payload"].already_done(), False)
     (payload_dir / "nvidia").mkdir()
     (payload_dir / "nvidia" / "driver.exe").write_text("x")
-    check("un payload peuple est fait", st["payload"].already_done(), True)
+    check("UN ARBRE PAYLOAD HERITE, PEUPLE MAIS SANS agent.exe, N EST PAS FAIT",
+          st["payload"].already_done(), False)
+    witness = payload_dir / steps.PAYLOAD_WITNESS
+    witness.parent.mkdir(parents=True, exist_ok=True)
+    check("un repertoire agent/ vide ne suffit pas non plus",
+          st["payload"].already_done(), False)
+    witness.write_text("MZ")
+    check("un payload portant agent.exe est fait", st["payload"].already_done(), True)
 
     # build: the ISO alone never suffices - the fingerprint must agree.
     # The COPY console/hooks/install.py places under the workdir is what
@@ -668,11 +693,49 @@ for state, up in (("running", True), ("idle", True), ("paused", True),
 # lancerait un vrai `virsh start Windows` en sous-processus, exactement
 # l appel interdit contre le domaine de production (voir la consigne de la
 # tache).
+class Unbounded(Exception):
+    """Le faux virsh a ete appele plus que de raison."""
+
+
+class BoundedVirsh(FakeVirsh):
+    """FakeVirsh, mais qui REFUSE au-dela d un plafond.
+
+    Sans ce plafond, la falsification qui compte ici - retirer la borne de
+    send_boot_keys - ne fait pas ECHOUER la suite, elle la FIGE : le `sleep`
+    injecte rend la main aussitot, donc une boucle non bornee tourne pour
+    toujours. La signature au dehors est alors un `rc=124` de delai depasse,
+    strictement indiscernable d une contention d environnement (il y en a
+    eu cinq dans la meme journee). Un plafond transforme cet enlisement en
+    un FAIL nomme, ce qu une epreuve doit produire.
+    """
+
+    LIMIT = 4 * 12 + 20         # 4x la borne attendue, plus les lectures d etat
+
+    def __call__(self, *args):
+        if len(self.calls) >= self.LIMIT:
+            raise Unbounded(f"plus de {self.LIMIT} appels virsh")
+        return super().__call__(*args)
+
+
+def _install_domain_xml(tmp):
+    """Le XML du domaine d INSTALLATION : il porte les DEUX medias.
+
+    C est ce que l etape `define` produit, et c est le seul etat ou une
+    frappe a un sens - le firmware est sur "Press any key to boot from CD or
+    DVD......". Un domaine de regime (console provisionnee, hibernee) ne
+    porte plus aucun des deux : voir redefine_steady_state().
+    """
+    return ("<domain><devices>"
+            f"<disk><source file='{steps.windows_media_path(tmp)}'/></disk>"
+            f"<disk><source file='{pathlib.Path(tmp, 'nivuus-unattend.iso')}'/></disk>"
+            "</devices></domain>")
+
+
 def _run_start(tmp, virsh_answers):
     """Lance l etape start avec des faux virsh/runner/sleep, et rend les
     appels observes : (calls du virsh, argv lances par le runner,
     duree de chaque pause)."""
-    fake_virsh = FakeVirsh(virsh_answers)
+    fake_virsh = BoundedVirsh(virsh_answers)
     launched = []
     slept = []
     given = dict(ANSWERS, guest_workdir=tmp)
@@ -680,15 +743,21 @@ def _run_start(tmp, virsh_answers):
         given, {}, tmp, virsh=fake_virsh, runner=launched.append,
         size_of=lambda d: DISK_BYTES, pci_address_of=_default_pci_address_of,
         qemu_owner=lambda: (0, 0), chown=_inert_chown, sleep=slept.append))
-    st["start"].run()
+    try:
+        st["start"].run()
+    except Unbounded as exc:
+        failures.append(f"l envoi de frappes n est pas borne ({exc}) : une "
+                        "boucle sans borne finirait par frapper Windows Setup")
     return fake_virsh.calls, launched, slept
 
 
-OFF_AND_KEYABLE = {"dumpxml": (0, "<domain/>"), "domstate": (0, "shut off\n"),
-                   "send-key": (0, "")}
+def off_and_keyable(tmp):
+    return {"dumpxml": (0, _install_domain_xml(tmp)),
+            "domstate": (0, "shut off\n"), "send-key": (0, "")}
+
 
 with tempfile.TemporaryDirectory() as tmp:
-    calls, launched, slept = _run_start(tmp, OFF_AND_KEYABLE)
+    calls, launched, slept = _run_start(tmp, off_and_keyable(tmp))
     send_key_calls = [c for c in calls if c[0] == "send-key"]
 
     check("virsh start est bien lance", launched, [["virsh", "start", "Windows"]])
@@ -707,10 +776,14 @@ with tempfile.TemporaryDirectory() as tmp:
                     "KEY_ENTER"] for c in send_key_calls), True)
     check("une pause separe chaque frappe, autant que de frappes",
           len(slept), steps.BOOT_KEY_ATTEMPTS)
-    # domstate (le was_up interne) precede les frappes ; aucune frappe
-    # n arrive avant que le demarrage ait ete evalue.
-    check("le premier appel a virsh est la lecture d etat, avant toute frappe",
-          calls[0][0] == "domstate" and calls[1][0] == "send-key", True)
+    # Les DEUX lectures (les medias portes, puis l etat) precedent toute
+    # frappe : aucune ENTER n arrive avant que la question ait ete posee.
+    # Ecrit sans indexer en dur - retirer send_boot_keys ferait sortir un
+    # `calls[1]` en IndexError, c est-a-dire une trace, pas un FAIL nomme.
+    kinds = [c[0] for c in calls]
+    check("les lectures precedent la premiere frappe",
+          kinds[:kinds.index("send-key")] if "send-key" in kinds else None,
+          ["dumpxml", "domstate"])
 
 with tempfile.TemporaryDirectory() as tmp:
     # Le domaine tournait DEJA : run() ne doit envoyer AUCUNE frappe. Une
@@ -719,7 +792,8 @@ with tempfile.TemporaryDirectory() as tmp:
     # already_done() (que le pipeline reel consulte avant d appeler run())
     # - c est le garde-fou interne a start_run() qui est ici sous epreuve,
     # pas seulement le comportement du pipeline autour de lui.
-    running_and_keyable = dict(RUNNING, **{"send-key": (0, "")})
+    running_and_keyable = {"dumpxml": (0, _install_domain_xml(tmp)),
+                           "domstate": (0, "running\n"), "send-key": (0, "")}
     calls, launched, slept = _run_start(tmp, running_and_keyable)
     send_key_calls = [c for c in calls if c[0] == "send-key"]
     check("un domaine deja demarre ne recoit AUCUNE frappe",
@@ -727,12 +801,53 @@ with tempfile.TemporaryDirectory() as tmp:
     check("et rien n a dormi entre des frappes qui n existent pas",
           slept, [])
 
+# --- LA CONSOLE HIBERNEE : `shut off`, et pourtant une session vivante ---- #
+# Toute la strategie energetique de cet hote repose sur S4 : vm-idle-shutdown.sh
+# hiberne l invite avec `shutdown /h /f`, et libvirt rapporte alors EXACTEMENT
+# `shut off` - le meme mot que pour un domaine qui n a jamais demarre. Verifie
+# sur la VM de production le 2026-08-28, hibernee avec la session de son
+# proprietaire dedans. `virsh start` la REPREND. Le seul garde-fou `was_up`
+# etait donc defait par un etat que rien ne distingue.
+# Ce qui les separe : les medias portes. La console de regime (provisionnee,
+# puis hibernee) n en porte AUCUN - redefine_steady_state() les retire.
+with tempfile.TemporaryDirectory() as tmp:
+    hibernated = {"dumpxml": (0, "<domain><devices/></domain>"),
+                  "domstate": (0, "shut off\n"), "send-key": (0, "")}
+    calls, launched, slept = _run_start(tmp, hibernated)
+    check("une console hibernee est bien redemarree", launched,
+          [["virsh", "start", "Windows"]])
+    check("MAIS ELLE NE RECOIT AUCUNE FRAPPE : la session de son "
+          "proprietaire est dedans",
+          [c for c in calls if c[0] == "send-key"], [])
+    check("et rien n a dormi pour des frappes qui n existent pas", slept, [])
+
+with tempfile.TemporaryDirectory() as tmp:
+    # Le cas intermediaire : un domaine qui ne porte QU UN des deux medias
+    # n est pas un domaine d installation. Rien ne prouve qu il soit sur
+    # l invite du firmware, donc pas de frappe.
+    half = {"dumpxml": (0, "<domain><devices><disk><source file='"
+                        f"{steps.windows_media_path(tmp)}'/></disk></devices></domain>"),
+            "domstate": (0, "shut off\n"), "send-key": (0, "")}
+    calls, launched, slept = _run_start(tmp, half)
+    check("un domaine ne portant qu un seul media ne recoit aucune frappe",
+          [c for c in calls if c[0] == "send-key"], [])
+
+with tempfile.TemporaryDirectory() as tmp:
+    # libvirtd injoignable au moment de lire les medias : on ne sait pas ou
+    # on frappe, donc on ne frappe pas. `virsh start` reste tente (c est
+    # l etape), mais l aide au demarrage s abstient.
+    unreadable = {"domstate": (0, "shut off\n"), "send-key": (0, "")}
+    calls, launched, slept = _run_start(tmp, unreadable)
+    check("un dumpxml injoignable ne fait frapper personne",
+          [c for c in calls if c[0] == "send-key"], [])
+
 with tempfile.TemporaryDirectory() as tmp:
     # Un send-key qui echoue (virsh injoignable, domaine disparu) est une
     # aide, pas une condition : le demarrage ne doit PAS echouer pour ca,
     # et les 12 tentatives doivent quand meme toutes avoir lieu (la
     # premiere tentative ratee n arrete pas les suivantes).
-    fails_send_key = {"dumpxml": (0, "<domain/>"), "domstate": (0, "shut off\n"),
+    fails_send_key = {"dumpxml": (0, _install_domain_xml(tmp)),
+                      "domstate": (0, "shut off\n"),
                       "send-key": (1, "error: Domain not found")}
     try:
         calls, launched, slept = _run_start(tmp, fails_send_key)
@@ -745,10 +860,16 @@ with tempfile.TemporaryDirectory() as tmp:
               len(send_key_calls), steps.BOOT_KEY_ATTEMPTS)
 
 # send_boot_keys() directement : la fonction elle-meme, sans passer par
-# plan_steps - la meme regle de bornage doit valoir isolement.
-fake_virsh = FakeVirsh({"send-key": (0, "")})
+# plan_steps - la meme regle de bornage doit valoir isolement. Le virsh est
+# PLAFONNE ici aussi : sans plafond, retirer la borne fait tourner cette
+# boucle pour toujours (le sleep injecte rend la main aussitot) et la suite
+# sort en rc=124, indiscernable d une contention d environnement.
+fake_virsh = BoundedVirsh({"send-key": (0, "")})
 slept = []
-steps.send_boot_keys(fake_virsh, slept.append, domain="Windows")
+try:
+    steps.send_boot_keys(fake_virsh, slept.append, domain="Windows")
+except Unbounded as exc:
+    failures.append(f"send_boot_keys seule n est pas bornee ({exc})")
 check("send_boot_keys seule envoie exactement BOOT_KEY_ATTEMPTS frappes",
       len(fake_virsh.calls), steps.BOOT_KEY_ATTEMPTS)
 check("send_boot_keys seule cible le domaine passe en argument",
@@ -965,43 +1086,85 @@ class RecordingChown:
             raise PermissionError(13, "Permission denied")
 
 
+class RecordingChmod:
+    """Un faux chmod qui ENREGISTRE puis applique reellement.
+
+    Applique pour de vrai : le mode resultant du repertoire est ce qui est
+    ensuite verifie, et un chmod simule prouverait seulement qu un appel a
+    eu lieu, pas que qemu peut traverser."""
+
+    def __init__(self, fail_on=None):
+        self.calls = []
+        self.fail_on = fail_on or set()
+
+    def __call__(self, path, mode):
+        self.calls.append((path, mode))
+        if path in self.fail_on:
+            raise PermissionError(13, "Permission denied")
+        os.chmod(path, mode)
+
+
 QEMU_UID, QEMU_GID = 64055, 64055  # libvirt-qemu:libvirt-qemu on this host,
 # measured 2026-08-28 via resolve_qemu_owner() itself against the real
 # /var/lib/libvirt/qemu - injected here, never hardcoded in guest_steps.py
 
 with tempfile.TemporaryDirectory() as tmp:
     steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    os.chmod(tmp, 0o750)        # drwxr-x--- : l etat mesure sur le terrain
     runner = FakeBuildRunner()
     chown = RecordingChown()
+    chmod = RecordingChmod()
     given = dict(ANSWERS, guest_workdir=tmp)
-    build_step = by_name(steps.plan_steps(
+    planned = by_name(steps.plan_steps(
         given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=runner,
         size_of=lambda d: DISK_BYTES,
-        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown))["build"]
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown,
+        chmod=chmod))
+    # secrets/ is written by the REAL step, never fabricated: what the
+    # traverse grant must not expose is the directory that step creates.
+    planned["secrets"].run()
+    build_step = planned["build"]
     build_step.run()
 
     check("build ne lance qu une seule commande", len(runner.calls), 1)
     argv, env = runner.calls[0]
     check("la commande lancee est bien build.py",
           argv[1].endswith("guest/build.py"), True)
-    check("build.py recoit un TMPDIR explicite", env is not None and "TMPDIR" in env, True)
-    staged = pathlib.Path(env["TMPDIR"])
+    # Ecrit pour ECHOUER NOMMEMENT si `env=` disparaissait de l appel :
+    # `env` vaut alors None, et un `env["TMPDIR"]` direct sortirait en
+    # TypeError - une trace, pas un FAIL nomme, et le reste du fichier ne
+    # tournerait meme pas.
+    check("build.py recoit un TMPDIR explicite",
+          env is not None and "TMPDIR" in env, True)
+    staged = pathlib.Path(env["TMPDIR"]) if env and "TMPDIR" in env else None
     check("l espace de preparation vit SOUS le repertoire de travail",
-          str(staged).startswith(str(pathlib.Path(tmp)) + os.sep), True)
+          staged is not None
+          and str(staged).startswith(str(pathlib.Path(tmp)) + os.sep), True)
     check("l espace de preparation n est pas le /tmp du systeme",
           str(staged) == "/tmp", False)
     check("le repertoire de preparation existe reellement sur le disque",
-          staged.is_dir(), True)
+          staged is not None and staged.is_dir(), True)
     check("le reste de l environnement (PATH, etc.) est conserve",
-          env.get("PATH"), os.environ.get("PATH"))
+          env.get("PATH") if env else None, os.environ.get("PATH"))
 
-    # The TWO chowns the field report needed by hand, plus a third this
-    # round of review added: the workdir (so qemu can TRAVERSE it), the
-    # copied Windows medium `define`/`start` boot FROM, and the answer-file
-    # ISO itself (so qemu can OPEN both media it wires to the domain).
+    # Deux droits DIFFERENTS, et la difference est le correctif de ce tour.
+    # Les FICHIERS changent de proprietaire (qemu les ouvre) ; le
+    # REPERTOIRE ne gagne que le bit de traversee. Le posseder donnerait a
+    # qemu le droit de renommer `secrets/` - la clef produit et deux mots de
+    # passe - et d y substituer les siens. Traverser demande moins.
     chowned = {c[0]: (c[1], c[2]) for c in chown.calls}
-    check("le repertoire de travail est chowne pour l utilisateur qemu",
-          chowned.get(str(pathlib.Path(tmp))), (QEMU_UID, QEMU_GID))
+    check("LE REPERTOIRE DE TRAVAIL N EST PAS DONNE A qemu",
+          str(pathlib.Path(tmp)) in chowned, False)
+    check("il devient traversable, et c est tout",
+          os.stat(tmp).st_mode & 0o007, 0o001)
+    check("aucun droit de LECTURE du repertoire n est concede",
+          os.stat(tmp).st_mode & 0o004, 0)
+    check("aucun droit d ECRITURE du repertoire n est concede",
+          os.stat(tmp).st_mode & 0o002, 0)
+    check("les droits du proprietaire et du groupe sont inchanges",
+          os.stat(tmp).st_mode & 0o770, 0o750)
+    check("secrets/ reste 0700, inatteignable par qemu",
+          os.stat(pathlib.Path(tmp, "secrets")).st_mode & 0o777, 0o700)
     iso_target = str(pathlib.Path(tmp, "nivuus-unattend.iso"))
     check("l ISO produite est chownee pour l utilisateur qemu",
           chowned.get(iso_target), (QEMU_UID, QEMU_GID))
@@ -1050,11 +1213,13 @@ with tempfile.TemporaryDirectory() as tmp:
     steps.windows_media_path(tmp).write_bytes(b"windows medium")
     runner = FakeBuildRunner()
     chown = RecordingChown()
+    chmod = RecordingChmod()
     given = dict(ANSWERS, guest_workdir=tmp)
     build_step = by_name(steps.plan_steps(
         given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=runner,
         size_of=lambda d: DISK_BYTES,
-        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown))["build"]
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown,
+        chmod=chmod))["build"]
 
     iso_target = pathlib.Path(build_step.command[build_step.command.index("--output") + 1])
     iso_target.parent.mkdir(parents=True, exist_ok=True)
@@ -1069,8 +1234,10 @@ with tempfile.TemporaryDirectory() as tmp:
           runner.calls, [])
 
     chowned = {c[0]: (c[1], c[2]) for c in chown.calls}
-    check("le repertoire de travail finit possede par qemu SANS reconstruction",
-          chowned.get(str(pathlib.Path(tmp))), (QEMU_UID, QEMU_GID))
+    check("le repertoire de travail n est PAS davantage donne a qemu ici",
+          str(pathlib.Path(tmp)) in chowned, False)
+    check("il finit traversable SANS reconstruction",
+          os.stat(tmp).st_mode & 0o001, 0o001)
     check("l ISO deja presente finit possedee par qemu SANS reconstruction",
           chowned.get(str(iso_target)), (QEMU_UID, QEMU_GID))
     check("le media Windows copie finit LUI AUSSI possede par qemu SANS reconstruction",
@@ -1110,6 +1277,46 @@ with tempfile.TemporaryDirectory() as tmp:
               str(iso_target) in str(exc), True)
     check("et surtout : le refus de chown n a PAS declenche de reconstruction",
           runner.calls, [])
+
+# --- la traversee : idempotente, et refusee NOMMEMENT si elle echoue ------ #
+# Un repertoire deja traversable ne doit pas etre reecrit : l activation
+# rejoue a chaque demarrage tant que le jalon n existe pas, et un operateur
+# qui a elargi le repertoire a la main ne doit pas voir son choix reecrit a
+# chaque tour.
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    os.chmod(tmp, 0o751)        # le bit de traversee est DEJA la
+    chmod = RecordingChmod()
+    given = dict(ANSWERS, guest_workdir=tmp)
+    build_step = by_name(steps.plan_steps(
+        given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=FakeBuildRunner(),
+        size_of=lambda d: DISK_BYTES,
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=_inert_chown,
+        chmod=chmod))["build"]
+    build_step.run()
+    check("un repertoire deja traversable n est pas rechmode", chmod.calls, [])
+    check("et il l est toujours", os.stat(tmp).st_mode & 0o777, 0o751)
+
+# Un chmod refuse par le noyau est nomme, jamais avale : sans traversee,
+# qemu recevra "Permission denied" sur les deux medias, et l operateur doit
+# lire pourquoi.
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    os.chmod(tmp, 0o750)
+    chmod = RecordingChmod(fail_on={str(pathlib.Path(tmp))})
+    given = dict(ANSWERS, guest_workdir=tmp)
+    build_step = by_name(steps.plan_steps(
+        given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=FakeBuildRunner(),
+        size_of=lambda d: DISK_BYTES,
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=_inert_chown,
+        chmod=chmod))["build"]
+    try:
+        build_step.run()
+        failures.append("un chmod en echec sur le repertoire n a pas ete refuse")
+    except steps.GuestBuildError as exc:
+        check("le refus de traversee nomme le repertoire vise",
+              str(pathlib.Path(tmp)) in str(exc), True)
+
 
 # --- resolve_qemu_owner : lu du systeme, jamais devine -------------------- #
 class _FakeStat:
