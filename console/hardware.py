@@ -67,6 +67,16 @@ def parse_gpus(raw: str) -> list[dict]:
     right hardware attached. Reuses _clean_lspci_desc_from_nn instead of a
     second quoted-field parser, so list_gpus() below reads `lspci -nn`
     output - already this module's convention - rather than `-nnmm`.
+
+    NOT identical output to the engine's copy: `slot`, `vendor` and
+    `discrete` carry the same values (verified on real hardware), but
+    `description` does not - `-nn` + _clean_lspci_desc_from_nn drops the
+    bracketed [vendor:device] id text that `-nnmm` keeps (e.g. here
+    "Intel Corporation AlderLake-S GT1" against the engine's
+    "Intel Corporation [8086] AlderLake-S GT1 [4680]"). Harmless today: no
+    caller of list_gpus() (domain.py, resolve.py, capabilities.py, the
+    wizard, the portal) reads a GPU's `description`. If one starts to, this
+    divergence is exactly what to check first.
     """
     gpus = []
     for line in raw.splitlines():
