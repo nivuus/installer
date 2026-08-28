@@ -33,15 +33,27 @@ for unit in ("vm-idle-shutdown.service", "vm-idle-shutdown.timer"):
     check(f"{unit} is versioned",
           os.path.isfile(os.path.join(CONSOLE, "host", "systemd", unit)))
 
+# The three hugepage hooks were two-line no-ops that documentation kept
+# promising. Naming them explicitly is the only non-arbitrary guard: the
+# generic form of this check - "does this file do something useful" - has
+# no computable definition, since `exit 0` is syntactically code.
+removed = [
+    "started/begin/00-set-hugepages.sh",
+    "stopped/end/00-hugepages-fix.sh",
+    "stopped/end/hugepages-reset.sh",
+]
+hooks_dir = os.path.join(CONSOLE, "host", "libvirt", "hooks", "qemu.d")
+for rel in removed:
+    path = os.path.join(hooks_dir, "Windows", rel)
+    check(f"the removed stub {rel} has not come back", not os.path.exists(path))
+
 # No placeholder hooks: a two-line no-op is worse than an absent file,
 # because documentation reads the filename and promises behaviour.
-hooks_dir = os.path.join(CONSOLE, "host", "libvirt", "hooks", "qemu.d")
 for dirpath, _dirnames, filenames in os.walk(hooks_dir):
     for name in filenames:
         path = os.path.join(dirpath, name)
         body = [l for l in open(path).read().splitlines()
-                if l.strip() and not l.strip().startswith("#")
-                and not l.startswith("#!")]
+                if l.strip() and not l.strip().startswith("#")]
         rel = os.path.relpath(path, ROOT)
         check(f"{rel} does something", bool(body))
 
