@@ -59,14 +59,17 @@ test-vm:
 # is the only aggregator there is - and an aggregator that fails for a missing
 # dependency reads as "the engine is broken", which is the wrong thing to learn.
 #
-# 29 suites (2026-08-28): the original 9, the 6 the console-package phase
+# 30 suites (2026-08-28): the original 9, the 6 the console-package phase
 # created or touched, test_console_host_files for versioned-not-deployed files,
 # test_console_wake_units for the VM wake socket units, test_console_activate
-# for the phase that arms them, and all 11 test_windows_guest_* suites, which
-# run clean standalone (no root, no network, no mounted Windows medium) and
-# were simply never wired into any aggregator before. NOTE: a green run here
-# is not proof that installer/windows-guest/domain.py works - see CLAUDE.md,
-# Installer Architecture, for the coverage gap both domain suites share.
+# for the phase that arms them, test_vm_wake_gate for the wake gate itself
+# (it already targets console/host/vm-wake-gate.py and needs neither root nor
+# network - the branch wired the wake UNITS in and left the suite testing the
+# gatekeeper out), and all 11 test_windows_guest_* suites, which run clean
+# standalone (no root, no network, no mounted Windows medium) and were simply
+# never wired into any aggregator before. NOTE: a green run here is not proof
+# that installer/windows-guest/domain.py works - see CLAUDE.md, Installer
+# Architecture, for the coverage gap both domain suites share.
 PYTHON ?= python3
 
 test-packages:
@@ -77,7 +80,7 @@ test-packages:
 	          test_webapp_models \
 	          test_common_hardware test_console_hardware test_console_resolve \
 	          test_console_install test_console_host_files test_console_wake_units \
-	          test_console_activate \
+	          test_console_activate test_vm_wake_gate \
 	          test_install_engine_features \
 	          test_retro_marker_bridge \
 	          test_windows_guest_apollo test_windows_guest_autounattend \
