@@ -15,7 +15,7 @@
 
 - key: windows_iso
   type: texte
-  label: "Media Windows 11 IoT Enterprise LTSC : chemin local ou URL"
+  label: "Media Windows 11 IoT Enterprise LTSC : chemin local de l'ISO"
   required: true
 
 - key: ltsc_key
