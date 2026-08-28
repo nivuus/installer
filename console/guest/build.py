@@ -23,8 +23,12 @@ from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
-# installer/ root, for `common` - the single source of the retro marker
-# path shared with install-engine/steps/features.py (see common/retro.py).
+# console/ root, for `retro` - the single source of the retro marker path
+# shared with console/hooks/install.py (see retro.py). This used to point
+# at installer/ for a `common` package; the console-invite-structure split
+# moved retro.py to console/retro.py, one level up from this file, which is
+# exactly what dirname(_HERE) already resolves to - no change needed here,
+# only to what gets imported from it.
 sys.path.insert(0, os.path.dirname(_HERE))
 
 import apollo  # noqa: E402
@@ -32,15 +36,15 @@ import autounattend  # noqa: E402
 import media  # noqa: E402
 import payload  # noqa: E402
 import unattend_iso  # noqa: E402
-from common.retro import retro_state_path  # noqa: E402
+from retro import retro_state_path  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_KEY_FILE = "/root/.config/nivuus/windows-ltsc.key"
 DEFAULT_PASSWORD_FILE = "/root/.config/nivuus/windows-admin.pass"
 DEFAULT_APOLLO_PASSWORD_FILE = "/root/.config/nivuus/apollo-ui.pass"
-# Same path install-engine/steps/features.py writes to, resolved against
-# the live host's "/" (that install target has become "/" by the time
-# this runs). Single source: common/retro.py, imported above.
+# Same path console/hooks/install.py writes to, resolved against the live
+# host's "/" (that install target has become "/" by the time this runs).
+# Single source: console/retro.py, imported above.
 DEFAULT_RETRO_MARKER = retro_state_path()
 
 
