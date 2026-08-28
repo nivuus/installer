@@ -24,22 +24,6 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 VM_NAME = "Windows"
 
-# The wrappers stay thin so the logic lives in the repo, not in a heredoc.
-# They exit 0 unconditionally: a hook that fails must never block a VM start.
-CONFINE_WRAPPER = """#!/bin/bash
-# Confine the host cgroups to the CPUs the VM does not pin, while it runs.
-/etc/libvirt/hooks/vm-cpu-partition.sh confine "$1" \\
-    >> /var/log/libvirt-cpu-hook.log 2>&1
-exit 0
-"""
-
-RELEASE_WRAPPER = """#!/bin/bash
-# Hand every CPU back once the VM is gone (shutdown or hibernation).
-/etc/libvirt/hooks/vm-cpu-partition.sh release "$1" \\
-    >> /var/log/libvirt-cpu-hook.log 2>&1
-exit 0
-"""
-
 HOOK_BASE = f"etc/libvirt/hooks/qemu.d/{VM_NAME}"
 
 # (source under console/, destination under the target root).
@@ -49,6 +33,15 @@ HOOK_FILES = [
     # THE APPARMOR TRAP (see module docstring): this one path is not a
     # matter of taste.
     ("host/vm-cpu-partition.sh", "etc/libvirt/hooks/vm-cpu-partition.sh"),
+    # The two CPU wrappers are VERSIONED files, not heredocs. Each does three
+    # things, and only the first survived the heredocs they replace: the cpuset
+    # partitioning, `systemctl start nivuus-cpu-mode@{gaming,idle}.service` -
+    # a PUBLIC CONTRACT of this repository, honoured by nobody while the
+    # heredocs were what landed - and the Tdarr CPU node stop/start.
+    (f"host/libvirt/hooks/qemu.d/{VM_NAME}/prepare/begin/10-cpu-confine.sh",
+     f"{HOOK_BASE}/prepare/begin/10-cpu-confine.sh"),
+    (f"host/libvirt/hooks/qemu.d/{VM_NAME}/release/end/10-cpu-release.sh",
+     f"{HOOK_BASE}/release/end/10-cpu-release.sh"),
     (f"host/libvirt/hooks/qemu.d/{VM_NAME}/prepare/begin/bind-vfio-gpu.sh",
      f"{HOOK_BASE}/prepare/begin/bind-vfio-gpu.sh"),
     (f"host/libvirt/hooks/qemu.d/{VM_NAME}/release/end/rebind-host-gpu.sh",
@@ -147,10 +140,6 @@ def main() -> int:
           "msg": "Deploiement des hooks libvirt"})
     for src, dest in HOOK_FILES:
         place(os.path.join(HERE, src), under(dest))
-    write(under(f"{HOOK_BASE}/prepare/begin/10-cpu-confine.sh"),
-          CONFINE_WRAPPER, mode=0o755)
-    write(under(f"{HOOK_BASE}/release/end/10-cpu-release.sh"),
-          RELEASE_WRAPPER, mode=0o755)
 
     emit({"event": "progress", "pct": 50, "msg": "Deploiement des scripts hote"})
     for src, dest in HOST_SCRIPTS:

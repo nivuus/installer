@@ -75,13 +75,24 @@ with tempfile.TemporaryDirectory() as tmp:
     check("il n est PAS sous /usr/local/sbin (piege AppArmor)",
           (root / "usr/local/sbin/vm-cpu-partition.sh").exists(), False)
 
-    for phase, name in (("prepare/begin", "10-cpu-confine.sh"),
-                        ("release/end", "10-cpu-release.sh")):
+    # The two CPU wrappers are copied from the repository, not generated:
+    # the heredocs they replace called the partition script and stopped
+    # there, dropping `nivuus-cpu-mode@{gaming,idle}.service` - named a
+    # PUBLIC CONTRACT of this repository in CLAUDE.md, deployed on the host
+    # side by install-engine/steps/features.py, and honoured by no code at
+    # all while the heredocs were what landed. Asserting the unit name here
+    # is what makes the contract two-sided; byte identity with the source is
+    # asserted with the rest of the table further down.
+    for phase, name, mode in (("prepare/begin", "10-cpu-confine.sh", "gaming"),
+                              ("release/end", "10-cpu-release.sh", "idle")):
         w = root / f"etc/libvirt/hooks/qemu.d/Windows/{phase}/{name}"
         check(f"wrapper {name} depose", w.is_file(), True)
         check(f"wrapper {name} executable", os.access(w, os.X_OK), True)
+        body = w.read_text()
         check(f"wrapper {name} appelle /etc/libvirt/hooks",
-              "/etc/libvirt/hooks/vm-cpu-partition.sh" in w.read_text(), True)
+              "/etc/libvirt/hooks/vm-cpu-partition.sh" in body, True)
+        check(f"wrapper {name} honore nivuus-cpu-mode@{mode}",
+              f"nivuus-cpu-mode@{mode}.service" in body, True)
 
     for rel in ("usr/local/sbin/vm-wake-gate.py",
                 "usr/local/sbin/handle-vm-start.sh",
@@ -117,6 +128,10 @@ with tempfile.TemporaryDirectory() as tmp:
                        "etc/libvirt/hooks/qemu.d/Windows/prepare/begin/bind-vfio-gpu.sh"),
                       ("libvirt/hooks/qemu.d/Windows/release/end/rebind-host-gpu.sh",
                        "etc/libvirt/hooks/qemu.d/Windows/release/end/rebind-host-gpu.sh"),
+                      ("libvirt/hooks/qemu.d/Windows/prepare/begin/10-cpu-confine.sh",
+                       "etc/libvirt/hooks/qemu.d/Windows/prepare/begin/10-cpu-confine.sh"),
+                      ("libvirt/hooks/qemu.d/Windows/release/end/10-cpu-release.sh",
+                       "etc/libvirt/hooks/qemu.d/Windows/release/end/10-cpu-release.sh"),
                       ("libvirt/hooks/qemu", "etc/libvirt/hooks/qemu"),
                       ("vm-idle-shutdown.sh", "usr/local/sbin/vm-idle-shutdown.sh")):
         origin = CONSOLE / "host" / src
@@ -222,6 +237,57 @@ for bad_value in ("false", "true", 1):
               "retro" in proc.stderr, True)
         check(f"retro={bad_value!r} : aucun temoin ecrit",
               (root / "etc/nivuus/retro.json").exists(), False)
+
+# The byte-for-byte comparison above only protects the TRANSPORT: a regression
+# in the SOURCE reaches the target intact and every assertion still passes.
+# Measured: neutralising the return-code propagation in the dispatcher
+# (`if [ "$HOOK_NAME" = "prepare" ]` -> `if false`) left the whole suite
+# green. That branch is the ONLY thing that lets bind-vfio-gpu.sh REFUSE a VM
+# start while a process still holds /dev/nvidia*; without it the gaming VM
+# boots without its GPU. So it is exercised, not read: a throwaway hook tree
+# with a failing hook, run through the versioned dispatcher.
+#
+# The tree is synthetic and named TestVM on purpose - pointing the dispatcher
+# at a deployed Windows/prepare/begin would EXECUTE the real bind-vfio-gpu.sh
+# on the machine running the tests.
+with tempfile.TemporaryDirectory() as tmp:
+    tree = pathlib.Path(tmp)
+    dispatcher = tree / "qemu"
+    dispatcher.write_bytes((CONSOLE / "host/libvirt/hooks/qemu").read_bytes())
+    dispatcher.chmod(0o755)
+
+    # `logger` writes to the host syslog; a stub keeps the suite silent there.
+    stub_bin = tree / "bin"
+    stub_bin.mkdir()
+    (stub_bin / "logger").write_text("#!/bin/sh\nexit 0\n")
+    (stub_bin / "logger").chmod(0o755)
+    env = dict(os.environ,
+               PATH=str(stub_bin) + os.pathsep + os.environ["PATH"])
+
+    def hook(phase, state, code):
+        d = tree / "qemu.d/TestVM" / phase / state
+        d.mkdir(parents=True, exist_ok=True)
+        script = d / "zz-probe.sh"
+        script.write_text(f"#!/bin/sh\nexit {code}\n")
+        script.chmod(0o755)
+
+    def dispatch(phase, state):
+        return subprocess.run([str(dispatcher), "TestVM", phase, state, "-"],
+                              capture_output=True, text=True, env=env).returncode
+
+    hook("prepare", "begin", 3)
+    check("un hook prepare en echec fait refuser le demarrage",
+          dispatch("prepare", "begin"), 3)
+
+    # Same failure on release/stopped must NOT propagate: a non-zero code
+    # there only obstructs a teardown libvirt is already committed to.
+    hook("release", "end", 3)
+    check("un hook release en echec ne bloque pas le demontage",
+          dispatch("release", "end"), 0)
+
+    hook("prepare", "begin", 0)
+    check("un hook prepare qui reussit laisse passer le demarrage",
+          dispatch("prepare", "begin"), 0)
 
 if failures:
     print(f"FAIL ({len(failures)})")
