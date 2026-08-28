@@ -270,11 +270,29 @@ détection de conflits, contrat de `resolve`, collecte des `kernel-cmdline`.
 `test_vm_wake_gate` et `test_handle_vm_start`. `test_windows_guest_hardware`
 suit le code extrait et change ses imports.
 
-**Un test meurt, et c'est le bon signe** : `test_retro_marker_bridge.py`
+**Un test devait mourir, et c'est le bon signe** : `test_retro_marker_bridge.py`
 n'existe que pour prouver que `features.py` et `build.py` s'accordent sur le
 chemin du marqueur — un couplage inter-moitiés. Après le découpage, `retro` est
 une question du wizard de `console`, répondue dans sa propre config : il n'y a
 plus de pont, donc plus de garde-fou à maintenir.
+
+**Correction (tâche 3, 2026-08-28) : il a survécu, décision prise en
+connaissance de cause.** La prémisse ci-dessus ne s'est pas réalisée. `retro`
+est bien une question du wizard de `console`, répondue dans sa propre
+config — mais `build.py` (devenu `console/guest/build.py`) s'exécute bien
+plus tard que `install`, éventuellement à la main, éventuellement après un
+redémarrage : à ce moment-là la config du wizard n'existe plus. La tâche 3 a
+donc fait de la réponse `retro` un témoin durable sur disque
+(`console/hooks/install.py` l'écrit, `console/guest/retro_sync.py` le lit)
+plutôt qu'un pont vers une config déjà éteinte. Le pont existe donc toujours,
+plus court, entièrement à l'intérieur de `console/` — et
+`test_retro_marker_bridge.py` avec lui, déplacé dans `console/tests/`,
+toujours vert (`make -C console test`). La panne qu'il empêche — case cochée
+dans le wizard, rien d'installé sur l'invité, aucun test pour le dire —
+n'est pas moins silencieuse parce que les deux extrémités partagent
+désormais un répertoire. Un spec qui reste faux est pire qu'un spec
+corrigé : cette section documente donc la décision, pas seulement le
+constat.
 
 ## Deux livrables faciles à oublier
 

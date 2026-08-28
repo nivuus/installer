@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Nivuus** is a cloud gaming server infrastructure with comprehensive system monitoring integration. The project consists of:
 
-1. **Installer** (`installer/`): Bootable ISO that installs Nivuus via a web wizard served over a WiFi setup hotspot, plus `windows-guest/` (unattended Windows LTSC guest build for GPU passthrough)
+1. **Installer** (`installer/`): Bootable ISO that installs Nivuus via a web wizard served over a WiFi setup hotspot. The unattended Windows LTSC guest build for GPU passthrough now lives at `console/guest/` (moved out of `installer/windows-guest/`, which no longer exists) — see "Installer Architecture" below.
 2. **Infrastructure Configuration** (`scripts/`, `configs/`): thermal/RAPL policy, VM CPU partitioning, GPU passthrough hooks, PCIe guard, disk maintenance, VM wake-on-demand
 3. **Host documentation** (`docs/`): system audit, VM configuration, thermal campaign, and the superpowers specs/plans
 
@@ -136,9 +136,10 @@ things about it are easy to break:
   Both are now source in `console/host/`. The console is **still not
   functional from an install alone**: `activate` arms the wake/idle units
   but does not build the Windows guest — it can manage a `Windows` domain
-  if one already exists, not create one. That is phase 2c
-  (`installer/windows-guest/` folding into this package, `domain.py`
-  repaired, `activate` building the VM), tracked separately.
+  if one already exists, not create one. `console/guest/` (the former
+  `installer/windows-guest/`, 41 files) and `domain.py` are already inside
+  the package and `domain.py` works (see below) — what is still missing is
+  `activate` driving them, which is phase 2d, tracked separately.
 
 `hardware.py` is now split by that same principle: `installer/common/hardware.py`
 detects **capabilities** (coarse: is there an IOMMU, a discrete GPU, a spare
@@ -146,38 +147,32 @@ NVMe — `list_gpus` no longer carries `ids`, `cpu_topology` no longer carries
 `isolcpus`), and `console/hardware.py` detects the **details** in its resolve
 phase.
 
-**`domain.py` is DEAD until phase 2c, dated 2026-08-27 — measured, not
-inferred.** Phase 2b (2026-08-28, `console/hooks/install.py` + `activate.py`
-wiring the rest of the host-side lifecycle) did not touch it — it was out of
-that plan's scope and stays deferred. Both `domain.py xml` and `domain.py
-define` fail at `main()`'s entry, before any hardware is touched:
+**`domain.py` is REPAIRED, dated 2026-08-28 — measured, not inferred.**
+`python3 domain.py xml`, run from `console/guest/`, now produces real domain
+XML on this hardware (`main()` returns 0 and 5402 characters of XML — see
+`test_windows_guest_production_domain.py`, which calls `main()` for real
+instead of stubbing it out). The break this paragraph used to describe (an
+`ImportError` at `main()`'s entry, because `HardwareError` had moved to
+`console/hardware.py` without `domain.py` following) is fixed: `HardwareError`,
+`passthrough_nvme()` and `pci_slot_functions()` live in `console/hardware.py`,
+and `domain.py` reaches them with `sys.path.insert(0, str(HERE.parent))`
+followed by `from hardware import HardwareError` (`domain.py:262-263`).
 
-```
-main -> ImportError cannot import name 'HardwareError' from 'common.hardware'
-build_domain_xml -> AttributeError module 'common.hardware' has no attribute 'passthrough_nvme'
-```
-
-`main()` does `from common.hardware import HardwareError` (`domain.py:263`)
-*before* the try block, so **ImportError at entry is the real failure mode** —
-the AttributeError deeper in `build_domain_xml()` (`domain.py:233`) is only
-reachable by calling that function directly. `HardwareError`,
-`passthrough_nvme()` and `pci_slot_functions()` all moved to
-`console/hardware.py` in this same phase; both imports are lazy, inside the
-functions, which is *why* merely importing the module does not fail.
-
-Neither is a live command: `python3 installer/windows-guest/domain.py` in the
-Development Commands below is listed for phase-2c context only — it cannot
-run today.
-
-The aggregator now carries a **failing marker** for it:
-`test_windows_guest_production_domain.py` asserts that `main()` raises
-`ImportError`. That test will itself fail the day someone repairs
-`domain.py` — which is the point: remove the marker in the same change as the
-repair. Everything else in that suite calls `domain_xml()` with explicit
-keyword arguments and never goes near hardware detection, and
-`test_windows_guest_domain.py` imports `testdomain.py` (the throwaway LTSC
-generator), not `domain.py` — which is how a green 26-suite run used to say
-nothing at all about this path.
+**The lesson that outlives the bug: that import is lazy on purpose — written
+inside `main()`, not at module scope — and a lazy import lets `import
+domain.py` succeed while calling `domain.main()` still fails.** That is
+exactly why the break was invisible for a whole phase: every suite in the
+aggregator imported the module (which worked) and called `domain_xml()`
+directly with explicit keyword arguments (which never touches hardware
+detection), so a green run said nothing about whether `main()` itself could
+run. `test_windows_guest_production_domain.py` now closes that gap with one
+assertion that actually calls `main()` end-to-end — the only one in the
+suite that does. Keep the import lazy (the comment at `domain.py:259-261`
+explains why: the test's own `sys.path` only carries `console/guest`, and a
+module-scope `import hardware` would break every other test in the file) —
+but never again let "imports cleanly" stand in for "runs cleanly" when a
+lazy import is involved; a suite that only imports proves nothing about the
+function that does the importing.
 
 **Package engine (2026-08-27)**: `installer/packages/` implements the
 `nivuus.dev/v1` contract — a declarative `nivuus-package.yaml` plus three hooks
@@ -281,13 +276,18 @@ exercised by `test_install_engine_packages.py` and the end-to-end proof in the
 console-package-hote plan's Task 7), never through the portal. Wiring the
 wizard is deliberately deferred, not forgotten.
 
-Tests: `cd installer && make test-packages`
-(30 files: 9 original + 6 from the console-package phase + the 3 the
-host-wiring phase added (`test_console_host_files`, `test_console_wake_units`,
-`test_console_activate`) + `test_vm_wake_gate` + all 11
-`test_windows_guest_*` suites, newly wired into an aggregator for the first
-time since the CI runs no Python tests at all). Spec:
-`docs/superpowers/specs/2026-08-27-decoupage-installer-console-design.md`.
+Tests: `cd installer && make test-packages` (needs a Python with `pydantic`
+and `jinja2` — not the Debian base — via `PYTHON=/path/to/venv/bin/python`).
+**30 suites, measured 2026-08-28, exit 0**: 11 run directly by
+`installer/Makefile` (the engine/webapp/packages suites that stay outside
+`console/`), and 19 delegated to `console/Makefile`'s own `test` target —
+the 6 `test_console_*` suites, `test_vm_wake_gate`, `test_retro_marker_bridge`
+and the 11 `test_windows_guest_*` suites, all of them living under
+`console/tests/` (20 files; `test_handle_vm_start.sh` is shell, not Python,
+and stays unwired, run by hand). No file under `console/` imports from
+`installer/common` or anywhere else in `installer/` — verified with
+`grep -rn 'from common\|import common' console/`, which returns nothing.
+Spec: `docs/superpowers/specs/2026-08-27-decoupage-installer-console-design.md`.
 
 **Build & test:** `cd installer && sudo make build-iso` (needs `live-build`).
 `make test-portal` (portal on :8080), `make test-vm` (QEMU UEFI, portal via
@@ -307,12 +307,11 @@ make test-vm                            # QEMU UEFI boot; portal via Ethernet fa
 # install engine, staged — stops before the destructive steps
 sudo python3 installer/install-engine/run.py --stop-after partition
 
-# ── Windows guest ──────────────────────────────────────────────────────────
-python3 installer/windows-guest/build.py    # unattended LTSC ISO
-python3 installer/windows-guest/domain.py   # CASSE jusqu'a la phase 2c :
-# ImportError des l'entree de main() (HardwareError a quitte common.hardware).
-# Voir "domain.py is DEAD until phase 2c" plus haut.
-python3 installer/windows-guest/retro_sync.py   # retrogaming (OPTIONAL): replay
+# ── Windows guest (console/guest/, moved out of installer/windows-guest/) ──
+python3 console/guest/build.py    # unattended LTSC ISO
+python3 console/guest/domain.py xml   # inspect the generated domain XML;
+# works today (measured 2026-08-28) - see "domain.py is REPAIRED" plus haut.
+python3 console/guest/retro_sync.py   # retrogaming (OPTIONAL): replay
 # `retro install` with the owner's manifest, refresh the durable witness on
 # D:\state\retro.status, then hold Steam and sync the library. It REFUSES to
 # sync unless that witness says `ok` for the current provisioning run: `retro
