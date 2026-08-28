@@ -104,6 +104,31 @@ with tempfile.TemporaryDirectory() as tmp:
         check(f"{rel} depose", (root / rel).is_file(), True)
         check(f"{rel} executable", os.access(root / rel, os.X_OK), True)
 
+    # Presence and the execute bit say nothing about WHICH file landed where.
+    # Swapping the two rules.sh entries in HOOK_FILES would start the VM
+    # without its forward-ports and leave the wake socket exposed with no
+    # DNAT in front of it - and every check above would still pass. Comparing
+    # bytes closes that for the whole table at once, not just for this pair.
+    for src, dest in (("libvirt/hooks/qemu.d/Windows/started/begin/rules.sh",
+                       "etc/libvirt/hooks/qemu.d/Windows/started/begin/rules.sh"),
+                      ("libvirt/hooks/qemu.d/Windows/stopped/end/rules.sh",
+                       "etc/libvirt/hooks/qemu.d/Windows/stopped/end/rules.sh"),
+                      ("libvirt/hooks/qemu.d/Windows/prepare/begin/bind-vfio-gpu.sh",
+                       "etc/libvirt/hooks/qemu.d/Windows/prepare/begin/bind-vfio-gpu.sh"),
+                      ("libvirt/hooks/qemu.d/Windows/release/end/rebind-host-gpu.sh",
+                       "etc/libvirt/hooks/qemu.d/Windows/release/end/rebind-host-gpu.sh"),
+                      ("libvirt/hooks/qemu", "etc/libvirt/hooks/qemu"),
+                      ("vm-idle-shutdown.sh", "usr/local/sbin/vm-idle-shutdown.sh")):
+        origin = CONSOLE / "host" / src
+        target = root / dest
+        try:
+            same = target.read_bytes() == origin.read_bytes()
+        except FileNotFoundError as exc:
+            check(f"{dest} est bien la copie de host/{src}",
+                  f"fichier absent: {exc.filename}", "fichiers presents")
+            continue
+        check(f"{dest} est bien la copie de host/{src}", same, True)
+
     # Units are data, not programs. Mode is not asserted - only presence -
     # because a unit with the execute bit still works; what must not happen
     # is a unit missing while the package claims the cycle is deployed.
@@ -123,13 +148,23 @@ with tempfile.TemporaryDirectory() as tmp:
     # The drop-in must reach BOTH services: systemd reads it from each
     # unit's own .d/ directory, so one copy enables the limit on the other.
     # Parsed as INI, not searched as text: a substring check would also pass
-    # on a commented-out line.
+    # on a commented-out line. The section/key lookup is guarded: its
+    # absence (missing file, or a file present but empty/malformed) must
+    # surface as a named failure here, not as an uncaught KeyError that
+    # would abort the script before the retro blocks below ever run - the
+    # file's own presence is already asserted above by the "units" loop.
     for port in ("47984", "47989"):
         dropin = root / ("etc/systemd/system/vm-trigger-"
                          f"{port}.service.d/no-start-limit.conf")
         parser = load_unit(dropin)
+        try:
+            value = parser["Unit"]["StartLimitIntervalSec"]
+        except KeyError:
+            check(f"le drop-in {port} desarme la limite de demarrage",
+                  "[Unit] StartLimitIntervalSec absent", "0")
+            continue
         check(f"le drop-in {port} desarme la limite de demarrage",
-              parser["Unit"]["StartLimitIntervalSec"], "0")
+              value, "0")
 
     # install WRITES; activate ARMS. A wake socket armed here would listen
     # on 0.0.0.0 for a VM that does not exist yet - and the stopped/end
