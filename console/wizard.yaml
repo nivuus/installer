@@ -12,3 +12,23 @@
   type: secret
   label: "Mot de passe administrateur Windows"
   required: true
+
+- key: windows_iso
+  type: texte
+  label: "Media Windows 11 IoT Enterprise LTSC : chemin local ou URL"
+  required: true
+
+- key: ltsc_key
+  type: secret
+  label: "Clé produit Windows LTSC"
+  required: true
+
+- key: apollo_password
+  type: secret
+  label: "Mot de passe de l'interface Apollo"
+  required: true
+
+- key: guest_workdir
+  type: texte
+  label: "Répertoire de travail pour la construction de l'invité"
+  default: "/var/lib/nivuus/guest"
