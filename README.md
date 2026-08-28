@@ -139,8 +139,8 @@ installer/
 │   └── common/         generic hardware detection + progress protocol
 ├── configs/          reference network / firewall / VM configs
 ├── scripts/          thermal tuning, VM/GPU hooks, validation, HA CLI helpers
-├── docs/             deep-dive documentation + design specs
-└── install.sh        the post-install tuner (run standalone too)
+├── console/          the Windows gaming guest, as an installer package (GPU/NVMe passthrough)
+└── docs/             deep-dive documentation + design specs
 ```
 
 ### Sibling repositories

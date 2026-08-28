@@ -30,7 +30,8 @@ from packages.conflicts import check_conflicts
 from packages.discovery import discover, eligibility
 from packages.manifest import MANIFEST_NAME, ManifestError
 from packages.runner import HookError, run_install, run_resolve
-from packages.wizard import WizardError, load_questions, validate_answers
+from packages.wizard import (DISK_TYPE, WizardError, load_questions,
+                             validate_answers)
 
 from .bootloader import grub_defaults
 from .util import StepError, chroot_run, write_file
@@ -48,8 +49,10 @@ UNIT_SRC_REL_PATH = "configs/systemd/" + UNIT_NAME
 # (that is `manifest.apt`, installed separately below with a lenient policy).
 # activate_cli.py is the ExecStart of a systemd unit, so it needs an
 # interpreter; nothing else on a minimal target guarantees one, since
-# debootstrap.py's BASE_INCLUDE has no python3 and the kvm-vfio/thermal
-# features that pull it in via install.sh are both optional. It also
+# debootstrap.py's BASE_INCLUDE has no python3, install.sh is gone
+# (2026-08-27, dissolved into install-engine features and the `console`
+# package), and no install-engine feature or package apt list (e.g.
+# console/nivuus-package.yaml's) happens to pull python3 in either. It also
 # re-parses the manifest at first boot, and manifest.py imports PyYAML,
 # which nothing else in a minimal target's package list pulls in. Without
 # either, the activation unit armed for first boot has no interpreter to run
@@ -90,6 +93,36 @@ def _validate_selection(raw) -> dict:
     return raw
 
 
+def _refuse_target_disk_as_dedicated(manifest, questions, answers,
+                                     target_disk: str) -> None:
+    """Refuse an answer that hands a package the disk being installed onto.
+
+    This check can only live here. A `disque` answer names a device the
+    package claims EXCLUSIVELY - the console package hands it to a guest as a
+    whole PCI function, and the guest's installer wipes it - while the
+    install target is the disk this very system is being written to. Naming
+    the same device for both destroys the installation being made.
+
+    The package cannot catch it: a hook receives only `hw` and its own
+    answers, never the install config, so it has no way to learn what the
+    target disk is. The engine has both, and refuses here - while planning,
+    before partition() has touched anything.
+    """
+    if not target_disk:
+        return
+    wanted = target_disk.rstrip("/")
+    for question in questions:
+        if question.type != DISK_TYPE:
+            continue
+        value = answers.get(question.key)
+        if isinstance(value, str) and value.rstrip("/") == wanted:
+            raise StepError(
+                f"package « {manifest.label} » : la réponse « {question.key} » "
+                f"désigne {value}, qui est le disque d'installation — un "
+                "périphérique réclamé par un package ne peut pas être celui "
+                "sur lequel le système s'installe")
+
+
 def plan_packages(config: dict, hw: dict, emit):
     """Decide everything, write nothing. Raises StepError on any refusal.
 
@@ -124,7 +157,8 @@ def plan_packages(config: dict, hw: dict, emit):
 
     chosen = [by_name[name] for name in sorted(selected)]
 
-    capabilities = detect_capabilities(hw, (config.get("disk") or {}).get("path", ""))
+    target_disk = (config.get("disk") or {}).get("path", "") or ""
+    capabilities = detect_capabilities(hw, target_disk)
     features = set(config.get("features") or [])
     for manifest in chosen:
         reason = eligibility(manifest, capabilities, features)
@@ -145,6 +179,11 @@ def plan_packages(config: dict, hw: dict, emit):
             answers = validate_answers(questions, selected[manifest.name] or {})
         except (WizardError, ManifestError) as exc:
             raise StepError(f"package « {manifest.label} » : {exc}") from exc
+
+        # Before the resolve hook, not after: the hook cannot see the install
+        # config, so this is the only place the collision is visible at all.
+        _refuse_target_disk_as_dedicated(manifest, questions, answers,
+                                         target_disk)
 
         try:
             resolution = run_resolve(manifest, hw, answers, emit)

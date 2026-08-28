@@ -20,7 +20,9 @@ press *Installer*, then reboot into a configured Nivuus server.
                 │
                 └─ install-engine/run.py
                        partition → debootstrap → base config → kernel/GRUB →
-                       apply Nivuus features (reuses /opt/nivuus/install.sh) →
+                       apply Nivuus features (thermal policy, an ordinary
+                       install-engine feature) → apply selected packages
+                       (e.g. `console`, the Windows gaming guest) →
                        validate. Progress streams back over a WebSocket.
 ```
 
@@ -31,7 +33,7 @@ The live root runs entirely in RAM; the engine debootstraps Debian onto the
 
 | Path | Role |
 |------|------|
-| `common/hardware.py` | Generic hardware detection (disks, NICs, WiFi AP-capability, GPU IDs for VFIO, CPU topology → `isolcpus`). |
+| `common/hardware.py` | Generic hardware detection (disks, NICs, WiFi AP-capability, coarse GPU/IOMMU/NVMe capabilities). Precise details (`vfio-pci.ids`, `isolcpus`/`nohz_full`) are a package's job — see `console/hardware.py` for the reference. |
 | `common/progress.py` | Structured progress-event protocol (jsonl log + stdout) shared by engine and portal. |
 | `install-engine/run.py` | Orchestrator: scripted debootstrap install, emits progress. |
 | `install-engine/steps/` | `partition`, `debootstrap`, `chroot_base`, `bootloader`, `features`, `validate`. |
@@ -41,10 +43,12 @@ The live root runs entirely in RAM; the engine debootstraps Debian onto the
 | `iso-build/` | live-build config, hooks (venv + enable services), `build.sh`. |
 
 The installer **reuses the repo's own scripts** rather than duplicating logic:
-`install.sh` (now `NIVUUS_DIR`-relative and `--non-interactive`-aware, with
-`NIVUUS_ISOLCPUS` / `NIVUUS_VFIO_IDS` / `NIVUUS_IN_CHROOT` env hooks),
-`scripts/optimize-cpu-thermal.sh`, `scripts/validate-install.sh`. The whole repo
-is copied into the target at `/opt/nivuus`.
+`scripts/optimize-cpu-thermal.sh` (deployed by the thermal `install-engine`
+feature), `scripts/validate-install.sh`. The whole repo is copied into the
+target at `/opt/nivuus`. `install.sh` is gone (2026-08-27): the VM-setup
+blocks it used to run became the `console` package (below), and its thermal
+block became the fifteen-line `_thermal()` feature in
+`install-engine/steps/features.py`.
 
 ## Packages
 
@@ -56,6 +60,22 @@ sibling repository:
 ```bash
 PACKAGE_REPOS="$HOME/Projects/Nivuus/packages/console" sudo -E make build-iso
 ```
+
+### `console`, the first package
+
+`console/` in this repository is the reference consumer of this API: the
+Windows gaming guest, installed through exactly the three phases a
+third-party package goes through. It is deliberately not privileged — if the
+contract were not enough for it, it would not be enough for anyone.
+
+```bash
+PACKAGE_REPOS="$PWD/console" sudo -E make build-iso
+```
+
+Its `resolve` phase refuses, with a reason, any machine with no discrete GPU
+or no properly isolated NVMe: the console is PCI-passthrough only, and a
+silent fallback to a disk image would deliver something slower than what was
+asked for.
 
 ### Three phases, named relative to the reboot
 

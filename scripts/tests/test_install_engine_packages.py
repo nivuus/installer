@@ -114,6 +114,38 @@ check_raises("a package refusal stops the plan",
                  {**config, "packages": {"refuser": {}}}, HW, FakeEmit()),
              "NVMe")
 
+# --- le disque d installation ne peut pas etre reclame par un package ------ #
+# Un `disque` est reclame EXCLUSIVEMENT : le package console le donne entier
+# a un invite, dont l installeur l efface. Le designer aussi comme cible
+# d installation detruit l installation en cours de fabrication.
+#
+# Seul le MOTEUR peut voir la collision : un hook ne recoit que `hw` et ses
+# propres reponses, jamais la config d installation, donc il ignore par
+# construction quel est le disque cible. Le package ne peut pas se defendre
+# tout seul - c est pour cela que le garde vit ici, au moment de planifier,
+# avant que partition() n ait touche quoi que ce soit.
+check_raises("le disque d installation ne peut pas etre le disque dedie d un "
+             "package",
+             lambda: steps_packages.plan_packages(
+                 {**config,
+                  "packages": {"demo": {"dedicated_disk": "/dev/nvme0n1"}}},
+                 HW, FakeEmit()),
+             "/dev/nvme0n1")
+
+check_raises("et le refus nomme la question fautive",
+             lambda: steps_packages.plan_packages(
+                 {**config,
+                  "packages": {"demo": {"dedicated_disk": "/dev/nvme0n1"}}},
+                 HW, FakeEmit()),
+             "dedicated_disk")
+
+# Un autre disque passe : le garde refuse la collision, pas la question.
+plan_autre, _ = steps_packages.plan_packages(
+    {**config, "packages": {"demo": {"dedicated_disk": "/dev/nvme1n1"}}},
+    HW, FakeEmit())
+check("un disque dedie distinct de la cible est accepte",
+      plan_autre[0][1]["dedicated_disk"], "/dev/nvme1n1")
+
 # --- config['packages'] shape validation ------------------------------------ #
 # A plausible authoring slip in a hand-written config.json (the engine is
 # documented as runnable standalone against a loopback disk - not every

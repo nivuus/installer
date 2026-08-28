@@ -1,24 +1,21 @@
 """Step 8: apply the selected Nivuus features inside the chroot.
 
-Each feature is self-contained and gated on the wizard's feature list. The KVM/
-VFIO/thermal feature reuses the repo's install.sh (run with computed, non-
-hardcoded kernel params); networking/wifi/firewall render Jinja2 templates from
-the wizard answers; docker/home-assistant deploy the application layer. retro
-(RetroArch, via the `retro` package) is the odd one out: it installs nothing
-in the chroot - it runs entirely on the Windows guest VM, provisioned
-separately and later by windows-guest/build.py - so its only job here is to
-record the operator's choice durably on the target; see _retro().
+Each feature is self-contained and gated on the wizard's feature list.
+networking/wifi/firewall render Jinja2 templates from the wizard answers;
+docker/home-assistant deploy the application layer; thermal deploys the host
+RAPL/fan policy. The VM setup that used to live here (KVM/VFIO packages, CPU
+partitioning hooks, hugepages, kernel command line, retro) is gone - it is
+now the console package's manifest and install hook (see console/).
 """
 from __future__ import annotations
 
-import json
 import os
+import shutil
 import uuid
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from .util import StepError, chroot_run, chroot_stream, write_file
-from common.retro import retro_state_path
+from .util import StepError, chroot_run, write_file
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates")
 
@@ -49,8 +46,8 @@ def apply_features(config: dict, target: str, nivuus_dir: str, hw: dict,
     features = set(config.get("features", []))
     env = _env()
 
-    if features & {"kvm-vfio", "thermal"}:
-        _kvm_vfio_thermal(config, target, nivuus_dir, hw, features, emit)
+    if "thermal" in features:
+        _thermal(target, nivuus_dir, emit)
     if "networking" in features:
         _networking(config, target, env, emit)
     if "wifi-ap" in features:
@@ -59,40 +56,49 @@ def apply_features(config: dict, target: str, nivuus_dir: str, hw: dict,
         _firewall(config, target, emit)
     if "docker" in features:
         _docker(target, emit)
-    if "retro" in features:
-        _retro(target, features, emit)
     if features & {"home-assistant", "mqtt"}:
         _home_assistant_mqtt(target, nivuus_dir, features, emit)
 
 
 # --------------------------------------------------------------------------- #
-def _kvm_vfio_thermal(config, target, nivuus_dir, hw, features, emit) -> None:
-    emit.info("features", 80, "Installing KVM/VFIO + thermal optimisation…")
+def _thermal(target, nivuus_dir, emit) -> None:
+    """Deploy the host thermal policy - all that survived install.sh.
 
-    # Generic kernel params from detected hardware.
-    cpu = hw.get("cpu", {})
-    isolcpus = (config.get("cpu", {}).get("isolcpus")
-                or cpu.get("isolcpus") or "")
-    gpu_cfg = config.get("gpu_passthrough", {})
-    vfio_ids = ",".join(gpu_cfg.get("ids", [])) if gpu_cfg.get("enabled") else ""
+    This is a HOST policy, not a VM one: RAPL power capping and the fan curve
+    apply whether or not a guest ever runs. But its gaming/idle modes are
+    driven by the console package's libvirt hooks, through
+    `nivuus-cpu-mode@{gaming,idle}.service`. That unit name is therefore a
+    PUBLIC CONTRACT of this repository: the package calls it if it exists and
+    does nothing if it does not, which is what lets the package install on a
+    Debian that has never seen this installer.
+    """
+    emit.info("features", 80, "Installing host thermal policy…")
+    src = os.path.join(target, nivuus_dir.lstrip("/"),
+                       "scripts/optimize-cpu-thermal.sh")
+    if not os.path.isfile(src):
+        emit.warn("features", 80,
+                  f"optimize-cpu-thermal.sh absent de la charge utile ({src}) ; "
+                  "politique thermique non installee")
+        return
+    dest = os.path.join(target, "usr/local/bin/optimize-cpu-thermal.sh")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    shutil.copy2(src, dest)
+    os.chmod(dest, 0o755)
 
-    env_extra = {
-        "NIVUUS_DIR": nivuus_dir,
-        "NIVUUS_ASSUME_YES": "1",
-        "NIVUUS_IN_CHROOT": "1",
-    }
-    if isolcpus:
-        env_extra["NIVUUS_ISOLCPUS"] = isolcpus
-    if vfio_ids:
-        env_extra["NIVUUS_VFIO_IDS"] = vfio_ids
-
-    code = chroot_stream(
-        target, ["bash", f"{nivuus_dir}/install.sh", "--non-interactive"],
-        on_line=lambda l: emit.info("features", 82, l[:120]),
-        extra_env=env_extra,
-    )
-    if code != 0:
-        raise StepError("install.sh failed inside the chroot")
+    write_file(
+        os.path.join(target, "etc/systemd/system/cpu-thermal-optimization.service"),
+        "[Unit]\n"
+        "Description=CPU thermal policy (RAPL caps, fan curve, core frequencies)\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "ExecStart=/usr/local/bin/optimize-cpu-thermal.sh\n"
+        "RemainAfterExit=yes\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n")
+    chroot_run(target, ["systemctl", "enable",
+                        "cpu-thermal-optimization.service"], check=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -185,49 +191,6 @@ def _docker(target, emit) -> None:
     chroot_run(target, ["apt-get", "install", "-y", "docker.io",
                         "docker-compose-v2"], check=False)
     chroot_run(target, ["systemctl", "enable", "docker"], check=False)
-
-
-# --------------------------------------------------------------------------- #
-def _retro(target, features, emit) -> None:
-    """Record that retrogaming was requested, on the target filesystem.
-
-    Retro (RetroArch, via the `retro` package) runs entirely on the Windows
-    guest VM, built separately and later by windows-guest/build.py -
-    possibly on this very host, but as a manual step the wizard cannot see
-    or trigger. build.py falls back to reading this file
-    (common.retro.retro_state_path()) when its own --retro flag is not
-    given explicitly, so this marker is the only durable trace of the
-    operator's choice once the installer has moved on. The path itself is
-    defined once, in common/retro.py, and imported by both sides - see
-    that module's docstring for why.
-
-    Called only when "retro" was selected (see apply_features), like every
-    other feature here: an unchecked install writes nothing, exactly as it
-    did before this option existed. That still agrees with build.py, which
-    treats an absent marker as "off" - the unchecked case needs no marker
-    of its own to say so.
-
-    retro depends on the Windows guest VM (the "kvm-vfio" feature); the
-    wizard already refuses that combination at submit time (see
-    webapp/models.py). By the time a config reaches this step, though,
-    partitioning, the base system and the bootloader are already done -
-    raising here would fail an otherwise-complete install over a file
-    nothing reads yet. Warn and record retro as disabled instead: the
-    wizard's own guard is what actually protects the common case.
-    """
-    if "kvm-vfio" not in features:
-        emit.warn(
-            "features", 93,
-            "'retro' was selected without 'kvm-vfio' (the Windows guest VM "
-            "it depends on); recording retrogaming as disabled rather than "
-            "failing an otherwise-complete install")
-        enabled = False
-    else:
-        emit.info("features", 93, "Retrogaming (Windows guest VM): enabled")
-        enabled = True
-    write_file(
-        retro_state_path(target),
-        json.dumps({"enabled": enabled}, indent=2) + "\n")
 
 
 # --------------------------------------------------------------------------- #

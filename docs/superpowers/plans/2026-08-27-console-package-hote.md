@@ -74,11 +74,12 @@ Le moteur doit répondre à `requires.capabilities` **avant** d'exécuter le moi
 **Interfaces:**
 - Consumes: rien
 - Produces:
-  - `installer/common/hardware.py` garde : `list_disks`, `list_ethernet`, `list_wifi`, `first_ap_interface`, `first_wired_with_carrier`, `iommu_support`, `list_gpus` (**sans le champ `ids`**), `cpu_topology` (**sans `isolcpus` ni `nohz_full`**), `detect_all`
-  - `console/hardware.py` expose : `HardwareError`, `pci_slot_ids(slot) -> list[str]`, `parse_pci_functions(raw, slot) -> list[dict]`, `pci_slot_functions(slot) -> list[dict]`, `parse_nvme_controllers(raw) -> list[dict]`, `select_passthrough_nvme(controllers, host_addresses) -> dict`, `host_root_pci_addresses() -> set[str] | None`, `resolve_passthrough_nvme(raw, host_addresses) -> dict`, `passthrough_nvme() -> dict`, `_whole_disk_name(name, sysfs_root=...) -> str`, `pci_address_for_device(path) -> str | None`, `vfio_ids_for_slot(slot) -> list[str]`, `cpu_ranges(nums) -> str`, `isolation_plan(cpu: dict) -> dict` → `{"isolcpus": str, "nohz_full": str}`
+  - `installer/common/hardware.py` garde : `list_disks`, `list_ethernet`, `list_wifi`, `first_ap_interface`, `first_wired_with_carrier`, `iommu_support`, `list_gpus` (**sans le champ `ids`**), `cpu_topology` (**sans `isolcpus` ni `nohz_full`**), `memory_total_mib(meminfo_path="/proc/meminfo") -> int` (RAM hôte en MiB depuis `MemTotal`, fail-open à `0`), `detect_all` — dont le dict rendu porte désormais une clé **`memory_mib`** (ajoutée en fix round 2 de la tâche 2 : `detect_all()` ne la portait pas, donc `resolve` tombait systématiquement sur son repli plancher)
+  - `console/hardware.py` expose : `HardwareError`, `pci_slot_ids(slot) -> list[str]`, `parse_pci_functions(raw, slot) -> list[dict]`, `pci_slot_functions(slot) -> list[dict]`, `parse_nvme_controllers(raw) -> list[dict]`, `select_passthrough_nvme(controllers, host_addresses, wanted_address=None) -> dict`, `host_root_pci_addresses() -> set[str] | None`, `resolve_passthrough_nvme(raw, host_addresses, wanted_address=None) -> dict`, `passthrough_nvme(wanted_address=None) -> dict`, `_whole_disk_name(name, sysfs_root=...) -> str`, `pci_address_for_device(path, sysfs_root=None) -> str | None`, `vfio_ids_for_slot(slot) -> list[str]`, `cpu_ranges(nums) -> str`, `isolation_plan(cpu: dict) -> dict` → `{"isolcpus": str, "nohz_full": str}`
 
 ⚠️ **Deux faits sur ces fonctions que le code appelant DOIT respecter, vérifiés dans la source :**
-  - `passthrough_nvme()` et `select_passthrough_nvme()` **lèvent `HardwareError`** sur tous leurs chemins d'échec (aucun contrôleur NVMe, candidat ambigu, disque appartenant à l'hôte). Elles ne rendent **jamais** un dict vide. Un appelant qui teste `if not nvme:` ne détectera jamais rien — l'exception sera déjà partie.
+  - `passthrough_nvme()` et `select_passthrough_nvme()` **lèvent `HardwareError`** sur tous leurs chemins d'échec (aucun contrôleur NVMe, réponse qui ne désigne pas un contrôleur NVMe, disque appartenant à l'hôte, auto-sélection ambiguë). Elles ne rendent **jamais** un dict vide. Un appelant qui teste `if not nvme:` ne détectera jamais rien — l'exception sera déjà partie.
+  - `wanted_address` (l'adresse PCI derrière la réponse `dedicated_nvme`) **choisit** le contrôleur ; l'exclusion de la racine hôte est une assertion sur ce choix. `host_addresses=None` (racine non traçable — le cas ISO live) ne déclenche donc **pas** de refus, sauf si aucune réponse n'a été donnée. Voir « Correctif final » en fin de plan.
   - Le dict rendu est une **fonction PCI**, avec les clés `{address, id, function, bus, slot, domain}`. Il n'y a **pas** de clé `device` : comparer un chemin `/dev/…` à ce dict exige de passer par `pci_address_for_device()`.
 
 - [ ] **Step 1: Constater la frontière avant de couper**
@@ -105,6 +106,7 @@ Ajouter les cas qui n'existaient pas, pour les deux fonctions nouvelles :
 
 ```python
 # --- isolation_plan: la derivation que le moteur ne fait plus ------------- #
+# Regression guard: les deux chemins heureux ci-dessous doivent rester verts.
 check("hybrid: les P-cores sont isoles",
       hardware.isolation_plan({"hybrid": True, "performance_cpus": [0, 1, 2, 3],
                                "total_cpus": 8}),
@@ -115,8 +117,49 @@ check("uniforme: tout sauf cpu0",
       {"isolcpus": "1-3", "nohz_full": "1-3"})
 check("snapshot vide ne leve pas",
       hardware.isolation_plan({}), {"isolcpus": "", "nohz_full": ""})
+check("un seul cpu: rien a isoler",
+      hardware.isolation_plan({"hybrid": False, "performance_cpus": [],
+                               "total_cpus": 1}),
+      {"isolcpus": "", "nohz_full": ""})
 check("cpu_ranges compresse", hardware.cpu_ranges([0, 1, 2, 3, 8]), "0-3,8")
 check("cpu_ranges vide", hardware.cpu_ranges([]), "")
+
+# ABSENT (rien a isoler) et MALFORME (snapshot qui ment) sont distingues,
+# comme passthrough_nvme() ailleurs dans ce module refuse de deviner plutot
+# que de rendre un dict vide. isolation_plan() finit sur la ligne de
+# commande noyau (nohz_full=...) et la liste blanche GRUB en aval ne garde
+# que l injection shell, pas la validite semantique - filtrer les entrees
+# fautives laisserait donc passer une plage plausible tiree d un snapshot
+# dont on vient de prouver qu il est faux. Refuser est le seul comportement
+# sur qui compter.
+check_raises(
+    "performance_cpus avec une chaine",
+    hardware.HardwareError,
+    lambda: hardware.isolation_plan(
+        {"hybrid": True, "performance_cpus": [0, "x"], "total_cpus": 8}
+    ),
+)
+check_raises(
+    "performance_cpus avec True (piege bool-est-un-int)",
+    hardware.HardwareError,
+    lambda: hardware.isolation_plan(
+        {"hybrid": True, "performance_cpus": [0, True], "total_cpus": 8}
+    ),
+)
+check_raises(
+    "performance_cpus avec un numero de cpu negatif",
+    hardware.HardwareError,
+    lambda: hardware.isolation_plan(
+        {"hybrid": True, "performance_cpus": [-1, 0, 1], "total_cpus": 8}
+    ),
+)
+check_raises(
+    "performance_cpus avec un numero de cpu >= total_cpus",
+    hardware.HardwareError,
+    lambda: hardware.isolation_plan(
+        {"hybrid": True, "performance_cpus": [0, 1, 8], "total_cpus": 8}
+    ),
+)
 
 # --- pci_address_for_device : le pont entre /dev/... et une adresse PCI --- #
 check("un chemin introuvable rend None",
@@ -208,6 +251,36 @@ def vfio_ids_for_slot(slot: str) -> list[str]:
     return pci_slot_ids(slot)
 
 
+def _validate_performance_cpus(performance: list, total: int) -> None:
+    """Reject a `performance_cpus` list this module cannot trust.
+
+    isolation_plan's output is emitted onto the kernel command line
+    (nohz_full=...). The GRUB allowlist downstream
+    (`^[A-Za-z0-9_.,:=/@+-]+$`) exists to stop shell injection, not to judge
+    semantic validity - a range like "-1-1" passes it untouched. So this is
+    the only place that can catch a malformed CPU snapshot before it reaches
+    the boot chain of an installed machine, and it must refuse rather than
+    silently filter: dropping the bad entries would still emit a
+    plausible-looking range derived from a snapshot just proven untrustworthy,
+    and the operator would never learn their machine was mis-detected.
+    """
+    for value in performance:
+        # bool is an int subclass in Python - isinstance(True, int) is True -
+        # so True must be rejected explicitly, or it would silently mean CPU 1.
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise HardwareError(
+                f"performance_cpus contains a non-integer entry: {value!r}"
+            )
+        if value < 0:
+            raise HardwareError(
+                f"performance_cpus contains a negative CPU number: {value}"
+            )
+        if total and value >= total:
+            raise HardwareError(
+                f"performance_cpus contains CPU {value} but total_cpus is {total}"
+            )
+
+
 def isolation_plan(cpu: dict) -> dict:
     """CPUs handed to the guest, as kernel range strings.
 
@@ -217,9 +290,20 @@ def isolation_plan(cpu: dict) -> dict:
     CPUs out of the scheduler for the whole uptime and leave the host on the
     remaining cores even while the guest is shut off. The host/guest split is
     dynamic, done by vm-cpu-partition.sh from the libvirt hooks.
+
+    ABSENT versus MALFORMED are deliberately distinguished, the way
+    passthrough_nvme() already refuses to guess rather than return an empty
+    dict. An absent snapshot ({}, no performance_cpus, no/zero total_cpus) is
+    not an error - there is simply nothing to isolate, so this returns an
+    empty plan. A PRESENT but invalid performance_cpus (a non-int entry, a
+    negative CPU number, or a CPU number >= total_cpus) raises HardwareError:
+    see _validate_performance_cpus for why this must refuse rather than
+    filter, given where this string ends up.
     """
     performance = cpu.get("performance_cpus") or []
     total = cpu.get("total_cpus") or 0
+    if performance:
+        _validate_performance_cpus(performance, total)
     if cpu.get("hybrid") and performance:
         isolated = sorted(performance)
     elif total:
@@ -317,6 +401,26 @@ la phase suivante."
 - Consumes: `console/hardware.py` (`vfio_ids_for_slot`, `isolation_plan`, `resolve_passthrough_nvme`, `host_root_pci_addresses`)
 - Produces: un package découvrable par `installer/packages/discovery.py` et résolvable par `installer/packages/runner.py`
 
+> **Fix round 2 (revue de code) a touché deux fichiers hors de cette liste
+> initiale**, tous deux côté moteur et non côté package :
+> - `installer/common/hardware.py` : ajout de `memory_total_mib()` et de la
+>   clé `memory_mib` dans `detect_all()` (Partie 1 — ce champ n'existait pas
+>   du tout ; `resolve` tombait donc systématiquement sur son repli
+>   plancher, une erreur de taille silencieuse, pas un plantage).
+> - `scripts/tests/test_common_hardware.py` (nouvelle suite, créée plutôt
+>   que d'étendre `test_packages_capabilities.py` : celle-ci teste la
+>   conversion `hw dict -> capacités`, pas la détection elle-même — ce
+>   nouveau fichier suit la même convention 1-fichier-source-1-suite que
+>   `test_console_hardware.py`).
+>
+> Et la Partie 2 a changé la forme du budget de hugepages dans
+> `console/hooks/resolve.py` : `GUEST_MIB_DEFAULT` (16384 MiB fixe, aligné
+> sur ce que ce projet a mesuré et gardé après avoir vu l'hôte swapper —
+> voir `CLAUDE.md`, "Hugepages pool halved") remplace "moitié de l'hôte",
+> clampé vers le BAS uniquement (`min(DEFAULT, host // 2)`), avec le même
+> refus qu'avant sous `GUEST_MIB_MIN`. Les deux blocs verbatim ci-dessous
+> (Steps 3 et 5) sont à jour avec ce correctif.
+
 - [ ] **Step 1: Écrire le manifeste**
 
 `console/nivuus-package.yaml` :
@@ -396,11 +500,13 @@ Run: python3 scripts/tests/test_console_resolve.py
 """
 import json
 import pathlib
+import subprocess
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "installer"))
 CONSOLE = REPO / "console"
+RESOLVE_HOOK = CONSOLE / "hooks" / "resolve.py"
 
 from packages.manifest import load_manifest  # noqa: E402
 from packages.runner import run_resolve  # noqa: E402
@@ -412,6 +518,51 @@ failures = []
 def check(label, got, want):
     if got != want:
         failures.append(f"{label}: got {got!r}, want {want!r}")
+
+
+def call_hook(hw=None, answers=None):
+    """Invoke console/hooks/resolve.py exactly as the engine does: a
+    subprocess fed the {"hw":..., "answers":...} context on stdin, jsonl
+    events on stdout. This is the hook's REAL interface - going through
+    run_resolve() alone would only ever exercise the happy subset of
+    contexts run_resolve() itself knows how to build; a malformed hw dict
+    reaching the hook as-is is exactly what a broken detection layer would
+    produce.
+
+    Returns (exit_code, events). Never raises on a hook crash: a traceback
+    on stderr with a non-zero exit and zero 'refuse' events is precisely the
+    defect this is here to catch, so it must be observable as data, not as
+    a pytest-style exception out of this helper.
+    """
+    ctx = {}
+    if hw is not None:
+        ctx["hw"] = hw
+    if answers is not None:
+        ctx["answers"] = answers
+    proc = subprocess.run(
+        [sys.executable, str(RESOLVE_HOOK), "--phase", "resolve"],
+        input=json.dumps(ctx), capture_output=True, text=True, timeout=30)
+    events = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        events.append(json.loads(line))
+    return proc.returncode, events
+
+
+def refusal_reason(events):
+    for event in events:
+        if event.get("event") == "refuse":
+            return event.get("reason") or ""
+    return None
+
+
+def platform_event(events):
+    for event in events:
+        if event.get("event") == "platform":
+            return event
+    return None
 
 
 # --- le manifeste est valide au sens du contrat -------------------------- #
@@ -455,6 +606,20 @@ refus = run_resolve(m, HW_SANS_GPU, {"dedicated_nvme": "/dev/nvme1n1",
 check("sans GPU dedie, resolve refuse", refus.ok, False)
 check("et il dit pourquoi", "GPU" in refus.reason, True)
 
+# Une topologie CPU malformee doit devenir un refus, pas une trace
+# d exception : isolation_plan leve HardwareError, et ce que resolve rend
+# atterrit sur la ligne de commande NOYAU.
+HW_CPU_CASSE = {
+    **HW_SANS_GPU,
+    "gpus": [{"slot": "01:00.0", "vendor": "nvidia", "discrete": True}],
+    "cpu": {"hybrid": True, "performance_cpus": [-1, 0], "total_cpus": 8},
+}
+refus_cpu = run_resolve(m, HW_CPU_CASSE, {"dedicated_nvme": "",
+                                          "admin_password": "x", "retro": False})
+check("une topologie CPU malformee est refusee", refus_cpu.ok, False)
+check("et le refus la nomme",
+      "CPU" in refus_cpu.reason or "cpu" in refus_cpu.reason, True)
+
 # --- resolve sur un materiel plausible ----------------------------------- #
 # ATTENTION : au-dela du GPU, resolve appelle hardware.passthrough_nvme(),
 # qui lit le VRAI lspci de la machine qui execute ce test. Son issue depend
@@ -494,6 +659,174 @@ else:
           "NVMe" in res.reason or "nvme" in res.reason, True)
     print(f"  (note: cette machine ne convient pas, refus exerce : {res.reason[:60]})")
 
+# --- resolve refuse plutot que crasher sur un snapshot casse ------------- #
+# Ces cas visent le hook directement, en subprocess, via son interface
+# reelle (le JSON sur stdin) - pas run_resolve(), qui ne construit que des
+# contextes bien formes. Un hook qui plante ici sortirait non-nul avec une
+# trace, sans le moindre evenement 'refuse' : c'est exactement le defaut
+# constate en revue, donc chaque cas verifie a la fois le code de sortie ET
+# la presence d'un refus motive.
+
+GPU_OK = {"slot": "01:00.0", "vendor": "nvidia", "discrete": True}
+CPU_OK = {"hybrid": True, "performance_cpus": [0, 1, 2, 3], "total_cpus": 8}
+
+# Un GPU discret sans cle 'slot' : ligne ~60 du hook faisait
+# discrete[0]["slot"], KeyError direct.
+rc, events = call_hook(
+    hw={"gpus": [{"vendor": "nvidia", "discrete": True}], "memory_mib": 65536},
+    answers={})
+check("GPU sans slot : code de sortie 0", rc, 0)
+reason = refusal_reason(events)
+check("GPU sans slot : un refus est emis", reason is not None, True)
+check("GPU sans slot : le refus parle du GPU",
+      bool(reason) and "GPU" in reason, True)
+
+# memory_mib non numerique : guest_memory_mib faisait total // 2 sur une str.
+rc, events = call_hook(hw={"gpus": [GPU_OK], "memory_mib": "lots"}, answers={})
+check("memoire non numerique : code de sortie 0", rc, 0)
+reason = refusal_reason(events)
+check("memoire non numerique : un refus est emis", reason is not None, True)
+
+# memory_mib negatif : refuse (choix documente dans le rapport - un chiffre
+# negatif est traite comme un snapshot malforme, pas comme "hote minuscule").
+rc, events = call_hook(hw={"gpus": [GPU_OK], "memory_mib": -100}, answers={})
+check("memoire negative : code de sortie 0", rc, 0)
+reason = refusal_reason(events)
+check("memoire negative : un refus est emis", reason is not None, True)
+
+# --- budget invite : GUEST_MIB_DEFAULT (16384), jamais "moitie de l hote" #
+# Round 2 de revue : "moitie de l hote" rejouait EXACTEMENT l erreur deja
+# corrigee dans ce projet (CLAUDE.md, "Hugepages pool halved" - un pool de
+# 16584 pages, double du besoin reel, faisait swapper l hote ; reduit a 8448
+# pages, ~16896 MiB mesures). Le budget par defaut est donc fixe a 16384 MiB
+# (16 GiB), et seulement reduit si l hote ne peut pas le fournir - jamais
+# calcule comme une fraction de la RAM totale. Table mesuree :
+#
+#   hote   8 GiB (8192 MiB)  -> refuse (le plancher meme ne tient pas)
+#   hote  16 GiB (16384 MiB) -> invite  8192 MiB (frontiere, moitie = plancher)
+#   hote  24 GiB (24576 MiB) -> invite 12288 MiB (moitie, sous le defaut)
+#   hote  32 GiB (32768 MiB) -> invite 16384 MiB (moitie = defaut, pile)
+#   hote  64 GiB (65536 MiB) -> invite 16384 MiB (defaut, PAS la moitie - 32768)
+
+# 8 GiB hote : la moitie (4096) est sous le plancher (8192) - refuse, et la
+# raison doit nommer la RAM reelle de l hote pour que l operateur comprenne
+# pourquoi (pas juste "trop petit").
+rc, events = call_hook(hw={"gpus": [GPU_OK], "memory_mib": 8192}, answers={})
+check("hote 8 GiB : code de sortie 0", rc, 0)
+reason = refusal_reason(events)
+check("hote 8 GiB : un refus est emis", reason is not None, True)
+check("hote 8 GiB : le refus nomme la RAM",
+      bool(reason) and "8192" in reason, True)
+
+# 16383 MiB, juste sous la frontiere des 16 GiB : doit refuser, et nommer a
+# la fois ce que l hote a et ce qu il faudrait - c est le cas qu un futur
+# lecteur pourrait croire identique a 16384 s il ne regarde pas de pres.
+rc, events = call_hook(hw={"gpus": [GPU_OK], "memory_mib": 16383}, answers={})
+check("hote 16383 MiB (juste sous la frontiere) : code de sortie 0", rc, 0)
+reason = refusal_reason(events)
+check("hote 16383 MiB : un refus est emis", reason is not None, True)
+check("hote 16383 MiB : le refus nomme la RAM de l hote",
+      bool(reason) and "16383" in reason, True)
+check("hote 16383 MiB : le refus nomme le besoin",
+      bool(reason) and "16384" in reason, True)
+
+# 16 GiB hote : la moitie (8192) egale exactement le plancher - la frontiere
+# ne doit PAS refuser une machine qui fonctionne reellement.
+rc, events = call_hook(
+    hw={"gpus": [GPU_OK], "cpu": CPU_OK, "memory_mib": 16384},
+    answers={"dedicated_nvme": ""})
+check("hote 16 GiB : code de sortie 0", rc, 0)
+plat = platform_event(events)
+if plat is None:
+    check("hote 16 GiB : un plan platform est emis (pas de refus)",
+          refusal_reason(events), None)
+else:
+    check("hote 16 GiB : l invite recoit exactement le plancher",
+          plat.get("hugepages-mib"), 8192)
+
+# 24 GiB hote : la moitie (12288) est sous le defaut (16384) - l invite
+# recoit la moitie, pas le defaut plein.
+rc, events = call_hook(
+    hw={"gpus": [GPU_OK], "cpu": CPU_OK, "memory_mib": 24576},
+    answers={"dedicated_nvme": ""})
+check("hote 24 GiB : code de sortie 0", rc, 0)
+plat = platform_event(events)
+if plat is None:
+    check("hote 24 GiB : un plan platform est emis (pas de refus)",
+          refusal_reason(events), None)
+else:
+    check("hote 24 GiB : l invite recoit la moitie (12288 MiB)",
+          plat.get("hugepages-mib"), 12288)
+
+# 32 GiB hote : la moitie (16384) egale exactement le defaut.
+rc, events = call_hook(
+    hw={"gpus": [GPU_OK], "cpu": CPU_OK, "memory_mib": 32768},
+    answers={"dedicated_nvme": ""})
+check("hote 32 GiB : code de sortie 0", rc, 0)
+plat = platform_event(events)
+if plat is None:
+    check("hote 32 GiB : un plan platform est emis (pas de refus)",
+          refusal_reason(events), None)
+else:
+    check("hote 32 GiB : l invite recoit le defaut (16384 MiB)",
+          plat.get("hugepages-mib"), 16384)
+
+# 64 GiB hote (cette machine) : le point que l on veut EPINGLER. La moitie
+# de l hote serait 32768 MiB - c est exactement l erreur "hugepages pool
+# halved" documentee dans CLAUDE.md. L invite doit recevoir le DEFAUT fixe
+# (16384 MiB), jamais la moitie de l hote : c est le cas qu un futur lecteur
+# sera tente de "corriger" en le remettant a host_mib // 2, donc gardez
+# cette assertion telle quelle si le budget par defaut change un jour pour
+# une autre raison mesuree.
+rc, events = call_hook(
+    hw={"gpus": [GPU_OK], "cpu": CPU_OK, "memory_mib": 65536},
+    answers={"dedicated_nvme": ""})
+check("hote 64 GiB : code de sortie 0", rc, 0)
+plat = platform_event(events)
+if plat is None:
+    check("hote 64 GiB : un plan platform est emis (pas de refus)",
+          refusal_reason(events), None)
+else:
+    check("hote 64 GiB : l invite recoit le defaut mesure (16384 MiB), "
+          "PAS la moitie de l hote (32768 MiB)",
+          plat.get("hugepages-mib"), 16384)
+
+# --- non-regression : les refus deja verifies plus haut restent verts ---- #
+rc, events = call_hook(
+    hw={"gpus": [{"slot": "00:02.0", "vendor": "intel", "discrete": False}],
+        "memory_mib": 65536},
+    answers={})
+check("regression sans GPU dedie : code de sortie 0", rc, 0)
+reason = refusal_reason(events)
+check("regression sans GPU dedie : le refus parle du GPU",
+      bool(reason) and "GPU" in reason, True)
+
+rc, events = call_hook(
+    hw={"gpus": [GPU_OK],
+        "cpu": {"hybrid": True, "performance_cpus": [-1, 0], "total_cpus": 8},
+        "memory_mib": 65536},
+    answers={"dedicated_nvme": ""})
+check("regression CPU casse : code de sortie 0", rc, 0)
+reason = refusal_reason(events)
+check("regression CPU casse : le refus nomme le CPU",
+      bool(reason) and ("CPU" in reason or "cpu" in reason), True)
+
+# --- probes supplementaires, non assertees une a une : voir le rapport --- #
+# hw entierement absent ; hw.gpus present mais vide ; answers absent ;
+# dedicated_nvme vers un peripherique inexistant. Chacun doit refuser (ou,
+# pour un hw minimal, refuser faute de GPU) - jamais planter.
+for label, ctx_hw, ctx_answers in [
+    ("hw absent", None, {}),
+    ("gpus vide", {"gpus": [], "memory_mib": 65536}, {}),
+    ("answers absent", {"gpus": [GPU_OK], "cpu": CPU_OK, "memory_mib": 65536},
+     None),
+    ("nvme demande inexistant",
+     {"gpus": [GPU_OK], "cpu": CPU_OK, "memory_mib": 65536},
+     {"dedicated_nvme": "/dev/does-not-exist-at-all"}),
+]:
+    rc, events = call_hook(hw=ctx_hw, answers=ctx_answers)
+    check(f"probe '{label}' : code de sortie 0", rc, 0)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
@@ -524,6 +857,13 @@ needs. Or it REFUSES, with a sentence - and that refusal reaches the
 operator before a single byte is written to their disk, because the engine
 runs this before partition().
 
+A REFUSAL IS DATA, NOT AN EXCEPTION. Every path through this hook that can
+fail - a GPU snapshot missing its slot, a memory figure that is not a
+number, a host too small to host a guest - must end in a `refuse` event,
+never an uncaught exception. An uncaught exception gives the operator a
+non-zero exit and a traceback they cannot act on; a `refuse` event gives
+them a sentence, before their disk is touched.
+
 READ-ONLY IS A CONVENTION HERE, NOT A SANDBOX. Nothing stops this process
 from writing; what the pipeline depends on is that it does not, and that the
 engine never uses anything it might write. Since this runs before
@@ -539,22 +879,70 @@ sys.path.insert(0, HERE)
 
 import hardware  # noqa: E402
 
-# The guest gets half of host RAM, clamped: enough for a gaming guest, never
-# so much that the host starts swapping. Hugepages are reserved at boot and
-# never handed back, so over-asking costs the host permanently.
+# Guest memory budget. NOT "half the host" - this project already made and
+# corrected that exact mistake: CLAUDE.md's "Hugepages pool halved" finding
+# records a 16584-page pool (double the VM's real need) that left the host
+# swapping, cut down to 8448 pages (~16896 MiB; the VM itself uses ~8205
+# MiB). GUEST_MIB_DEFAULT is pinned to that measured, settled figure -
+# rounded to 16384 MiB (16 GiB) - not derived from host size. Hugepages are
+# reserved at BOOT and NEVER handed back, so over-asking costs the host
+# permanently; that is exactly what made it swap the first time. Do NOT
+# "improve" this back to host_mib // 2 - that IS the mistake, not a
+# conservative default.
+GUEST_MIB_DEFAULT = 16384
+# Below this, the guest is not a usable gaming console - refuse rather than
+# shrink further (see guest_memory_mib).
 GUEST_MIB_MIN = 8192
-GUEST_MIB_MAX = 32768
 
 
 def emit(event: dict) -> None:
     print(json.dumps(event), flush=True)
 
 
-def guest_memory_mib(hw: dict) -> int:
-    total = hw.get("memory_mib") or 0
-    if not total:
-        return GUEST_MIB_MIN
-    return max(GUEST_MIB_MIN, min(GUEST_MIB_MAX, total // 2))
+def guest_memory_mib(hw: dict):
+    """GUEST_MIB_DEFAULT, clamped DOWN if the host cannot spare it.
+
+    Returns (mib, reason). On success `reason` is None. On failure `mib` is
+    None and `reason` names precisely what disqualifies this host - main()
+    turns that straight into a `refuse` event instead of doing arithmetic
+    that can raise.
+
+    The guest never gets more than GUEST_MIB_DEFAULT (see its docstring for
+    why that is a fixed, measured figure rather than a fraction of host
+    RAM), and never more than half the host either - `min(DEFAULT, total //
+    2)`. Below GUEST_MIB_MIN even after that clamp, the machine is refused
+    rather than squeezed further:
+
+    Two distinct failure classes, refused for two distinct reasons:
+
+    - The figure itself is unusable (not a number, or negative) - a
+      malformed snapshot, the same class of problem passthrough_nvme() and
+      isolation_plan() already refuse rather than guess through.
+    - The figure is a real number but the host is too small even for the
+      floor: a console that boots but performs unusably is worse than one
+      that explains why it cannot be installed on this machine - the same
+      reasoning "PCI passthrough only" already applies elsewhere in this
+      hook.
+    """
+    total = hw.get("memory_mib")
+    if total is None or total == 0:
+        # No RAM figure at all: there is nothing to strand-check or clamp
+        # against, so fall back to the floor - the smallest budget a usable
+        # guest needs - rather than assume the generous default on a host
+        # we know nothing about.
+        return GUEST_MIB_MIN, None
+    if isinstance(total, bool) or not isinstance(total, (int, float)):
+        return None, f"quantite de memoire hote illisible : {total!r}"
+    if total < 0:
+        return None, f"quantite de memoire hote negative : {total!r}"
+    budget = min(GUEST_MIB_DEFAULT, total // 2)
+    if budget < GUEST_MIB_MIN:
+        return None, (
+            f"cet hote n'a que {int(total)} MiB de RAM ; il en faut au moins "
+            f"{GUEST_MIB_MIN * 2} MiB pour heberger la console sans priver "
+            "l'hote de toute sa memoire (les hugepages sont reserves au "
+            "demarrage et ne sont jamais rendus)")
+    return int(budget), None
 
 
 def main() -> int:
@@ -567,6 +955,15 @@ def main() -> int:
 
     emit({"event": "progress", "pct": 10, "msg": "Analyse du materiel"})
 
+    # Checked first and independently of the GPU/NVMe/CPU detection below: a
+    # malformed or insufficient memory figure disqualifies the machine on
+    # its own, and failing fast here avoids emitting GPU-detection progress
+    # for a machine that is going to be refused anyway.
+    guest_mib, mem_reason = guest_memory_mib(hw)
+    if mem_reason:
+        emit({"event": "refuse", "reason": mem_reason})
+        return 0
+
     discrete = [g for g in hw.get("gpus") or [] if g.get("discrete")]
     if not discrete:
         emit({"event": "refuse",
@@ -574,7 +971,16 @@ def main() -> int:
                         "carte graphique a passer entierement a la VM"})
         return 0
 
-    slot = discrete[0]["slot"]
+    # A discrete GPU entry with no 'slot' key is a malformed snapshot, not a
+    # machine to crash on: .get() rather than [...] so this refuses like any
+    # other bad-detection path instead of raising KeyError.
+    slot = discrete[0].get("slot") or ""
+    if not slot:
+        emit({"event": "refuse",
+              "reason": "le GPU discret detecte n'a pas d'emplacement PCI "
+                        "(slot) connu"})
+        return 0
+
     ids = hardware.vfio_ids_for_slot(slot)
     if not ids:
         emit({"event": "refuse",
@@ -587,38 +993,47 @@ def main() -> int:
     # IOMMU group with the host cannot be handed over, and falling back to a
     # disk image would silently deliver something slower than what was asked.
     #
-    # passthrough_nvme() RAISES HardwareError on every failure path - no NVMe,
-    # ambiguous candidate, disk owned by the host - and never returns empty.
-    # Catching it is what turns "this machine will not do" into a sentence the
-    # operator reads before their disk is touched, instead of a traceback and
-    # a non-zero exit they cannot act on.
+    # THE OPERATOR'S ANSWER DRIVES THE SELECTION - it is not a cross-check on
+    # a choice made without it. See "Correctif final" at the end of this plan:
+    # deriving the device from "the NVMe that does not back the host root"
+    # works only on an already-installed host; on the ISO it refuses on every
+    # machine.
     wanted = (answers.get("dedicated_nvme") or "").strip()
+    wanted_address = None
+    if wanted:
+        wanted_address = hardware.pci_address_for_device(wanted)
+        if wanted_address is None:
+            emit({"event": "refuse",
+                  "reason": f"impossible de resoudre {wanted} vers une adresse PCI ; "
+                            "ce disque ne peut pas etre passe a la VM"})
+            return 0
+
+    # passthrough_nvme() RAISES HardwareError on every failure path - no NVMe,
+    # an answer that is not an NVMe controller, a device that backs the host
+    # root, an ambiguous auto-selection - and never returns empty. Catching it
+    # is what turns "this machine will not do" into a sentence the operator
+    # reads before their disk is touched.
     try:
-        nvme = hardware.passthrough_nvme()
+        nvme = hardware.passthrough_nvme(wanted_address=wanted_address)
     except hardware.HardwareError as exc:
         emit({"event": "refuse",
               "reason": f"aucun NVMe dedie utilisable en passthrough PCI : {exc}"})
         return 0
 
-    # The dict is a PCI FUNCTION - {address, id, function, bus, slot, domain}.
-    # There is no `device` key, so the operator's /dev/... answer has to be
-    # translated before it can be compared. Skipping this check would let the
-    # install hand over a disk the operator never chose.
-    if wanted:
-        chosen = hardware.pci_address_for_device(wanted)
-        if chosen is None:
-            emit({"event": "refuse",
-                  "reason": f"impossible de resoudre {wanted} vers une adresse PCI ; "
-                            "ce disque ne peut pas etre passe a la VM"})
-            return 0
-        if chosen != nvme["address"]:
-            emit({"event": "refuse",
-                  "reason": f"le disque demande ({wanted}, {chosen}) n'est pas "
-                            f"celui qui peut etre detache ({nvme['address']})"})
-            return 0
-
     ids.append(nvme["id"])
-    plan = hardware.isolation_plan(hw.get("cpu") or {})
+
+    # isolation_plan RAISES on a malformed CPU snapshot rather than translating
+    # it: what it returns lands on the kernel command line, and the allowlist
+    # downstream guards shell metacharacters only - it would happily pass a
+    # semantically nonsensical range like "-1-1". Same contract as
+    # passthrough_nvme above, so the same treatment: a refusal, not a traceback.
+    try:
+        plan = hardware.isolation_plan(hw.get("cpu") or {})
+    except hardware.HardwareError as exc:
+        emit({"event": "refuse",
+              "reason": f"topologie CPU inexploitable : {exc}"})
+        return 0
+
     cmdline = [f"vfio-pci.ids={','.join(ids)}"]
     if plan["nohz_full"]:
         cmdline.append(f"nohz_full={plan['nohz_full']}")
@@ -627,7 +1042,7 @@ def main() -> int:
     emit({"event": "platform",
           "kernel-cmdline": cmdline,
           "modules": [],
-          "hugepages-mib": guest_memory_mib(hw)})
+          "hugepages-mib": guest_mib})
     emit({"event": "done"})
     return 0
 
@@ -692,7 +1107,7 @@ enough for anyone.
 | Phase | What it does |
 |---|---|
 | `resolve` | Read-only. Derives `vfio-pci.ids` from the discrete GPU's PCI slot and the dedicated NVMe, `nohz_full` from the CPU topology, and the hugepage budget from host RAM. **Refuses**, with a reason, a machine with no discrete GPU or no properly isolated NVMe. |
-| `install` | Deploys the libvirt hooks, the host-side scripts and the wake-on-demand units onto the target. |
+| `install` | Places files on the target — la liste exacte est dans `console/README.md` ; elle ne comprend **ni** le dispatcher `qemu`, **ni** les hooks GPU/règles/hugepages, **ni** les unités `vm-trigger-*`. |
 | `activate` | **Not implemented yet** (phase 2b). The Windows guest is still built by hand with `installer/windows-guest/build.py`. |
 
 ## PCI passthrough only
@@ -789,7 +1204,18 @@ grep -rn "scripts/vm-cpu-partition\|scripts/vm-wake-gate\|scripts/handle-vm-star
   | grep -v '^./CHANGELOG.md' | grep -v '^./docs/superpowers/'
 ```
 
-Attendu : seuls `install.sh` (qui disparaît en tâche 5) et `CLAUDE.md` (mis à jour en tâche 7). **Toute autre occurrence est un appelant que ce déplacement casse** — signalez-la.
+Attendu, **inventorié par le contrôleur avant le dispatch** — cinq lieux, pas deux :
+
+| Référence | Sort |
+| --- | --- |
+| `install.sh:106` (`cp … scripts/vm-cpu-partition.sh`) | Laisser : le fichier entier disparaît en tâche 5 |
+| `CLAUDE.md` (3 passages) | Laisser : mis à jour en tâche 7 |
+| `QUICKSTART.md:179` (`install -m 755 scripts/winvm …`) | **Corriger ici** → `console/host/winvm` |
+| `docs/winrm-setup.md:55` | **Corriger ici** → chemin relatif `console/host/winvm`. Il porte aujourd'hui un chemin absolu `/home/mallanic/Projects/Nivuus/scripts/winvm`, vestige d'une disposition antérieure — remplacez-le par un chemin relatif au dépôt, pas par un autre absolu |
+| `console/host/install-winrm-cli.sh:72` (son propre `echo`) | **Corriger ici** → le script se déplace, son message doit suivre |
+| `console/host/libvirt/hooks/qemu.d/Windows/prepare/begin/10-cpu-confine.sh:3` (commentaire) | **Corriger ici** → il dit « Real logic lives in the repo (scripts/vm-cpu-partition.sh) » |
+
+**Toute occurrence hors de cette liste est un appelant que le déplacement casse** — signalez-la.
 
 - [ ] **Step 4: Lancer les tests déplacés**
 
@@ -920,6 +1346,40 @@ with tempfile.TemporaryDirectory() as tmp:
     marker = json.loads((root / "etc/nivuus/retro.json").read_text())
     check("le temoin retro dit non", marker["enabled"], False)
 
+# retro absente du contexte : meme regle - le temoin dit non, pas rien
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    ctx = json.loads(CTX)
+    del ctx["answers"]["retro"]
+    subprocess.run([sys.executable, str(HOOK), "--phase", "install",
+                    "--root", str(root)],
+                   input=json.dumps(ctx), capture_output=True, text=True,
+                   cwd=str(CONSOLE))
+    marker = json.loads((root / "etc/nivuus/retro.json").read_text())
+    check("le temoin retro dit non quand retro est absente", marker["enabled"],
+          False)
+
+# bool("false") est True en Python - le meme piege de coercion deja corrige
+# une fois sur 'required' dans packages/wizard.py. Une chaine, quel que soit
+# son sens de lecture, doit etre refusee, jamais interpretee ; un nombre de
+# meme. La refuser signifie : sortir non-zero, ne rien ecrire, et nommer la
+# cle en cause.
+for bad_value in ("false", "true", 1):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        ctx = json.loads(CTX)
+        ctx["answers"]["retro"] = bad_value
+        proc = subprocess.run(
+            [sys.executable, str(HOOK), "--phase", "install", "--root", str(root)],
+            input=json.dumps(ctx), capture_output=True, text=True,
+            cwd=str(CONSOLE))
+        check(f"retro={bad_value!r} : le hook sort non-zero",
+              proc.returncode != 0, True)
+        check(f"retro={bad_value!r} : erreur nomme 'retro'",
+              "retro" in proc.stderr, True)
+        check(f"retro={bad_value!r} : aucun temoin ecrit",
+              (root / "etc/nivuus/retro.json").exists(), False)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
@@ -1001,6 +1461,28 @@ def write(dest: str, content: str, mode: int = 0o644) -> None:
     os.chmod(dest, mode)
 
 
+def retro_choice(answers: dict) -> bool:
+    """The retrogaming checkbox, accepted only as a genuine boolean.
+
+    `bool("false")` is True in Python - the same coercion trap this project
+    already hit once, on `required: bool(item.get("required", False))` in
+    packages/wizard.py, and fixed there with an explicit isinstance check.
+    The wizard's own validator (_check_value in packages/wizard.py) already
+    refuses a non-boolean 'retro' answer - but this hook reads its context
+    from stdin, and a hand-written config.json driving the engine outside
+    the portal (the standalone path phase 2b exists to enable) never passes
+    through that validator. So the same rule is enforced again here,
+    independently: a value this hook cannot interpret means the caller and
+    the package disagree about the contract, and silently picking a reading
+    is exactly how the original bug happened. Raises ValueError naming the
+    key and the offending value; never coerces.
+    """
+    value = answers.get("retro", False)
+    if not isinstance(value, bool):
+        raise ValueError(f"answer 'retro' expects true/false, got {value!r}")
+    return value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", required=True)
@@ -1009,6 +1491,15 @@ def main() -> int:
     ctx = json.load(sys.stdin)
     answers = ctx.get("answers") or {}
     root = args.root.rstrip("/") or "/"
+
+    # Fail fast, before a single byte lands on the target: a caller and the
+    # package disagreeing about 'retro' is a contract error, not something
+    # to work around mid-placement.
+    try:
+        retro_enabled = retro_choice(answers)
+    except ValueError as exc:
+        print(f"console install: {exc}", file=sys.stderr)
+        return 1
 
     def under(rel: str) -> str:
         return os.path.join(root, rel.lstrip("/"))
@@ -1039,7 +1530,7 @@ def main() -> int:
     # "declined" would otherwise be indistinguishable to the reader.
     emit({"event": "progress", "pct": 80, "msg": "Choix retrogaming enregistre"})
     write(under("etc/nivuus/retro.json"),
-          json.dumps({"enabled": bool(answers.get("retro"))}, indent=2) + "\\n")
+          json.dumps({"enabled": retro_enabled}, indent=2) + "\\n")
 
     emit({"event": "done"})
     return 0
@@ -1089,9 +1580,16 @@ Sur ses sept blocs, cinq sont de la mise en place VM et vivent désormais dans l
 
 **Files:**
 - Delete: `install.sh`
-- Modify: `installer/install-engine/steps/features.py` (`_kvm_vfio_thermal` → `_thermal`, suppression de `_retro`)
+- Modify: `installer/install-engine/steps/features.py` (`_kvm_vfio_thermal` → `_thermal`, suppression de `_retro` et de l'import `from common.retro import retro_state_path`)
 - Modify: `scripts/tests/test_install_engine_features.py`
+- Modify: `scripts/tests/test_retro_marker_bridge.py` — **le pont change de rive, voir ci-dessous**
 - Modify: `installer/install-engine/steps/validate.py` si elle référence `install.sh`
+
+⚠️ **Le pont retro casse à cette tâche si on n'y touche pas.** `test_retro_marker_bridge.py` teste aujourd'hui que `features.retro_state_path` **est** l'objet exporté par `common/retro.py` — or cette tâche retire cet import de `features.py`. Le test échouerait à l'import.
+
+Il ne peut pas simplement être repointé vers le package : **`console/` ne peut rien importer de `installer/`** (contrainte d'autonomie), donc `console/hooks/install.py` porte le chemin en littéral, tandis que `common/retro.py` le porte en constante. Ils coïncident aujourd'hui par la seule vigilance de qui les a tapés — c'est exactement la divergence que ce test existait pour empêcher.
+
+Le garde-fou doit donc changer de nature : au lieu de comparer deux objets Python, **exécuter le hook install du package sur une cible temporaire et vérifier que le fichier atterrit précisément à `common.retro.retro_state_path(cible)`**, le chemin que `windows-guest/build.py` ira lire. C'est un test plus fort que l'ancien : il vérifie l'artefact, pas l'import — et il resterait vrai même si les deux côtés cessaient de partager le moindre symbole, ce qui est justement ce vers quoi la phase 2b les emmène.
 
 **Interfaces:**
 - Consumes: rien
@@ -1414,7 +1912,29 @@ son hook resolve qui refuse une machine qui ne convient pas."
 
 - [ ] **Step 1: Ajouter les suites à l'agrégateur**
 
-Dans `installer/Makefile`, ajouter `test_console_hardware test_console_resolve test_console_install` à la boucle `test-packages`. Mettre à jour le compte annoncé (neuf → douze).
+⚠️ **Le contrôleur a compté avant le dispatch : l'agrégateur couvre 9 suites, et 18 autres existent sans être couvertes.** Comme la CI ne lance **aucun** test Python, une suite hors de cette cible n'est exécutée par personne.
+
+Ajouter les **six** que cette phase a créées ou touchées :
+
+```
+test_common_hardware test_console_hardware test_console_resolve
+test_console_install test_install_engine_features test_retro_marker_bridge
+```
+
+soit **quinze** au total. Mettre à jour le compte annoncé partout où il figure.
+
+Puis, **tenter** les onze `test_windows_guest_*` restantes et ajouter celles qui passent sans root, sans réseau et sans support Windows monté :
+
+```bash
+for t in scripts/tests/test_windows_guest_*.py; do
+  printf '%-46s ' "$(basename "$t")"
+  timeout 120 python3 "$t" >/dev/null 2>&1 && echo "PASSE" || echo "echoue/exige plus"
+done
+```
+
+Ajoutez celles qui passent ; **listez nommément celles qui échouent et pourquoi** dans votre rapport. Elles sont pré-existantes et hors périmètre à réparer — mais une suite que rien n'exécute est une suite qui pourrit, et ce projet n'a aucun filet CI pour le voir.
+
+⚠️ **`test_windows_guest_domain.py` échouera** : elle importe `installer/windows-guest/domain.py`, cassé depuis la tâche 1 (il utilise la moitié précise de `hardware.py`, partie dans le package). C'est attendu et réparé en phase 2b — ne l'ajoutez pas, et notez-la comme telle.
 
 - [ ] **Step 2: Prouver que le moteur planifie et applique `console`**
 
@@ -1453,7 +1973,7 @@ Attendu, **selon la machine** : sur un hôte avec IOMMU, GPU dédié et NVMe dé
 cd installer && make test-packages PYTHON=<python-du-venv>
 ```
 
-Attendu : douze `OK`.
+Attendu : 26 `OK`.
 
 - [ ] **Step 4: Mettre à jour `installer/README.md`**
 
@@ -1510,7 +2030,7 @@ things about it are easy to break:
 detects **capabilities** (coarse: is there an IOMMU, a discrete GPU, a spare
 NVMe — `list_gpus` no longer carries `ids`, `cpu_topology` no longer carries
 `isolcpus`), and `console/hardware.py` detects the **details** in its resolve
-phase. Tests: `cd installer && make test-packages` (12 files).
+phase. Tests: `cd installer && make test-packages` (26 files).
 ```
 
 - [ ] **Step 6: Corriger `QUICKSTART.md`**
@@ -1537,7 +2057,7 @@ Attendu : **aucune sortie**, hors `CLAUDE.md` là où il décrit l'histoire.
 git add -A
 git commit -m "docs(console): brancher le package et aligner la documentation
 
-L agregateur couvre desormais douze suites. README, CLAUDE.md et
+L agregateur couvre desormais 26 suites. README, CLAUDE.md et
 QUICKSTART decrivent ce qui existe : install.sh a disparu, console est
 un package ordinaire, et hardware.py est coupe selon le meme principe
 que tout le reste - le moteur detecte les capacites, le package detecte
@@ -1550,8 +2070,78 @@ les details."
 
 Périmètre de **2b**, volontairement hors sujet ici :
 
-* **`installer/windows-guest/` ne bouge pas.** `domain.py` casse en tâche 1 (il importe la moitié précise de `hardware.py`) et reste cassé jusqu'en 2b. C'est assumé et signalé, pas ignoré.
+* **`installer/windows-guest/` ne bouge pas.** `domain.py` casse en tâche 1 et reste cassé jusqu'en 2b. Mode d'échec **mesuré** : `main()` lève `ImportError: cannot import name 'HardwareError' from 'common.hardware'` dès son entrée (`domain.py:263`, avant le `try`) — pas l'`AttributeError` de `build_domain_xml()`, qui n'est atteignable qu'en appelant cette fonction directement. `scripts/tests/test_windows_guest_production_domain.py` porte désormais un **marqueur d'échec** qui l'assère : il cassera le jour de la réparation, ce qui est le rappel voulu.
 * **`console/hooks/activate.py` ne construit rien.** Il journalise et sort 0, pour que le témoin s'écrive et que systemd cesse de réessayer une unité qui n'a rien à faire.
 * **`installer/common/retro.py` reste partagé** : le hook install du package écrit le témoin, `windows-guest/build.py` le lit encore depuis `installer/`. Le pont ne disparaît qu'en 2b.
 * **Les 13 suites `test_windows_guest_*` restent où elles sont**, sauf `test_windows_guest_hardware.py` que la tâche 1 ampute ou supprime.
 * **La phase 3** (`git filter-repo --path console`) reste intacte, et devient mécanique une fois 2b terminée.
+
+
+---
+
+## Correctif final (2026-08-27, revue de branche)
+
+Trois constats de la revue finale, appliqués en une vague.
+
+### 1. Le package ne s'installait pas depuis l'ISO — son chemin principal
+
+`console/hardware.py::select_passthrough_nvme()` choisissait le NVMe à passer
+en **excluant** ceux qui portent la racine hôte. Mesure :
+
+```
+hote deja installe, racine sur A  -> choisit B          (correct)
+ISO live, racine = overlay        -> REFUS : "host root not identified"
+```
+
+Sur un support live la racine est l'image live : `findmnt -no SOURCE /` rend
+`overlay`, aucun disque PCI ne la porte, `host_root_pci_addresses()` rend
+`None` — le sélecteur refusait donc sur **toutes** les machines. Les
+vérifications matérielles précédentes passaient parce qu'elles s'exécutaient
+sur un hôte déjà installé : le mauvais chemin était exercé. Et la réponse de
+l'opérateur ne pouvait pas rattraper le coup : `resolve.py` lisait
+`dedicated_nvme` **après** que `passthrough_nvme()` ait décidé ou échoué.
+
+**Correctif — la relation est inversée.** `dedicated_nvme` devient le
+sélecteur ; les exclusions deviennent des assertions de sécurité :
+
+* `resolve` traduit d'abord la réponse en adresse PCI
+  (`pci_address_for_device`), puis la passe à
+  `passthrough_nvme(wanted_address=…)`.
+* `select_passthrough_nvme(controllers, host_addresses, wanted_address=None)`
+  cherche le contrôleur correspondant, et refuse s'il n'en existe aucun (le
+  refus nomme l'adresse trouvée **et** les contrôleurs connus).
+* Le refus « ce disque porte la racine hôte » ne s'applique que si la racine
+  **est** identifiable. `host_addresses=None` n'est plus un refus.
+* Sans réponse, l'auto-sélection d'origine reste le repli : un seul candidat
+  non ambigu, sinon refus motivé.
+
+**Garde côté moteur**, là où elle est possible : `plan_packages()` refuse par
+`StepError` une réponse de type `disque` qui désigne le **disque cible de
+l'installation**. Le package ne peut pas le voir — un hook reçoit `hw` et ses
+réponses, jamais la config. C'était aussi le désaccord entre
+`packages/capabilities.py` (qui exclut la cible d'installation) et le package
+(qui excluait la racine hôte) : pendant une install ISO ce ne sont pas les
+mêmes disques.
+
+Tests : `test_console_hardware.py` (fonctions pures, sur texte `lspci`
+capturé) et `test_console_resolve.py` (le hook en sous-processus, avec un faux
+`lspci`, un faux `findmnt` et un faux arbre sysfs via `NIVUUS_SYSFS_BLOCK`,
+donc vrai sur n'importe quelle machine).
+
+### 2. `console/README.md` promettait plus que `install.py` ne fait
+
+Le README annonçait « the libvirt hooks, the host-side scripts and the
+wake-on-demand units ». En réalité `install.py` place `vm-cpu-partition.sh`,
+les deux wrappers CPU, trois scripts hôte et `retro.json` — et **pas** le
+dispatcher `console/host/libvirt/hooks/qemu`, sans lequel les wrappers qu'il
+écrit ne sont jamais exécutés ; ni `bind-vfio-gpu.sh` /
+`rebind-host-gpu.sh`, ni la paire `rules.sh`, ni les hooks hugepages, ni les
+unités `vm-trigger-*`. C'est la parité avec le `install.sh` supprimé, donc le
+déploiement n'a **pas** été élargi : le README dit maintenant exactement ce
+qui est placé, et nomme ce qui attend la phase 2b.
+
+### 3. `domain.py` est mort, et une note vaut moins qu'un test rouge
+
+Voir ci-dessus : `ImportError` à l'entrée de `main()`, marqueur d'échec ajouté
+dans `test_windows_guest_production_domain.py`, `CLAUDE.md` corrigé (mode
+d'échec réel + la commande `domain.py` signalée comme inutilisable).

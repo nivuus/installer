@@ -67,14 +67,88 @@ the live image to disk. Full docs: `installer/README.md`.
 - `installer/iso-build/` — live-build config; hook `0500-nivuus-venv` builds a
   pydantic-v2 venv (bookworm ships v1), hook `9000` enables the services.
 
-**Reuse, don't duplicate:** the engine copies the whole repo to `/opt/nivuus` in
-the target and **calls** `install.sh` inside the chroot. `install.sh` was made
-installer-aware (backward-compatible): `NIVUUS_DIR` now resolves to the script's
-own dir; env hooks `NIVUUS_ASSUME_YES`/`--non-interactive`, `NIVUUS_IN_CHROOT`
-(skip runtime thermal apply), `NIVUUS_ISOLCPUS`, `NIVUUS_IOMMU`, `NIVUUS_VFIO_IDS`
-(generic kernel params instead of the hardcoded `isolcpus=0-15`). `NIVUUS_ISOLCPUS`
-now names the CPUs the VM will pin and is emitted as **`nohz_full=` only, never
-`isolcpus=`** — see "Dynamic host/VM CPU partitioning" below.
+**`install.sh` is gone (2026-08-27).** Five of its seven blocks were VM
+setup and now live in the `console` package (`console/nivuus-package.yaml`
+plus `console/hooks/`); the thermal block became an ordinary
+`install-engine` feature. The `NIVUUS_DIR` / `NIVUUS_IN_CHROOT` /
+`NIVUUS_ISOLCPUS` / `NIVUUS_VFIO_IDS` env plumbing existed only to make that
+script runnable inside a chroot and went with it.
+
+**`console/` is the first Nivuus package, and it is deliberately ordinary.**
+It declares `tier: platform`, claims `gpu` and `nvme` exclusively, and
+requires the `iommu`, `gpu-discrete` and `nvme-dedicated` capabilities. Two
+things about it are easy to break:
+
+* **`vm-cpu-partition.sh` MUST be deployed under `/etc/libvirt/hooks/`**, and
+  `console/hooks/install.py` does so. The libvirtd AppArmor profile grants
+  `/etc/libvirt/hooks/** rmix`, so hooks run *inheriting* that profile, which
+  allows exec of `/bin`, `/sbin`, `/usr/bin` and `/usr/sbin` — but **not**
+  `/usr/local/sbin`. Installed there instead it dies at VM start with a
+  misleading `bad interpreter: Permission denied` and no DENIED line in dmesg.
+* **`nivuus-cpu-mode@{gaming,idle}.service` is a public contract of this
+  repository.** The thermal policy stays here (it is a host policy), but its
+  modes are driven by the package's libvirt hooks. The package calls the unit
+  if it exists and does nothing if it does not — which is what lets it install
+  on a Debian that has never seen this installer.
+* **The `dedicated_nvme` ANSWER chooses the passthrough disk; the host-root
+  exclusion is only an assertion on that choice.** Getting this backwards
+  broke the package's primary path outright: a selector that picks "the NVMe
+  not backing the host root" has nothing to work with on a live ISO — the
+  root is the live image, `findmnt -no SOURCE /` says `overlay`, no PCI disk
+  backs it — so it refused on *every* machine with `host root not
+  identified`. Hardware checks run on an already-installed host pass happily
+  and prove nothing about it. `select_passthrough_nvme()` therefore takes
+  `host_addresses=None` as "the assertion does not apply", never as a
+  refusal, and only falls back to auto-selection when no answer was given.
+  The engine adds the one check the package structurally cannot make —
+  `plan_packages()` refuses a `disque` answer naming the **install target**,
+  because a hook receives `hw` and its own answers but never the install
+  config.
+* **`console/hooks/install.py` places seven things and no more** — the CPU
+  partition script, the two CPU wrappers, three host scripts and
+  `retro.json`. It does **not** deploy `console/host/libvirt/hooks/qemu`,
+  the dispatcher, so the wrappers it does write are never executed; nor the
+  GPU bind/rebind hooks, the `rules.sh` pair, the hugepage hooks, or the
+  `vm-trigger-*` wake units. That is parity with the deleted `install.sh`,
+  not a regression, and `console/README.md` lists it exactly. The console is
+  **not functional from an install alone** until phase 2b.
+
+`hardware.py` is now split by that same principle: `installer/common/hardware.py`
+detects **capabilities** (coarse: is there an IOMMU, a discrete GPU, a spare
+NVMe — `list_gpus` no longer carries `ids`, `cpu_topology` no longer carries
+`isolcpus`), and `console/hardware.py` detects the **details** in its resolve
+phase.
+
+**`domain.py` is DEAD until phase 2b, dated 2026-08-27 — measured, not
+inferred.** Both `domain.py xml` and `domain.py define` fail at `main()`'s
+entry, before any hardware is touched:
+
+```
+main -> ImportError cannot import name 'HardwareError' from 'common.hardware'
+build_domain_xml -> AttributeError module 'common.hardware' has no attribute 'passthrough_nvme'
+```
+
+`main()` does `from common.hardware import HardwareError` (`domain.py:263`)
+*before* the try block, so **ImportError at entry is the real failure mode** —
+the AttributeError deeper in `build_domain_xml()` (`domain.py:233`) is only
+reachable by calling that function directly. `HardwareError`,
+`passthrough_nvme()` and `pci_slot_functions()` all moved to
+`console/hardware.py` in this same phase; both imports are lazy, inside the
+functions, which is *why* merely importing the module does not fail.
+
+Neither is a live command: `python3 installer/windows-guest/domain.py` in the
+Development Commands below is listed for phase-2b context only — it cannot
+run today.
+
+The aggregator now carries a **failing marker** for it:
+`test_windows_guest_production_domain.py` asserts that `main()` raises
+`ImportError`. That test will itself fail the day someone repairs
+`domain.py` — which is the point: remove the marker in the same change as the
+repair. Everything else in that suite calls `domain_xml()` with explicit
+keyword arguments and never goes near hardware detection, and
+`test_windows_guest_domain.py` imports `testdomain.py` (the throwaway LTSC
+generator), not `domain.py` — which is how a green 26-suite run used to say
+nothing at all about this path.
 
 **Package engine (2026-08-27)**: `installer/packages/` implements the
 `nivuus.dev/v1` contract — a declarative `nivuus-package.yaml` plus three hooks
@@ -169,8 +243,20 @@ untouched. Same reason the package state file (`etc/nivuus/packages.json`) is
 written **after each package**, not once at the end: a residue that describes
 itself beats a partially applied install with no record.
 
+**The wizard does not offer packages yet (2026-08-27, a named gap, not a footnote).**
+`webapp/static/js/app.js` and `webapp/templates/wizard.html` call no
+`/api/packages` route — packages exist in the engine and in `discover()`, but
+nothing renders them for a human to pick. The only way to install one today is
+a config carrying `packages: {"console": {...}}` directly (the engine path,
+exercised by `test_install_engine_packages.py` and the end-to-end proof in the
+console-package-hote plan's Task 7), never through the portal. Wiring the
+wizard is deliberately deferred, not forgotten.
+
 Tests: `cd installer && make test-packages`
-(9 files). Spec: `docs/superpowers/specs/2026-08-27-decoupage-installer-console-design.md`.
+(26 files: 9 original + 6 from the console-package phase + all 11
+`test_windows_guest_*` suites, newly wired into an aggregator for the first
+time since the CI runs no Python tests at all). Spec:
+`docs/superpowers/specs/2026-08-27-decoupage-installer-console-design.md`.
 
 **Build & test:** `cd installer && sudo make build-iso` (needs `live-build`).
 `make test-portal` (portal on :8080), `make test-vm` (QEMU UEFI, portal via
@@ -192,7 +278,9 @@ sudo python3 installer/install-engine/run.py --stop-after partition
 
 # ── Windows guest ──────────────────────────────────────────────────────────
 python3 installer/windows-guest/build.py    # unattended LTSC ISO
-python3 installer/windows-guest/domain.py   # define + start the libvirt domain
+python3 installer/windows-guest/domain.py   # CASSE jusqu'a la phase 2b :
+# ImportError des l'entree de main() (HardwareError a quitte common.hardware).
+# Voir "domain.py is DEAD until phase 2b" plus haut.
 python3 installer/windows-guest/retro_sync.py   # retrogaming (OPTIONAL): replay
 # `retro install` with the owner's manifest, refresh the durable witness on
 # D:\state\retro.status, then hold Steam and sync the library. It REFUSES to
@@ -216,7 +304,7 @@ scripts/disk-maintenance.sh --dry-run       # ALWAYS this first when / fills up
 
 ### Host Shell Gotchas (sessions run as root on the live server)
 
-- The interactive zsh profile fetches the public IP at startup and ships broken `localip`/`grep`/`ip` shell functions (`FUNCNEST` errors): shell commands intermittently hang ~2 min, get killed (exit 137/143), or have their output silently eaten. **Workaround: wrap commands in `bash -c '...'`** (bash doesn't inherit the zsh functions), or read `/sys`/files directly (e.g. bridge members via `/sys/class/net/<bridge>/brif/`).
+- The interactive zsh profile fetches the public IP at startup and ships broken `localip`/`grep`/`ip` shell functions (`FUNCNEST` errors): shell commands intermittently hang ~2 min, get killed (exit 137/143), or have their output silently eaten. **Workaround: wrap commands in `bash -c '...'`** (bash doesn't inherit the zsh functions), or read `/sys`/files directly (e.g. bridge members via `/sys/class/net/<bridge>/brif/`). **The `grep` function's precise failure mode: it does NOT prefix recursive matches with `./`** the way real `grep -r`/`grep -rn` does. Any exclusion filter written as `grep -v '^./…'` therefore matches nothing and silently passes everything through unfiltered, and any count derived from its output (`wc -l` on filtered results) comes out wrong in the same silent way — there is no error, just a clean-looking result that is not clean. This produced a false "no dead references" verification in an earlier phase and two wrong suite counts during the console-package-hote plan. **Use `command grep`, or wrap the whole pipeline in `bash -c '...'`** — the zsh function only shadows the bare `grep` invocation.
 - `ot-ctl` (OTBR) output lines end with `\r` (CRLF) — strip it before string comparisons in scripts, or `case "leader"` never matches.
 - **`systemctl` does NOT work from a Claude session (found 2026-08-05).** The session runs in its own **PID namespace** (`readlink /proc/self/ns/pid` ≠ `/proc/1/ns/pid`; `systemd-detect-virt` → `container-other`) while sharing the host mount namespace. systemd authenticates peers with `SO_PEERCRED`, which is meaningless across PID namespaces, so every call fails with **`Failed to connect to system scope bus via local transport: No data available`** — including `env -i` and with the sandbox disabled. **This fails silently for query subcommands** (`systemctl show -p X` just prints nothing), so a check that "returns empty" may mean *unreachable*, not *unset*. Everything else is the real host: `journalctl`, `/sys`, `/proc`, `/dev/mem`, `lspci`, and **writes to `/sys` all work**.
 

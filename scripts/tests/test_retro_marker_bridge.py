@@ -1,42 +1,45 @@
 #!/usr/bin/env python3
-"""Tests that install-engine/steps/features.py and windows-guest/build.py
+"""Tests that the console package's install hook and windows-guest/build.py
 agree on WHERE the retrogaming toggle marker lives on disk.
 
-Both sides used to carry their own independent string literal for this
-path (features.py's old RETRO_STATE_PATH, build.py's old
-DEFAULT_RETRO_MARKER). Renaming either one, alone, silently reintroduced
-exactly the bug task 3 exists to fix: the operator checks retro in the
-wizard, and the guest build never sees it - with all fourteen other test
-files in this repo still green, because none of them exercised the
-connection itself.
+Before task 5, install-engine/steps/features.py wrote this marker through
+common.retro.retro_state_path() - the very function build.py's reader used,
+so a single shared Python object WAS the guarantee. Task 5 moved retro
+entirely into the console package's install hook, and console/ must not
+import anything from installer/ (that self-containment is what lets the
+package run standalone, later, on an already-installed target that has
+never seen this repo's install-engine). So the writer
+(console/hooks/install.py) now carries the marker's relative path as a
+literal ("etc/nivuus/retro.json"), while common/retro.py still carries it
+as a constant for build.py's benefit. The two agree today only because
+whoever typed them was careful - exactly the divergence this test exists
+to catch.
 
-installer/common/retro.py now defines the path once; both sides import it.
-This file proves the two REAL functions still agree - features._retro()
-(the writer, mid-install) and build.read_retro_marker() (the reader, on
-the live host later) - by writing with one and reading with the other
-against the same temporary root. A future edit that reintroduces a second,
-independent literal in either module makes this round trip fail; it does
-not rely on the two sides merely importing the same name today.
-
-It also pins, with ast (not a string search a comment could satisfy), that
-windows-guest/build.py's main() feeds the CLI-resolved value into
-build_retro_psd1() rather than a value hardcoded at that call site - the
-one path in this bridge no filesystem round trip can reach, because main()
-needs a real Windows medium to run end-to-end.
+The guard therefore changes shape: it can no longer compare two Python
+objects, since only one importer of retro_state_path is left. Instead it
+RUNS the real hook - as a subprocess, the way the engine actually invokes
+package hooks - against a temporary root, and asserts the artefact it
+leaves lands exactly at common.retro.retro_state_path(root): the path
+build.py will read on the live host later. That is a STRONGER guarantee
+than the old identity check: it verifies the artefact, not the import, and
+it keeps holding even if the two sides come to share no symbol at all.
 
 Run: python3 scripts/tests/test_retro_marker_bridge.py
 """
 import ast
+import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "installer" / "install-engine"))
+CONSOLE = REPO / "console"
+HOOK = CONSOLE / "hooks" / "install.py"
+
 sys.path.insert(0, str(REPO / "installer" / "windows-guest"))
 sys.path.insert(0, str(REPO / "installer"))
 
-from steps import features  # noqa: E402
 import build  # noqa: E402
 from common import retro as common_retro  # noqa: E402
 
@@ -48,41 +51,53 @@ def check(label, got, want):
         failures.append(f"{label}: got {got!r}, want {want!r}")
 
 
-class FakeEmit:
-    def info(self, stage, pct, msg):
-        pass
+# --- build.py's default marker still resolves through common/retro.py --- #
 
-    def warn(self, stage, pct, msg):
-        pass
-
-
-# --- Single source: both modules resolve through common/retro.py -------- #
-
-check("features.py's writer IS common.retro's path builder (not a copy)",
-      features.retro_state_path is common_retro.retro_state_path, True)
 check("build.py's default marker equals the shared path, rooted at /",
       build.DEFAULT_RETRO_MARKER, common_retro.retro_state_path())
 
-# --- The actual round trip: write with one side, read with the other ---- #
+CTX = json.dumps({
+    "package": {"name": "console", "version": "1.0.0", "root": str(CONSOLE)},
+    "hw": {"gpus": [{"slot": "01:00.0", "discrete": True}]},
+    "answers": {"dedicated_nvme": "/dev/nvme1n1", "retro": True,
+                "admin_password": "hunter2hunter2"},
+})
+
+
+def run_hook(ctx_json: str, root: pathlib.Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(HOOK), "--phase", "install", "--root", str(root)],
+        input=ctx_json, capture_output=True, text=True, cwd=str(CONSOLE))
+
+
+# --- The actual round trip: run the REAL hook, read with the REAL reader - #
+# If either side's path literal/constant were renamed independently, the
+# marker would not be where the other side looks - exactly the bug this
+# bridge exists to catch.
 
 with tempfile.TemporaryDirectory() as tmp:
-    target = pathlib.Path(tmp)
-    features._retro(str(target), {"os-base", "kvm-vfio", "retro"}, FakeEmit())
-    # build.py's own notion of the marker's relative location, rooted at
-    # this temporary "host" instead of the real "/". If either side's path
-    # were renamed independently, the marker would not be where this looks.
-    read_path = target / common_retro.RETRO_STATE_REL_PATH
-    check("build.py finds the marker features.py wrote (enabled)",
-          build.read_retro_marker(str(read_path)), True)
+    root = pathlib.Path(tmp)
+    proc = run_hook(CTX, root)
+    check("le hook install sort 0 (retro coche)", proc.returncode, 0)
+
+    expected = pathlib.Path(common_retro.retro_state_path(str(root)))
+    check("le temoin atterrit exactement la ou common.retro l'attend",
+          expected.is_file(), True)
+    check("build.py lit le temoin depose par le hook (enabled)",
+          build.read_retro_marker(str(expected)), True)
 
 with tempfile.TemporaryDirectory() as tmp:
-    target = pathlib.Path(tmp)
-    # Not selected: features.py writes nothing at all (see
-    # test_install_engine_features.py). build.py must read that absence as
-    # "off", at the very same shared path.
-    read_path = target / common_retro.RETRO_STATE_REL_PATH
-    check("build.py reads no marker as off, at the shared path",
-          build.read_retro_marker(str(read_path)), False)
+    root = pathlib.Path(tmp)
+    ctx = json.loads(CTX)
+    ctx["answers"]["retro"] = False
+    proc = run_hook(json.dumps(ctx), root)
+    check("le hook install sort 0 (retro decoche)", proc.returncode, 0)
+
+    expected = pathlib.Path(common_retro.retro_state_path(str(root)))
+    check("le temoin atterrit exactement la ou common.retro l'attend, meme decoche",
+          expected.is_file(), True)
+    check("build.py lit le temoin depose par le hook (disabled)",
+          build.read_retro_marker(str(expected)), False)
 
 # --- main() must feed the resolved CLI value, not a hardcoded literal --- #
 # Static, but exact: ast.parse means a same-looking comment, or a variable

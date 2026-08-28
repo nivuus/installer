@@ -10,7 +10,7 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="$SCRIPT_DIR/../handle-vm-start.sh"
+TARGET="$SCRIPT_DIR/../../console/host/handle-vm-start.sh"
 
 PASS=0
 FAIL=0

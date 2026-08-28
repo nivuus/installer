@@ -48,13 +48,24 @@ GRUB_CMDLINE_LINUX_DEFAULT="quiet splash isolcpus=0-15 intel_iommu=on iommu=pt v
 
 ### Étape 4: Lancer l'Installation
 
-```bash
-# Installer Nivuus
-sudo ./install.sh
+`install.sh` n'existe plus (2026-08-27) : l'installation passe désormais par
+l'ISO bootable et son assistant web, ou par le moteur d'installation en
+ligne de commande — voir `installer/README.md`.
 
-# Redémarrer (REQUIS pour appliquer isolcpus et IOMMU)
-sudo reboot
+```bash
+# Voie normale : construire l'ISO puis suivre l'assistant web au boot
+cd installer && sudo make build-iso
+
+# Essai sans toucher au disque : moteur en ligne de commande, arrêté avant
+# les étapes destructives (partition/format/mount)
+sudo python3 installer/install-engine/run.py --stop-after partition \
+  --config /path/to/config.json
 ```
+
+Le paramétrage manuel de GRUB décrit à l'étape 3 (`isolcpus`, IOMMU,
+`vfio-pci.ids`) est désormais calculé par l'assistant/le moteur à partir du
+matériel détecté — voir `installer/common/hardware.py` et, pour la console
+de jeu Windows, `console/hardware.py`.
 
 ## Post-Installation
 
@@ -173,10 +184,10 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 ```bash
 # Installer winrm-cli
 cd /home/mallanic/Projects/Nivuus
-sudo ./scripts/install-winrm-cli.sh
+sudo ./console/host/install-winrm-cli.sh
 
 # Installer wrapper winvm
-sudo install -m 755 scripts/winvm /usr/local/bin/winvm
+sudo install -m 755 console/host/winvm /usr/local/bin/winvm
 
 # Configurer credentials
 mkdir -p ~/.config/nivuus
