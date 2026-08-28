@@ -439,6 +439,56 @@ def pci_address_for_device(path: str,
     return _device_to_pci_address(name, sysfs_root)
 
 
+def block_device_size_bytes(device: str, sysfs_root: str = "/sys/block") -> int:
+    """Size in bytes of a block device, read from sysfs - never assumed.
+
+    `activate` sizes the guest's partitions from the REAL size of the
+    dedicated disk, not a hardcoded figure; this is the one read that number
+    comes from.
+
+    `/sys/block/<disk>/size` is ALWAYS expressed in 512-byte sectors,
+    whatever the disk's physical sector size - a 4 KiB-formatted NVMe still
+    reports here in units of 512. Multiplying by the physical sector size
+    would claim eight times the truth; the factor is always 512.
+
+    Passthrough hands the guest the WHOLE PCI device, so a partition name
+    (e.g. nvme1n1p1) must resolve to its parent disk before reading `size`.
+    Unlike /sys/class/block - a flat symlink farm that `_whole_disk_name`
+    resolves via its `partition` marker file plus a realpath walk - /sys/block
+    nests a disk's partitions as real subdirectories of the disk itself
+    (`/sys/block/nvme1n1/nvme1n1p1/`), with no entry for the partition at the
+    top level at all. `_whole_disk_name`'s flat-tree lookup therefore cannot
+    answer this, so the parent is found here by directory containment instead:
+    a name that exists directly under `sysfs_root` is already the whole disk;
+    otherwise it is looked up one level down, inside each disk directory.
+
+    Raises HardwareError if the device cannot be found under `sysfs_root`, or
+    if its `size` file cannot be read.
+    """
+    name = os.path.basename(device.rstrip("/"))
+
+    disk_dir = os.path.join(sysfs_root, name)
+    if not os.path.isdir(disk_dir):
+        disk_dir = None
+        try:
+            disks = os.listdir(sysfs_root)
+        except OSError:
+            disks = []
+        for disk in disks:
+            if os.path.isdir(os.path.join(sysfs_root, disk, name)):
+                disk_dir = os.path.join(sysfs_root, disk)
+                break
+        if disk_dir is None:
+            raise HardwareError(
+                f"block device not found in sysfs: {device} "
+                f"(looked under {sysfs_root})")
+
+    sectors = _read_int(os.path.join(disk_dir, "size"))
+    if sectors is None:
+        raise HardwareError(f"cannot read size for {device} under {disk_dir}")
+    return sectors * 512
+
+
 def vfio_ids_for_slot(slot: str) -> list[str]:
     """Every vendor:device id sharing `slot`, for vfio-pci.ids.
 
