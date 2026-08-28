@@ -34,7 +34,7 @@
 | `console/host/systemd/vm-trigger-{47984,47989}.{socket,service}` | Réveil à la demande, socket-activation | **Créés** — n'existaient qu'en production |
 | `console/host/systemd/vm-trigger-no-start-limit.conf` | Drop-in `StartLimitIntervalSec=0`, partagé par les deux services | **Créé** |
 | `console/host/libvirt/hooks/qemu.d/Windows/**/0*hugepages*.sh` | Rien : trois talons de deux lignes | **Supprimés** |
-| `console/hooks/install.py` | Placement sur la cible | **Étendu** — dispatcher, hooks GPU, paire `rules.sh`, script d'inactivité, sept unités |
+| `console/hooks/install.py` | Placement sur la cible | **Étendu** — dispatcher, hooks GPU, paire `rules.sh`, script d'inactivité, six unités |
 | `console/hooks/activate.py` | Armement au premier démarrage | **Réécrit** — liens symboliques idempotents, plus le talon actuel |
 | `scripts/tests/test_console_host_files.py` | Le dépôt porte bien le cycle complet, et plus de code mort | **Créé** |
 | `scripts/tests/test_console_wake_units.py` | Les unités disent ce que le gate attend | **Créé** |
@@ -65,7 +65,7 @@
 # Hugepages hook removed (static sysctl configuration used)
 ```
 
-Les déployer ne ferait rien, et les documenter comme « à câbler en 2b » a déjà induit le README en erreur une fois. Le pool de hugepages est fixé par `vm.nr_hugepages` dans `/etc/sysctl.d/50-virsh.conf`, que le moteur écrit depuis le `hugepages-mib` du manifeste.
+Les déployer ne ferait rien, et les documenter comme « à câbler en 2b » a déjà induit le README en erreur une fois. Le pool de hugepages est fixé par `vm.nr_hugepages` dans `/etc/sysctl.d/60-nivuus-packages.conf`, que le moteur (`install-engine/steps/packages.py`) écrit depuis le `hugepages-mib` que `console/hooks/resolve.py` calcule et émet dans son événement `platform` — le manifeste ne déclare pas cette clé.
 
 - [ ] **Step 1: écrire le test qui échoue**
 
@@ -438,7 +438,7 @@ Dans `scripts/tests/test_console_install.py`, le premier bloc `with tempfile.Tem
 - [ ] **Step 2: le lancer pour vérifier qu'il échoue**
 
 Run: `python3 scripts/tests/test_console_install.py`
-Expected: FAIL sur le dispatcher, les hooks GPU, la paire `rules.sh`, `vm-idle-shutdown.sh` et les sept unités. Les placements existants passent déjà.
+Expected: FAIL sur le dispatcher, les hooks GPU, la paire `rules.sh`, `vm-idle-shutdown.sh` et les six unités. Les placements existants passent déjà.
 
 - [ ] **Step 3: étendre le hook**
 
@@ -535,7 +535,7 @@ git commit -m "feat(console): install pose le dispatcher, sans quoi rien ne s ex
 
 Les deux wrappers CPU etaient ecrits depuis la phase 2a mais libvirt n avait
 aucun dispatcher pour les appeler. Les hooks GPU, la paire rules.sh, le
-script d inactivite et les sept unites suivent. Les unites sont POSEES et
+script d inactivite et les six unites suivent. Les unites sont POSEES et
 non armees: activate s en charge."
 ```
 
