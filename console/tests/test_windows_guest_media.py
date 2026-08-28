@@ -4,13 +4,13 @@
 The fixture is the real XML metadata of
 en-us_windows_11_iot_enterprise_ltsc_2024_x64_dvd_f6b14814.iso, trimmed of its
 file counters: three LTSC editions, only one of which is the target.
-Run: python3 scripts/tests/test_windows_guest_media.py
+Run: python3 console/tests/test_windows_guest_media.py
 """
 import pathlib
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "installer" / "windows-guest"))
+sys.path.insert(0, str(REPO / "console" / "guest"))
 
 import media  # noqa: E402
 

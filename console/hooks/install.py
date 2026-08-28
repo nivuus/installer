@@ -22,6 +22,16 @@ import sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# The engine launches this file by absolute path (cwd=console/), so Python
+# only puts this script's OWN directory (console/hooks/) on sys.path - not
+# HERE (console/), where retro.py lives. Without this, `import retro` below
+# fails with ModuleNotFoundError the moment the engine (not a developer
+# running the file from console/) invokes the hook.
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+from retro import retro_state_path  # noqa: E402
+
 VM_NAME = "Windows"
 
 HOOK_BASE = f"etc/libvirt/hooks/qemu.d/{VM_NAME}"
@@ -156,12 +166,14 @@ def main() -> int:
         place(os.path.join(HERE, DROPIN_SRC), under(dest), mode=0o644)
 
     # The operator's retrogaming choice, recorded durably on the target.
-    # windows-guest/build.py reads it much later - possibly by hand, possibly
+    # console/guest/build.py reads it much later - possibly by hand, possibly
     # on this very host once it has booted - so it must outlive the installer.
     # An UNCHECKED box writes `false` rather than nothing: "absent" and
-    # "declined" would otherwise be indistinguishable to the reader.
+    # "declined" would otherwise be indistinguishable to the reader. The path
+    # comes from retro.py (imported above), the single source both this
+    # writer and build.py's reader agree on.
     emit({"event": "progress", "pct": 80, "msg": "Choix retrogaming enregistre"})
-    write(under("etc/nivuus/retro.json"),
+    write(retro_state_path(root),
           json.dumps({"enabled": retro_enabled}, indent=2) + "\n")
 
     emit({"event": "done"})

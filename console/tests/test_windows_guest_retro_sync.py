@@ -21,7 +21,7 @@ Deux familles de controles :
     controle qui lit une chaine se satisfait d un commentaire, ou du contrat
     inscrit dans le temoin lui-meme.
 
-Lancer : python3 scripts/tests/test_windows_guest_retro_sync.py
+Lancer : python3 console/tests/test_windows_guest_retro_sync.py
 """
 import ast
 import base64
@@ -33,7 +33,7 @@ import sys
 import threading
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-GUEST = REPO / "installer" / "windows-guest"
+GUEST = REPO / "console" / "guest"
 PROVISION = GUEST / "provision"
 sys.path.insert(0, str(GUEST))
 

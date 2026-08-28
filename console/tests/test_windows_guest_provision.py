@@ -3,14 +3,14 @@
 
 PowerShell cannot run here, so these are the invariants a Linux host can still
 enforce: ordering, no hardcoded drive letters, and the session-1 contract.
-Run: python3 scripts/tests/test_windows_guest_provision.py
+Run: python3 console/tests/test_windows_guest_provision.py
 """
 import pathlib
 import re
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-GUEST = REPO / "installer" / "windows-guest"
+GUEST = REPO / "console" / "guest"
 PROVISION = GUEST / "provision"
 PROBE = GUEST / "probe"
 

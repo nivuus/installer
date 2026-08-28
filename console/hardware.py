@@ -49,6 +49,76 @@ class HardwareError(RuntimeError):
 
 
 # --------------------------------------------------------------------------- #
+# GPU discovery (coarse)                                                      #
+# --------------------------------------------------------------------------- #
+def parse_gpus(raw: str) -> list[dict]:
+    """Discrete GPUs, coarsely - enough for the `gpu-discrete` capability.
+
+    Deliberately WITHOUT the slot's vendor:device ids: those are what
+    vfio-pci.ids needs, and pci_slot_ids()/vfio_ids_for_slot() below derive
+    them from the slot this returns, in this package's own resolve phase.
+
+    This mirrors installer/common/hardware.py::list_gpus(), copied rather
+    than imported per the module docstring - domain.py calls list_gpus()
+    directly, after the reboot, on a host that may never have had the
+    installer on it. Parsing is split from detection (unlike the engine's
+    copy) the same way parse_pci_functions/parse_nvme_controllers already are
+    in this file: it is the only way to test GPU classification without the
+    right hardware attached. Reuses _clean_lspci_desc_from_nn instead of a
+    second quoted-field parser, so list_gpus() below reads `lspci -nn`
+    output - already this module's convention - rather than `-nnmm`.
+
+    NOT identical output to the engine's copy: `slot`, `vendor` and
+    `discrete` carry the same values (verified on real hardware), but
+    `description` does not - `-nn` + _clean_lspci_desc_from_nn drops the
+    bracketed [vendor:device] id text that `-nnmm` keeps (e.g. here
+    "Intel Corporation AlderLake-S GT1" against the engine's
+    "Intel Corporation [8086] AlderLake-S GT1 [4680]"). Harmless today:
+    list_gpus() has exactly one caller in this package - guest/domain.py:226,
+    which reads `discrete` and `slot` and never `description`. (hooks/
+    resolve.py reads the GPU out of the `hw` snapshot the engine hands it, so
+    it goes through the engine's copy, not this one.) If a caller starts
+    reading `description`, this divergence is exactly what to check first.
+    """
+    gpus = []
+    for line in raw.splitlines():
+        # Match VGA/3D/Display controller class entries.
+        if not re.search(r"(VGA compatible|3D|Display) controller", line):
+            continue
+        parts = line.split()
+        if not parts:
+            continue
+        slot = parts[0]
+        desc = _clean_lspci_desc_from_nn(line)
+        low = desc.lower()
+        # Word boundaries matter: "Corporation" contains the substring "ati".
+        if "nvidia" in low:
+            vendor = "nvidia"
+        elif re.search(r"\b(amd|ati|radeon)\b|advanced micro devices", low):
+            vendor = "amd"
+        elif "intel" in low:
+            vendor = "intel"
+        else:
+            vendor = "other"
+        # Treat Intel iGPU as non-discrete (usually the host display).
+        discrete = vendor in ("nvidia", "amd")
+        gpus.append(
+            {
+                "slot": slot,
+                "description": desc,
+                "vendor": vendor,
+                "discrete": discrete,
+            }
+        )
+    return gpus
+
+
+def list_gpus() -> list[dict]:
+    """parse_gpus applied to this machine."""
+    return parse_gpus(_run(["lspci", "-nn"]))
+
+
+# --------------------------------------------------------------------------- #
 # GPU / PCI slot functions (for VFIO passthrough)                            #
 # --------------------------------------------------------------------------- #
 def pci_slot_ids(slot: str) -> list[str]:
@@ -377,6 +447,74 @@ def vfio_ids_for_slot(slot: str) -> list[str]:
     host driver makes the group unassignable.
     """
     return pci_slot_ids(slot)
+
+
+# --------------------------------------------------------------------------- #
+# CPU topology (coarse)                                                       #
+# --------------------------------------------------------------------------- #
+def cpu_topology() -> dict:
+    """CPU topology, coarsely - enough for the `cpu-hybrid` capability.
+
+    Deliberately WITHOUT isolcpus/nohz_full: which CPUs to isolate is only
+    knowable by a package that pins vCPUs, and isolation_plan() below derives
+    them from `performance_cpus` here.
+
+    Returns {model, total_cpus, hybrid, performance_cpus}.
+
+    Strategy (no hardcoded i9-12900K assumptions):
+      * Detect hybrid (Intel P+E) layout from max CPU frequency per core.
+      * performance_cpus lists the top-frequency-tier CPUs on a hybrid layout;
+        empty on a uniform CPU.
+
+    This mirrors installer/common/hardware.py::cpu_topology(), copied rather
+    than imported per the module docstring - domain.py calls it directly,
+    after the reboot, on a host that may never have had the installer on it.
+    Not split into a separate parser: unlike list_gpus() it has no
+    subprocess-text input to isolate, it reads /proc/cpuinfo and sysfs
+    directly.
+    """
+    import glob
+
+    # /proc/cpuinfo is locale-independent (lscpu output is translated).
+    model = ""
+    try:
+        with open("/proc/cpuinfo") as fh:
+            for line in fh:
+                if line.startswith("model name"):
+                    model = line.split(":", 1)[1].strip()
+                    break
+    except OSError:
+        pass
+
+    cpu_dirs = sorted(
+        glob.glob("/sys/devices/system/cpu/cpu[0-9]*"),
+        key=lambda p: int(re.search(r"cpu(\d+)", p).group(1)),
+    )
+    cpus = [int(re.search(r"cpu(\d+)", p).group(1)) for p in cpu_dirs]
+    total = len(cpus)
+
+    freqs: dict[int, int] = {}
+    for cpu in cpus:
+        f = _read_int(f"/sys/devices/system/cpu/cpu{cpu}/cpufreq/cpuinfo_max_freq")
+        if f:
+            freqs[cpu] = f
+
+    hybrid = False
+    performance_cpus: list[int] = []
+    if freqs and len(set(freqs.values())) > 1:
+        # Hybrid layout: performance cores are those at the top frequency tier.
+        top_freq = max(freqs.values())
+        # Allow a small tolerance band (within 5%) for the "performance" tier.
+        threshold = top_freq * 0.95
+        performance_cpus = sorted(c for c, f in freqs.items() if f >= threshold)
+        hybrid = 0 < len(performance_cpus) < total
+
+    return {
+        "model": model,
+        "total_cpus": total,
+        "hybrid": hybrid,
+        "performance_cpus": performance_cpus,
+    }
 
 
 # --------------------------------------------------------------------------- #

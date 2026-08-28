@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the offline payload staged onto the unattend ISO (payload.py).
 
-Run: python3 scripts/tests/test_windows_guest_payload.py
+Run: python3 console/tests/test_windows_guest_payload.py
 """
 import pathlib
 import shutil
@@ -9,7 +9,7 @@ import sys
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "installer" / "windows-guest"))
+sys.path.insert(0, str(REPO / "console" / "guest"))
 
 import payload  # noqa: E402
 

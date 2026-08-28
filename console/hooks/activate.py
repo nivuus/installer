@@ -20,8 +20,8 @@ listen and the idle timer does not tick until a second reboot - while the
 stamp file says the package is activated. So the units are started here
 too, tolerating failure, because the links guarantee the next boot anyway.
 
-The VM itself is still built by hand (windows-guest/build.py then
-domain.py); wiring that in is phase 2c.
+The VM itself is still built by hand (guest/build.py then domain.py, both
+already inside this package); wiring that in is phase 2d.
 """
 import argparse
 import json
@@ -124,7 +124,7 @@ def main() -> int:
 
     emit({"event": "progress", "pct": 100,
           "msg": "console : cycle de vie arme ; l invite Windows se construit "
-                 "encore a la main (windows-guest/build.py)"})
+                 "encore a la main (guest/build.py)"})
     emit({"event": "done"})
     return 0
 

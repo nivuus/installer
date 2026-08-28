@@ -5,7 +5,7 @@ The parsers are pure: they take captured `lspci` text. `_whole_disk_name` is
 exercised against a fake sysfs tree built in a temp dir. So these tests run
 anywhere and do not depend on the machine they execute on.
 
-Run: python3 scripts/tests/test_console_hardware.py
+Run: python3 console/tests/test_console_hardware.py
 """
 import os
 import pathlib
@@ -65,6 +65,63 @@ check(
 
 check("unknown slot yields nothing", hardware.parse_pci_functions(LSPCI, "09:00.0"), [])
 check("empty input yields nothing", hardware.parse_pci_functions("", "01:00.0"), [])
+
+# --- list_gpus/cpu_topology : ce que domain.py appelle apres le reboot ---- #
+# domain.py calls these two directly, and it runs after the reboot on a host
+# where installer/ may never have existed. They are copied, not imported:
+# console/ importing installer/ is what this whole split exists to prevent.
+check("console.hardware expose list_gpus",
+      callable(getattr(hardware, "list_gpus", None)), True)
+check("console.hardware expose cpu_topology",
+      callable(getattr(hardware, "cpu_topology", None)), True)
+
+# Parsing is what can be tested without hardware; detection itself cannot.
+# Feed the parser the same shape `lspci -nn` produces. The first two lines
+# are captured verbatim from the Nivuus host on 2026-08-27
+# (`lspci -nn | grep -iE 'vga|3d|display'`) - it has exactly the targeted
+# layout: an Intel iGPU plus a discrete NVIDIA. This host has no class-[0302]
+# "3D controller" card (a compute/second GPU, exactly what a passthrough
+# console can meet), so the third line is not captured here - it is built in
+# the real `lspci -nn` shape around the well-known real device id 10de:102d
+# (NVIDIA GK210GL "Tesla K80", confirmed present in this machine's own
+# /usr/share/misc/pci.ids), not invented text.
+SAMPLE_LSPCI_VGA = """\
+00:02.0 VGA compatible controller [0300]: Intel Corporation AlderLake-S GT1 [8086:4680] (rev 0c)
+01:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD104 [GeForce RTX 4070] [10de:2786] (rev a1)
+02:00.0 3D controller [0302]: NVIDIA Corporation GK210GL [Tesla K80] [10de:102d] (rev a1)
+"""
+
+gpus = hardware.parse_gpus(SAMPLE_LSPCI_VGA)
+check("un GPU discret est reconnu", [g["slot"] for g in gpus if g["discrete"]],
+      ["01:00.0", "02:00.0"])
+check("l iGPU n est pas discret", [g["discrete"] for g in gpus if g["slot"] == "00:02.0"], [False])
+threed = [g for g in gpus if g["slot"] == "02:00.0"]
+check("la ligne « 3D controller » (classe 0302) est reconnue comme un GPU",
+      len(threed), 1)
+check("la carte 3D est classee nvidia et discrete",
+      [(g["vendor"], g["discrete"]) for g in threed], [("nvidia", True)])
+
+# cpu_topology() actually runs against this machine's real sysfs - there is
+# no captured-text form to feed it (unlike parse_gpus), so only its shape and
+# internal consistency can be checked without hardcoding a value specific to
+# whatever CPU happens to run the test suite.
+topo = hardware.cpu_topology()
+check("cpu_topology rend les cles attendues",
+      {"model", "total_cpus", "hybrid", "performance_cpus"} <= set(topo.keys()), True)
+
+total = topo["total_cpus"]
+performance = topo["performance_cpus"]
+check("performance_cpus ne contient pas de doublon",
+      len(performance), len(set(performance)))
+check("performance_cpus tient dans le nombre total de cpus en ligne",
+      all(0 <= c < total for c in performance), True)
+efficiency = set(range(total)) - set(performance)
+check("performance et le reste des coeurs ne se recoupent pas",
+      set(performance) & efficiency, set())
+check("leur reunion couvre tous les cpus en ligne",
+      set(performance) | efficiency, set(range(total)))
+check("le drapeau hybride s accorde avec l existence de deux classes de coeurs",
+      topo["hybrid"], 0 < len(performance) < total)
 
 # Test the whole-disk name extractor against a fake sysfs tree (same approach
 # as scripts/tests/test_pcie_wifi_link_guard.sh), so this does not depend on

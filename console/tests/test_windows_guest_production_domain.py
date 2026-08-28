@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Tests for the generated production domain (sub-project C).
 
-Run: python3 scripts/tests/test_windows_guest_production_domain.py
+Run: python3 console/tests/test_windows_guest_production_domain.py
 """
+import contextlib
+import io
 import pathlib
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "installer" / "windows-guest"))
-sys.path.insert(0, str(REPO / "installer"))
+sys.path.insert(0, str(REPO / "console" / "guest"))
+sys.path.insert(0, str(REPO / "console"))
 
 import domain  # noqa: E402
+import hardware  # noqa: E402
 
 failures = []
 
@@ -21,14 +24,19 @@ def check(label, got, want):
 
 
 def check_raises(label, exc_type, fn):
+    # exc_type may be a single exception class or a tuple of classes (`except
+    # exc_type` accepts both) -- so the failure message must not assume
+    # `.__name__` exists, which a tuple does not have.
+    want = " or ".join(t.__name__ for t in exc_type) if isinstance(exc_type, tuple) \
+        else exc_type.__name__
     try:
         fn()
     except exc_type:
         return
     except Exception as exc:  # noqa: BLE001
-        failures.append(f"{label}: raised {type(exc).__name__}, want {exc_type.__name__}")
+        failures.append(f"{label}: raised {type(exc).__name__}, want {want}")
         return
-    failures.append(f"{label}: did not raise {exc_type.__name__}")
+    failures.append(f"{label}: did not raise {want}")
 
 
 def parse_cpuset(cpuset_str: str) -> set:
@@ -217,21 +225,17 @@ check("aucun partage n expose une racine",
 check("tous les partages sont des sous-dossiers",
       all(s.count("/") >= 3 for s in _srcs), True)
 
-# --- MARQUEUR D ECHEC : domain.py est mort jusqu a la phase 2b ----------- #
-# Tout ce qui precede appelle domain_xml() avec des arguments explicites et
-# ne touche jamais la detection materielle - donc cette suite, et l agregateur
-# entier, restent verts alors que `domain.py xml` et `domain.py define` sont
-# inutilisables. Le marqueur est la pour que le vert cesse de sur-promettre.
-#
-# main() echoue des son entree, sur `from common.hardware import
-# HardwareError` : ce nom a quitte installer/common/hardware.py quand la
-# moitie precise de la detection est passee dans le package (console/), et
-# domain.py l importe encore. L echec est donc un ImportError a l entree, pas
-# l AttributeError qu on rencontre plus profond dans build_domain_xml().
-#
-# Ce test DOIT casser le jour ou quelqu un repare domain.py en phase 2b :
-# c est exactement le rappel voulu - retirez alors le marqueur en meme temps
-# que la reparation.
+# Prove the test's own sys.path reaches console/hardware.py the same way
+# domain.py's lazy `from hardware import HardwareError` does (Step 3) - this
+# is what lets the assertion below reason about the exception domain.py
+# raises for hardware mismatches without re-importing installer/.
+check("HardwareError vient bien de console/hardware.py",
+      hardware.HardwareError.__module__, "hardware")
+
+# Everything above calls domain_xml() with explicit arguments and never
+# touches hardware detection. This is the one assertion that actually calls
+# main(), which is why phase 2a's wiring break stayed invisible for a whole
+# phase: no suite reached it.
 def _domain_main_xml():
     argv = sys.argv
     sys.argv = ["domain.py", "xml"]
@@ -241,8 +245,114 @@ def _domain_main_xml():
         sys.argv = argv
 
 
-check_raises("domain.py main() reste casse jusqu a la phase 2b",
-             ImportError, _domain_main_xml)
+# Discrete-GPU vendors, by PCI vendor id: NVIDIA and AMD/ATI, the same two
+# families parse_gpus() classifies as discrete. Intel (0x8086) is the iGPU
+# driving the host display and is never a passthrough candidate.
+_DISCRETE_GPU_VENDORS = {"0x10de", "0x1002", "0x1022"}
+_PCI_DEVICES = "/sys/bus/pci/devices"
+
+
+def _discrete_gpu_slots_from_sysfs() -> list[str]:
+    """Discrete GPU addresses, read straight from sysfs.
+
+    Deliberately NOT hardware.list_gpus(): the assertion below exists to
+    catch a list_gpus() that stops seeing the GPU, and a probe sharing that
+    code path would move in lockstep with the bug and keep the suite green.
+    Measured while writing this: with list_gpus() mutated to scan only bus
+    00:, a list_gpus()-based probe reported "no discrete GPU", declared the
+    prerequisites unmet, and swallowed the very refusal it was meant to
+    expose. sysfs answers the same question from an independent source -
+    PCI class 0x03xxxx (display controller) plus the vendor id.
+    """
+    slots = []
+    root = pathlib.Path(_PCI_DEVICES)
+    if not root.is_dir():
+        return slots
+    for dev in sorted(root.iterdir()):
+        try:
+            klass = (dev / "class").read_text().strip()
+            vendor = (dev / "vendor").read_text().strip()
+        except OSError:
+            continue
+        if klass.startswith("0x03") and vendor.lower() in _DISCRETE_GPU_VENDORS:
+            slots.append(dev.name)
+    return slots
+
+
+def _domain_prerequisites() -> tuple[bool, str]:
+    """Does THIS machine carry everything build_domain_xml() requires?
+
+    One discrete GPU (from sysfs, see above), its PCI slot functions, a
+    passthrough NVMe and a readable CPU topology - the same four questions
+    build_domain_xml() asks. Returns (met, why-not) so the caller can tell
+    "this builder has no gaming hardware" - a legitimate refusal - apart
+    from "the wiring is broken", which returns the very same code 1.
+    """
+    slots = _discrete_gpu_slots_from_sysfs()
+    if len(slots) != 1:
+        return False, f"discrete GPUs in sysfs: {slots}"
+    try:
+        if not hardware.pci_slot_functions(slots[0]):
+            return False, f"no PCI function under slot {slots[0]}"
+        hardware.passthrough_nvme()
+        hardware.cpu_topology()
+    except hardware.HardwareError as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    return True, ""
+
+
+# main() must now reach hardware detection instead of dying at import. Catch
+# WIDE here on purpose, then decide: a signature drift in any of the five
+# console/hardware.py entry points build_domain_xml() calls (list_gpus,
+# cpu_topology, passthrough_nvme, pci_slot_functions, HardwareError itself)
+# raises a TypeError, not an ImportError/AttributeError - and a signature
+# drift is exactly the kind of wiring break this split is most exposed to.
+# A narrow except that only watches Import/AttributeError would let a
+# TypeError crash this whole file with a raw traceback instead of a named
+# failure line - the one thing this test exists to avoid, on the failure
+# mode it is most likely to hit. So: catch broadly, then classify. A
+# HardwareError (or a DomainError, if main() is ever changed to let one
+# through - today it is not, both are caught inside main()'s own
+# try/except and turned into return code 1, so this branch is currently
+# unreachable but kept as the documented, deliberate exception for a
+# legitimate refusal) means the wiring works and this particular machine's
+# hardware does not match what build_domain_xml() wants - a real, expected
+# outcome, not a bug. Anything else is a wiring break and must fail loud,
+# named by type and message, not swallowed into a bare traceback.
+_stdout = io.StringIO()
+try:
+    with contextlib.redirect_stdout(_stdout):
+        _rc = _domain_main_xml()
+except (domain.DomainError, hardware.HardwareError) as exc:
+    print("main() a refuse pour une raison materielle legitime: "
+          f"{type(exc).__name__}: {exc}")
+except Exception as exc:  # noqa: BLE001
+    failures.append(
+        f"main() ne casse plus au cablage: raised {type(exc).__name__}: {exc}"
+    )
+else:
+    # Tolerating rc=1 unconditionally would accept a genuine wiring break:
+    # main() turns HardwareError/DomainError into return code 1, so a broken
+    # list_gpus() that reports no discrete GPU exits 1 with "found []" and
+    # nothing goes red. Measured, not assumed. So the tolerance is made
+    # CONDITIONAL on what this machine actually carries: ask console/
+    # hardware.py the same questions build_domain_xml() asks it, and if they
+    # all answer, rc MUST be 0. Nothing here asserts a value specific to this
+    # host - the prerequisites are re-detected at run time, so the suite stays
+    # correct on a builder with no discrete GPU and no spare NVMe.
+    _met, _why = _domain_prerequisites()
+    if _met:
+        check("main() rend 0 sur une machine qui remplit ses prerequis materiels",
+              _rc, 0)
+    else:
+        check("main() ne casse plus au cablage (code de retour connu)",
+              _rc in (0, 1), True)
+    if _rc == 0:
+        print("main() a produit du XML reel sur ce matos "
+              f"({len(_stdout.getvalue())} caracteres)")
+    else:
+        print("main() a rendu 1: "
+              + (_why or "alors que ce materiel remplit les prerequis"))
 
 if failures:
     print(f"FAIL ({len(failures)})")

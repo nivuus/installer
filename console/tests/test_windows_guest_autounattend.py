@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Tests for the Windows unattended answer file renderer.
 
-Run: python3 scripts/tests/test_windows_guest_autounattend.py
+Run: python3 console/tests/test_windows_guest_autounattend.py
 """
 import pathlib
 import sys
 import xml.etree.ElementTree as ET
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "installer" / "windows-guest"))
+sys.path.insert(0, str(REPO / "console" / "guest"))
 
 import autounattend as ua  # noqa: E402
 

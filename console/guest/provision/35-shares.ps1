@@ -72,6 +72,45 @@ foreach ($s in $Shares) {
 # Read back: a service that started is not a share that mounted. virtiofs needs
 # the host side present, and a tag with no matching <filesystem> in the domain
 # XML fails silently at mount time.
+#
+# ET IL EXISTE UN SECOND MODE D ECHEC, QUE CE FILET NE RATTRAPE PAS : LES
+# PARTAGES NE SURVIVENT PAS A L HIBERNATION DE LA VM.
+#
+# Mesure le 2026-08-28. vm-idle-shutdown.sh a hiberne la machine a 11:16:50
+# (« strikes=3/3 », flows=0), une sonde Moonlight l a reveillee a 11:41:43.
+# Cote hote, qemu et les quatre virtiofsd sont alors NEUFS — nes a 11:42:22,
+# releves par « ps -eo pid,lstart » — et le peripherique vhost-user-fs-pci a
+# ete reenumere a froid ; le journal de virtiofsd dit « Client disconnected,
+# shutting down » a 11:16:53Z puis « Client connected » a 11:42:26Z. Cote
+# invite, Windows reprend son image memoire (Kernel-Boot 27, « boot type was
+# 0x2 »), donc les quatre virtiofs.exe SONT TOUJOURS VIVANTS, StartTime du
+# 26/08 22:22 — au-dessus d un tuyau mort. Les volumes WinFsp sont demontes,
+# les quatre lettres ont disparu, et « Test-Path G:\ » rend False.
+#
+# Pourquoi le filet ci-dessus ne joue pas : failureflag= 1 etend la reprise aux
+# sorties EN ERREUR, mais ici virtiofs.exe NE SORT PAS. Le SCM voit quatre
+# services « Running » parfaitement sains. Verifie : aucun evenement Service
+# Control Manager ni WinFsp dans les journaux Systeme et Application depuis
+# l hibernation. La panne est TOTALEMENT SILENCIEUSE — cote console, les jeux
+# disparaissent et rien n explique pourquoi.
+#
+# Le remede immediat, mesure efficace le meme jour :
+#     Get-Service NivuusShare_* | Restart-Service -Force
+# (les virtiofsd hotes attendent deja, connectes, et les lettres sont libres).
+# Un montage CIFS que l hote tiendrait sur G$ est a remonter apres, sa
+# connexion d arbre SMB etant morte avec le volume.
+#
+# Le correctif durable reste A FAIRE, et il n a pas sa place dans ce script,
+# qui ne tourne qu au provisionnement. Deux pistes, la premiere etant le
+# pendant exact du reveil :
+#   - une tache planifiee sur evenement Kernel-Power 107 (« The system has
+#     resumed from sleep ») qui rejoue Restart-Service sur les quatre ;
+#   - une sonde cote hote dans vm-idle-shutdown.sh, qui porte deja trois blocs
+#     « Self-heal » : si Test-Path echoue alors que la VM tourne, redemarrer
+#     les services et le journaliser.
+# La regle a retenir pour l une comme pour l autre : SURVEILLER LA LETTRE, PAS
+# LE SERVICE. C est le raisonnement que ce script tient deja a la relecture
+# ci-dessus ; il manque seulement de le tenir APRES le provisionnement.
 Start-Sleep -Seconds 8
 $missing = @()
 foreach ($s in $Shares) {

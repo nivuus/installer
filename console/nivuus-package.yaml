@@ -29,6 +29,15 @@ apt:
   - libvirt-daemon-system
   - libvirt-clients
   - ovmf
+  # python3-jinja2: guest/domain.py renders the production libvirt domain from
+  # a Jinja template, and guest/autounattend.py, guest/apollo.py and
+  # guest/testdomain.py do the same for the Windows answer file, the Apollo
+  # config and the throwaway test domain. All four travel to the target with
+  # the package (packages.py copies the whole directory), so a standalone
+  # install on an ordinary Debian - which ships no jinja2 by default - could
+  # not generate its own domain without this. Declared here for the same
+  # reason as firewalld above: a package carries its own dependencies.
+  - python3-jinja2
   - virtiofsd
   - bridge-utils
 

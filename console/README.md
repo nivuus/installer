@@ -10,7 +10,7 @@ enough for anyone.
 |---|---|
 | `resolve` | Read-only. Derives `vfio-pci.ids` from the discrete GPU's PCI slot and the dedicated NVMe, `nohz_full` from the CPU topology, and the hugepage budget from host RAM. **Refuses**, with a reason, a machine with no discrete GPU or no properly isolated NVMe. |
 | `install` | Places files on the target — exactly the list below, no more. |
-| `activate` | Arms three of the six systemd units `install` placed (the two wake sockets, the idle-shutdown timer) with a symlink into their `.wants/` directory, then reloads systemd and starts them. It does **not** build the guest: the Windows VM is still made by hand with `installer/windows-guest/build.py` (phase 2c). |
+| `activate` | Arms three of the six systemd units `install` placed (the two wake sockets, the idle-shutdown timer) with a symlink into their `.wants/` directory, then reloads systemd and starts them. It does **not** build the guest: the Windows VM is still made by hand with `console/guest/build.py` (phase 2d). |
 
 ## What `install` actually deploys
 
@@ -66,14 +66,17 @@ while the activation stamp already claimed success. That start is best-effort
 skipped entirely when `--root` points somewhere other than `/`: driving the
 installer's own systemd from a target root would be the wrong machine.
 
-## What `install` does NOT deploy yet (phase 2c)
+## What `install` does NOT deploy yet (phase 2d)
 
 The libvirt hooks, the wake path, and the host scripts are all wired and
 armed — with the host-specific constants listed under **Limites connues**
 below. What is left is the Windows guest itself: `activate` does not build
 it. The console can manage a `Windows` domain **if one already exists** —
-it cannot create one. That is `installer/windows-guest/build.py` +
-`domain.py`, run by hand today, folded into this package in phase 2c.
+it cannot create one. `console/guest/build.py` + `domain.py` already live
+in this package (moved from `installer/windows-guest/` in an earlier
+phase) and `domain.py` produces real domain XML on this hardware — but
+both are still run by hand. Wiring `activate` to drive them is phase 2d's
+work, not this one's.
 
 ## Limites connues
 
@@ -131,9 +134,15 @@ selector deriving from it can only ever refuse. The engine adds the one
 check the package cannot make: it refuses an answer naming the **install
 target**, because a hook never sees the install config.
 
-## What is not here yet
+## Package structure
 
-`installer/windows-guest/` (the unattended LTSC build, the libvirt domain
-generator, the provisioning scripts) still lives outside this directory. It
-moves in phase 2c, after which this package is self-contained and phase 3
-is a `git filter-repo --path console` away.
+Beyond `hooks/` and `host/`, the package also carries:
+
+| Directory | What it holds |
+|---|---|
+| `guest/` | The unattended LTSC build, the libvirt domain generator (`domain.py`), the retrogaming sync, and the provisioning scripts — 41 files, moved here from `installer/windows-guest/` so the package is self-contained. `activate` does not drive any of it yet (see above). |
+| `tests/` | The package's own test suites — 20 files (19 Python plus the shell suite `test_handle_vm_start.sh`), all run by `console/Makefile`'s `test` target, which `installer/Makefile`'s `test-packages` delegates to. |
+
+No file under `console/` imports from `installer/common` or anywhere else
+in `installer/` — the package is self-contained, which is what makes a
+future `git filter-repo --path console` mechanical rather than a rewrite.

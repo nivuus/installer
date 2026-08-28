@@ -53,23 +53,26 @@ test-vm:
 
 # Run the package-engine test suite (no root, no chroot, no ISO).
 #
-# PYTHON is overridable because three of these suites import pydantic, which is
-# NOT in the Debian base: `make test-packages PYTHON=/path/to/venv/bin/python3`.
+# PYTHON is overridable because two of the 11 suites below need a dependency
+# that is NOT in the Debian base: test_webapp_models needs pydantic v2
+# (bookworm ships v1) and test_install_engine_features needs jinja2. Measured
+# suite by suite, 2026-08-28. `make test-packages PYTHON=/path/to/venv/bin/python3`.
 # The CI runs no Python tests at all (ci.yml sets test-paths: ""), so this target
 # is the only aggregator there is - and an aggregator that fails for a missing
 # dependency reads as "the engine is broken", which is the wrong thing to learn.
 #
-# 30 suites (2026-08-28): the original 9, the 6 the console-package phase
-# created or touched, test_console_host_files for versioned-not-deployed files,
-# test_console_wake_units for the VM wake socket units, test_console_activate
-# for the phase that arms them, test_vm_wake_gate for the wake gate itself
-# (it already targets console/host/vm-wake-gate.py and needs neither root nor
-# network - the branch wired the wake UNITS in and left the suite testing the
-# gatekeeper out), and all 11 test_windows_guest_* suites, which run clean
-# standalone (no root, no network, no mounted Windows medium) and were simply
-# never wired into any aggregator before. NOTE: a green run here is not proof
-# that installer/windows-guest/domain.py works - see CLAUDE.md, Installer
-# Architecture, for the coverage gap both domain suites share.
+# 31 suites (2026-08-28, measured): 11 run directly below (the engine/webapp/
+# packages suites that stay outside console/), and 20 are delegated to
+# `console/Makefile`'s own `test` target - every suite testing code that lives
+# under console/ moved to console/tests/ so that a later `git filter-repo
+# --path console` is mechanical (everything the package owns is already under
+# it). That includes the shell suite test_handle_vm_start.sh, wired up on the
+# console side (this loop only ever ran .py files). PYTHON is propagated to the
+# sub-make because 9 console suites import jinja2 - not pydantic, which nothing
+# under console/ uses. console/guest/domain.py is exercised for real by
+# test_windows_guest_production_domain.py, which calls main() end-to-end rather
+# than stubbing it out - see CLAUDE.md, Installer Architecture, "domain.py is
+# REPAIRED", for how that suite closed the gap.
 PYTHON ?= python3
 
 test-packages:
@@ -78,20 +81,12 @@ test-packages:
 	          test_packages_wizard test_packages_runner \
 	          test_install_engine_bootloader test_install_engine_packages \
 	          test_webapp_models \
-	          test_common_hardware test_console_hardware test_console_resolve \
-	          test_console_install test_console_host_files test_console_wake_units \
-	          test_console_activate test_vm_wake_gate \
-	          test_install_engine_features \
-	          test_retro_marker_bridge \
-	          test_windows_guest_apollo test_windows_guest_autounattend \
-	          test_windows_guest_build test_windows_guest_domain \
-	          test_windows_guest_fetch_payload test_windows_guest_iso \
-	          test_windows_guest_media test_windows_guest_payload \
-	          test_windows_guest_production_domain test_windows_guest_provision \
-	          test_windows_guest_retro_sync; do \
+	          test_common_hardware \
+	          test_install_engine_features; do \
 	    echo "--- $$t"; \
 	    $(PYTHON) $(dir $(INSTALLER_DIR))scripts/tests/$$t.py || exit 1; \
 	done
+	@$(MAKE) -C $(dir $(INSTALLER_DIR))console test PYTHON=$(PYTHON)
 
 # Build the secondary ISO that unattends the Windows guest install (root:
 # inspecting the LTSC medium needs a loop mount).
@@ -99,7 +94,7 @@ test-packages:
 windows-unattend:
 	@test -n "$(WINDOWS_ISO)" || { echo "Set WINDOWS_ISO=/path/to/ltsc.iso"; exit 1; }
 	@test -n "$(DRIVERS_DIR)" || { echo "Set DRIVERS_DIR=/path/to/payload"; exit 1; }
-	python3 $(INSTALLER_DIR)/windows-guest/build.py \
+	python3 $(dir $(INSTALLER_DIR))console/guest/build.py \
 	  --windows-iso "$(WINDOWS_ISO)" --drivers-dir "$(DRIVERS_DIR)" \
 	  $(if $(OUTPUT),--output "$(OUTPUT)",)
 

@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Nivuus** is a cloud gaming server infrastructure with comprehensive system monitoring integration. The project consists of:
 
-1. **Installer** (`installer/`): Bootable ISO that installs Nivuus via a web wizard served over a WiFi setup hotspot, plus `windows-guest/` (unattended Windows LTSC guest build for GPU passthrough)
+1. **Installer** (`installer/`): Bootable ISO that installs Nivuus via a web wizard served over a WiFi setup hotspot. The unattended Windows LTSC guest build for GPU passthrough now lives at `console/guest/` (moved out of `installer/windows-guest/`, which no longer exists) — see "Installer Architecture" below.
 2. **Infrastructure Configuration** (`scripts/`, `configs/`): thermal/RAPL policy, VM CPU partitioning, GPU passthrough hooks, PCIe guard, disk maintenance, VM wake-on-demand
 3. **Host documentation** (`docs/`): system audit, VM configuration, thermal campaign, and the superpowers specs/plans
 
@@ -136,9 +136,10 @@ things about it are easy to break:
   Both are now source in `console/host/`. The console is **still not
   functional from an install alone**: `activate` arms the wake/idle units
   but does not build the Windows guest — it can manage a `Windows` domain
-  if one already exists, not create one. That is phase 2c
-  (`installer/windows-guest/` folding into this package, `domain.py`
-  repaired, `activate` building the VM), tracked separately.
+  if one already exists, not create one. `console/guest/` (the former
+  `installer/windows-guest/`, 41 files) and `domain.py` are already inside
+  the package and `domain.py` works (see below) — what is still missing is
+  `activate` driving them, which is phase 2d, tracked separately.
 
 `hardware.py` is now split by that same principle: `installer/common/hardware.py`
 detects **capabilities** (coarse: is there an IOMMU, a discrete GPU, a spare
@@ -146,38 +147,32 @@ NVMe — `list_gpus` no longer carries `ids`, `cpu_topology` no longer carries
 `isolcpus`), and `console/hardware.py` detects the **details** in its resolve
 phase.
 
-**`domain.py` is DEAD until phase 2c, dated 2026-08-27 — measured, not
-inferred.** Phase 2b (2026-08-28, `console/hooks/install.py` + `activate.py`
-wiring the rest of the host-side lifecycle) did not touch it — it was out of
-that plan's scope and stays deferred. Both `domain.py xml` and `domain.py
-define` fail at `main()`'s entry, before any hardware is touched:
+**`domain.py` is REPAIRED, dated 2026-08-28 — measured, not inferred.**
+`python3 domain.py xml`, run from `console/guest/`, now produces real domain
+XML on this hardware (`main()` returns 0 and 5402 characters of XML — see
+`test_windows_guest_production_domain.py`, which calls `main()` for real
+instead of stubbing it out). The break this paragraph used to describe (an
+`ImportError` at `main()`'s entry, because `HardwareError` had moved to
+`console/hardware.py` without `domain.py` following) is fixed: `HardwareError`,
+`passthrough_nvme()` and `pci_slot_functions()` live in `console/hardware.py`,
+and `domain.py` reaches them with `sys.path.insert(0, str(HERE.parent))`
+followed by `from hardware import HardwareError` (`domain.py:262-263`).
 
-```
-main -> ImportError cannot import name 'HardwareError' from 'common.hardware'
-build_domain_xml -> AttributeError module 'common.hardware' has no attribute 'passthrough_nvme'
-```
-
-`main()` does `from common.hardware import HardwareError` (`domain.py:263`)
-*before* the try block, so **ImportError at entry is the real failure mode** —
-the AttributeError deeper in `build_domain_xml()` (`domain.py:233`) is only
-reachable by calling that function directly. `HardwareError`,
-`passthrough_nvme()` and `pci_slot_functions()` all moved to
-`console/hardware.py` in this same phase; both imports are lazy, inside the
-functions, which is *why* merely importing the module does not fail.
-
-Neither is a live command: `python3 installer/windows-guest/domain.py` in the
-Development Commands below is listed for phase-2c context only — it cannot
-run today.
-
-The aggregator now carries a **failing marker** for it:
-`test_windows_guest_production_domain.py` asserts that `main()` raises
-`ImportError`. That test will itself fail the day someone repairs
-`domain.py` — which is the point: remove the marker in the same change as the
-repair. Everything else in that suite calls `domain_xml()` with explicit
-keyword arguments and never goes near hardware detection, and
-`test_windows_guest_domain.py` imports `testdomain.py` (the throwaway LTSC
-generator), not `domain.py` — which is how a green 26-suite run used to say
-nothing at all about this path.
+**The lesson that outlives the bug: that import is lazy on purpose — written
+inside `main()`, not at module scope — and a lazy import lets `import
+domain.py` succeed while calling `domain.main()` still fails.** That is
+exactly why the break was invisible for a whole phase: every suite in the
+aggregator imported the module (which worked) and called `domain_xml()`
+directly with explicit keyword arguments (which never touches hardware
+detection), so a green run said nothing about whether `main()` itself could
+run. `test_windows_guest_production_domain.py` now closes that gap with one
+assertion that actually calls `main()` end-to-end — the only one in the
+suite that does. Keep the import lazy (the comment at `domain.py:259-261`
+explains why: the test's own `sys.path` only carries `console/guest`, and a
+module-scope `import hardware` would break every other test in the file) —
+but never again let "imports cleanly" stand in for "runs cleanly" when a
+lazy import is involved; a suite that only imports proves nothing about the
+function that does the importing.
 
 **Package engine (2026-08-27)**: `installer/packages/` implements the
 `nivuus.dev/v1` contract — a declarative `nivuus-package.yaml` plus three hooks
@@ -281,13 +276,21 @@ exercised by `test_install_engine_packages.py` and the end-to-end proof in the
 console-package-hote plan's Task 7), never through the portal. Wiring the
 wizard is deliberately deferred, not forgotten.
 
-Tests: `cd installer && make test-packages`
-(30 files: 9 original + 6 from the console-package phase + the 3 the
-host-wiring phase added (`test_console_host_files`, `test_console_wake_units`,
-`test_console_activate`) + `test_vm_wake_gate` + all 11
-`test_windows_guest_*` suites, newly wired into an aggregator for the first
-time since the CI runs no Python tests at all). Spec:
-`docs/superpowers/specs/2026-08-27-decoupage-installer-console-design.md`.
+Tests: `cd installer && make test-packages` (needs a Python with `pydantic`
+and `jinja2` — not the Debian base — via `PYTHON=/path/to/venv/bin/python`).
+**31 suites, measured 2026-08-28, exit 0**: 11 run directly by
+`installer/Makefile` (the engine/webapp/packages suites that stay outside
+`console/`), and 20 delegated to `console/Makefile`'s own `test` target —
+the 6 `test_console_*` suites, `test_vm_wake_gate`, `test_retro_marker_bridge`,
+the 11 `test_windows_guest_*` suites and the shell suite
+`test_handle_vm_start.sh`, all of them living under `console/tests/`. That
+last one was wired up on 2026-08-28 (it has its own loop in
+`console/Makefile`, since the Python loop only runs `.py` files): it is the
+only guard on the 2026-08-24 infinite-wake bug, and reintroducing that bug
+was measured to leave every Python suite green. No file under `console/` imports from
+`installer/common` or anywhere else in `installer/` — verified with
+`grep -rn 'from common\|import common' console/`, which returns nothing.
+Spec: `docs/superpowers/specs/2026-08-27-decoupage-installer-console-design.md`.
 
 **Build & test:** `cd installer && sudo make build-iso` (needs `live-build`).
 `make test-portal` (portal on :8080), `make test-vm` (QEMU UEFI, portal via
@@ -307,12 +310,11 @@ make test-vm                            # QEMU UEFI boot; portal via Ethernet fa
 # install engine, staged — stops before the destructive steps
 sudo python3 installer/install-engine/run.py --stop-after partition
 
-# ── Windows guest ──────────────────────────────────────────────────────────
-python3 installer/windows-guest/build.py    # unattended LTSC ISO
-python3 installer/windows-guest/domain.py   # CASSE jusqu'a la phase 2c :
-# ImportError des l'entree de main() (HardwareError a quitte common.hardware).
-# Voir "domain.py is DEAD until phase 2c" plus haut.
-python3 installer/windows-guest/retro_sync.py   # retrogaming (OPTIONAL): replay
+# ── Windows guest (console/guest/, moved out of installer/windows-guest/) ──
+python3 console/guest/build.py    # unattended LTSC ISO
+python3 console/guest/domain.py xml   # inspect the generated domain XML;
+# works today (measured 2026-08-28) - see "domain.py is REPAIRED" plus haut.
+python3 console/guest/retro_sync.py   # retrogaming (OPTIONAL): replay
 # `retro install` with the owner's manifest, refresh the durable witness on
 # D:\state\retro.status, then hold Steam and sync the library. It REFUSES to
 # sync unless that witness says `ok` for the current provisioning run: `retro
@@ -326,8 +328,8 @@ python3 installer/windows-guest/retro_sync.py   # retrogaming (OPTIONAL): replay
 # ── Host scripts ───────────────────────────────────────────────────────────
 scripts/tests/test_pcie_wifi_link_guard.sh  # 16 assertions on a fake sysfs tree
 scripts/tests/test_hw_blackbox.sh           # 26 assertions
-scripts/tests/test_vm_wake_gate.py
-scripts/tests/test_handle_vm_start.sh       # 10 assertions on a fake virsh
+console/tests/test_vm_wake_gate.py
+console/tests/test_handle_vm_start.sh       # 10 assertions on a fake virsh
 scripts/disk-maintenance.sh --dry-run       # ALWAYS this first when / fills up
 ```
 
@@ -640,7 +642,7 @@ Also stuck: 5 orphaned `tdarr-ffmpeg` running **40 h** with their output files a
 
 **Aggravators found in the same window (Sunday 23/08):** `clamav_targeted_scan.sh` (cron `30 4 1 * 0` = every **Sunday 04:30** *and* the 1st of the month; it has **no flock guard**) was caught in the saturation and ran 29 h in D state; and root's crontab runs **`e4defrag /dev/sda1 /dev/sdb1` every Sunday 06:00** — a defrag on the SMR drive, which is actively counterproductive there (band rewrite amplification for no gain). Both were victims/amplifiers, not causes.
 
-**`handle-vm-start.sh`: an unreachable hypervisor was read as a transitional state (fixed 2026-08-24).** `VM_STATE=$(LANG=C virsh domstate "$VM_NAME" 2>/dev/null)` discards stderr, so a dead libvirtd yields `""`, which fell through to the "transitional state" branch → **90 s wait → exit 1 → re-triggered by the next Moonlight probe, forever** (observed: a wake every 91 s from 00:33 to 09:44). The script now has `query_vm_state()` which propagates virsh's exit code and aborts immediately with the real cause. Source is now **versioned in `console/host/handle-vm-start.sh`** (it previously existed only as a deployed file) with `scripts/tests/test_handle_vm_start.sh` (10 assertions against a fake `virsh`; the script honours `VM_TRIGGER_LOCK` so tests don't touch the production lock). Note `VM_PORT` is still hardcoded to 47984 even when invoked for a 47989 wake — harmless today because the libvirt `started/begin/rules.sh` hook installs all forward-ports anyway.
+**`handle-vm-start.sh`: an unreachable hypervisor was read as a transitional state (fixed 2026-08-24).** `VM_STATE=$(LANG=C virsh domstate "$VM_NAME" 2>/dev/null)` discards stderr, so a dead libvirtd yields `""`, which fell through to the "transitional state" branch → **90 s wait → exit 1 → re-triggered by the next Moonlight probe, forever** (observed: a wake every 91 s from 00:33 to 09:44). The script now has `query_vm_state()` which propagates virsh's exit code and aborts immediately with the real cause. Source is now **versioned in `console/host/handle-vm-start.sh`** (it previously existed only as a deployed file) with `console/tests/test_handle_vm_start.sh` (10 assertions against a fake `virsh`; the script honours `VM_TRIGGER_LOCK` so tests don't touch the production lock). Note `VM_PORT` is still hardcoded to 47984 even when invoked for a 47989 wake — harmless today because the libvirt `started/begin/rules.sh` hook installs all forward-ports anyway.
 
 **libvirtd died in the same cascade** and could not restart: `Impossible d'acquérir le fichier pid '/run/libvirtd.pid'` + `Found left-over process … (virtiofsd) in control group`. Four **orphaned `virtiofsd`** from VMs dead 3.3 days were still in libvirtd's cgroup. Kill them (no qemu alive ⇒ they are orphans), then `ResetFailedUnit` + `StartUnit` over D-Bus. Recovery took seconds — do not reach for the flock/`mv the pid files` procedure until you have confirmed a *live* zombie still holds them.
 
@@ -658,11 +660,11 @@ Audited 2026-07-16 — current layout has **zero overlap**, preserve it:
 
 ### VM Wake-on-Demand (cloud gaming)
 
-`vm-trigger-47984.socket` **and `vm-trigger-47989.socket`** (added 2026-07-17 so that merely *opening* Moonlight — which polls serverinfo on 47989 HTTP and/or 47984 HTTPS — wakes the VM; clients must target the HOST LAN IP `192.168.0.1`, not the VM IP, and re-pair once against that entry) (systemd socket-activation, host `0.0.0.0`, `Accept=false`) trigger the oneshot `vm-trigger-{port}.service` → `/usr/local/sbin/vm-wake-gate.py` (**wake gate**, 2026-07-17, source of truth now `console/host/vm-wake-gate.py` + `scripts/tests/test_vm_wake_gate.py`: accepts the pending connection, reads the first bytes, only chains to the wake script if the client speaks Moonlight; port scans/mute connections are logged `wake REJECTED from <ip>` and ignored; syslog tags `vm-wake-gate-{port}`) → `/usr/local/sbin/handle-vm-start.sh`: starts the Windows VM if shut off, waits for its IP (agent then DHCP lease, 180s max), then adds a **runtime** forward-port in the **default** firewalld zone.
+`vm-trigger-47984.socket` **and `vm-trigger-47989.socket`** (added 2026-07-17 so that merely *opening* Moonlight — which polls serverinfo on 47989 HTTP and/or 47984 HTTPS — wakes the VM; clients must target the HOST LAN IP `192.168.0.1`, not the VM IP, and re-pair once against that entry) (systemd socket-activation, host `0.0.0.0`, `Accept=false`) trigger the oneshot `vm-trigger-{port}.service` → `/usr/local/sbin/vm-wake-gate.py` (**wake gate**, 2026-07-17, source of truth now `console/host/vm-wake-gate.py` + `console/tests/test_vm_wake_gate.py`: accepts the pending connection, reads the first bytes, only chains to the wake script if the client speaks Moonlight; port scans/mute connections are logged `wake REJECTED from <ip>` and ignored; syslog tags `vm-wake-gate-{port}`) → `/usr/local/sbin/handle-vm-start.sh`: starts the Windows VM if shut off, waits for its IP (agent then DHCP lease, 180s max), then adds a **runtime** forward-port in the **default** firewalld zone.
 
 **The wake sockets ARE internet-exposed while the VM is off (CRITICAL, found 2026-07-24 — the opposite of what this file claimed).** The belief that "the permanent `external` DNAT `47984/47989→192.168.3.2` means WAN traffic never reaches the host socket" is **wrong**: the libvirt hook `qemu.d/Windows/stopped/end/rules.sh` deletes those forward-ports **from every active zone** when the VM stops (they are re-added by `started/begin/rules.sh`). So exactly when the wake path is armed, the DNAT is gone and the whole internet can reach `0.0.0.0:47984/47989` on `ppp0`. Consequence: **the 47984 test (`data[0] == 0x16`, i.e. "client speaks TLS") matched every mass scanner on the internet.** Over the 30 days to 2026-07-24, *all* wakes it produced were false positives (Driftnet, Linode, Akamai, Datacamp, …) and *zero* came from a real client; the only genuine wakes came from 47989 with `GET /serverinfo`. **Fix: 47984 is out of the wake path** (probes still logged); 47989's HTTP signature is the only wake trigger — proven discriminator, 42 scanner probes rejected, 0 false positive. Remote (off-LAN) wake still works because Moonlight also probes 47989. Residual risk: a scanner that deliberately speaks Sunshine/Moonlight HTTP would still wake the VM — for strict control add a firewalld source-IP allowlist (breaks roaming clients). Diagnostic reflex: `journalctl -t vm-wake-gate-47984 -t vm-wake-gate-47989 | grep accepted` shows the source IP of every wake; `grep dport=4798 /proc/net/nf_conntrack` shows the live scan traffic. `Type=oneshot` + repeated triggering (even *successful* runs — systemd counts starts, not failures: ≥5 Moonlight polls in 10 s during a VM boot window trip it) killed the socket via `service-start-limit-hit` (2026-07-13, again 2026-07-17). **Fixed permanently 2026-07-17**: drop-ins `no-start-limit.conf` (`StartLimitIntervalSec=0`) on both trigger services, `flock` single-instance guard in `handle-vm-start.sh`, and transitional-state handling (waits up to 90 s for `in shutdown`/hibernation to settle instead of exit 1). The idle-check timer also self-heals both sockets every 10 min whenever the VM is off. Manual recovery if ever needed: `systemctl reset-failed vm-trigger-{47984,47989}.{service,socket} && systemctl start vm-trigger-{47984,47989}.socket`.
 
-**`headless_mode` est INTERDIT dans la config Apollo (tranche le 2026-08-27).** Il fait taire un « Fatal: Unable to find display or encoder during startup » qui est une FAUSSE alarme — au repos aucun ecran ne vit sur la 4070 que `adapter_name` epingle, la sonde d'encodeurs echoue donc sur les quatre encodeurs *y compris le logiciel*, ce qui prouve que le GPU n'est pas en cause ; les encodeurs sont re-enumeres des qu'un ecran parait. Mais **il casse le streaming vers le telephone** : avec un ecran deja present, Apollo reconfigure le mode d'un ecran existant au lieu d'en creer un a la resolution demandee, et le client Android sort 0,5 s apres `CLIENT CONNECTED`. Cote telephone le logcat dit `IllegalArgumentException: The surface has been released` dans `MediaCodec.configure()`, quatre tentatives, puis `Video stream start failed: -5` — et Moonlight ferme *proprement*, donc **sans aucun message d'erreur a l'ecran**, ce qui rend le symptome muet. Chronologie : activé 22:20:16 le 26/08, premier echec 22:25:02, le 2410x1080 refonctionne des le retrait. **Le Chromebook et la TV (3840x2160x60) n'ont jamais bronche** — c'est ce qui a fait chercher la cause cote client pendant des heures. Bilan retenu : on garde la banniere cosmetique plutot que le bug. Diagnostic si elle revient : si l'encodeur LOGICIEL echoue lui aussi dans `sunshine.log`, il manque un ecran, pas un GPU. Le test `scripts/tests/test_windows_guest_apollo.py` verrouille l'absence de la cle.
+**`headless_mode` est INTERDIT dans la config Apollo (tranche le 2026-08-27).** Il fait taire un « Fatal: Unable to find display or encoder during startup » qui est une FAUSSE alarme — au repos aucun ecran ne vit sur la 4070 que `adapter_name` epingle, la sonde d'encodeurs echoue donc sur les quatre encodeurs *y compris le logiciel*, ce qui prouve que le GPU n'est pas en cause ; les encodeurs sont re-enumeres des qu'un ecran parait. Mais **il casse le streaming vers le telephone** : avec un ecran deja present, Apollo reconfigure le mode d'un ecran existant au lieu d'en creer un a la resolution demandee, et le client Android sort 0,5 s apres `CLIENT CONNECTED`. Cote telephone le logcat dit `IllegalArgumentException: The surface has been released` dans `MediaCodec.configure()`, quatre tentatives, puis `Video stream start failed: -5` — et Moonlight ferme *proprement*, donc **sans aucun message d'erreur a l'ecran**, ce qui rend le symptome muet. Chronologie : activé 22:20:16 le 26/08, premier echec 22:25:02, le 2410x1080 refonctionne des le retrait. **Le Chromebook et la TV (3840x2160x60) n'ont jamais bronche** — c'est ce qui a fait chercher la cause cote client pendant des heures. Bilan retenu : on garde la banniere cosmetique plutot que le bug. Diagnostic si elle revient : si l'encodeur LOGICIEL echoue lui aussi dans `sunshine.log`, il manque un ecran, pas un GPU. Le test `console/tests/test_windows_guest_apollo.py` verrouille l'absence de la cle.
 
 **Piste voisine, non elucidee** : bug amont ouvert [moonlight-android#1589](https://github.com/moonlight-stream/moonlight-android/issues/1589), meme exception pour toutes les resolutions non-16:9 sur Pixel. Il decrit le meme symptome mais n'etait pas la cause ici.
 

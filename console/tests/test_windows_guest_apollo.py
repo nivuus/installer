@@ -4,14 +4,14 @@
 Every key asserted here was verified present in the Apollo 0.4.6 binary on
 2026-08-22; a typo in a key name is silently ignored by Apollo, so the test is
 the only thing standing between a rendered file and a stream that never gets
-HDR. Run: python3 scripts/tests/test_windows_guest_apollo.py
+HDR. Run: python3 console/tests/test_windows_guest_apollo.py
 """
 import json
 import pathlib
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "installer" / "windows-guest"))
+sys.path.insert(0, str(REPO / "console" / "guest"))
 
 import apollo  # noqa: E402
 

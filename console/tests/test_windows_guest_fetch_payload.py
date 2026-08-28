@@ -5,14 +5,14 @@ Networking is never exercised here: every test either stays on the pure
 `plan_downloads()` path or pre-populates the destination file so `fetch()`
 takes its "already there" branch.
 
-Run: python3 scripts/tests/test_windows_guest_fetch_payload.py
+Run: python3 console/tests/test_windows_guest_fetch_payload.py
 """
 import pathlib
 import sys
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "installer" / "windows-guest"))
+sys.path.insert(0, str(REPO / "console" / "guest"))
 
 import fetch_payload  # noqa: E402
 import payload  # noqa: E402
