@@ -32,6 +32,7 @@ as `~/Projects/Nivuus/packages/<name>`.
 | `nivuus/home-stock` | Garde-manger — household stock as an HA integration |
 | `nivuus/shell` | ZSH environment |
 | `nivuus/design` | Brand identity, mockups and design tokens |
+| `nivuus/media-manager` | Médiathèque (Plex, *arr, Tdarr) — package `nivuus.dev/v1`, tier `userspace` |
 | `nivuus/home-agent` | **archived** — autonomous AI agent (Gemini + ChromaDB) |
 | `nivuus/voice-agent` | **archived** — OpenAI-compatible shim adding HA tool-calling to ollama |
 
@@ -698,4 +699,8 @@ The WAN is a PPPoE session over VLAN 835. **The physical WAN port is now `enp5s0
 - **Firewall Config**: `/configs/firewall/` - firewalld and nftables rules
 - **VM Config**: `/docs/vm-configuration.md` - QEMU/KVM setup with GPU passthrough
 - **Specs & plans**: `/docs/superpowers/` - design documents and implementation plans
+- **Console debts**: `/docs/console-dettes.md` - known gaps on the Windows guest
+  (gamepad rumble, X360-only pad so no motion sensor, off-brand wallpaper). Its
+  counterpart is `docs/dettes.md` in `nivuus/retro`; three of those debts cross
+  the repo boundary, the pad being created here and consumed there.
 - **MQTT agent**: now `nivuus/mqtt` - its CLAUDE.md holds the agent-side documentation

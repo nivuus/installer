@@ -77,6 +77,29 @@ or no properly isolated NVMe: the console is PCI-passthrough only, and a
 silent fallback to a disk image would deliver something slower than what was
 asked for.
 
+### `media-manager`, the first out-of-tree package
+
+`~/Projects/Nivuus/packages/media-manager` is the first package living
+**outside this repository**: fifteen containers (Plex, the *arr suite, Tdarr,
+Bazarr) deposited into `/opt/nivuus/media-manager` and started on first boot.
+
+```bash
+PACKAGE_REPOS="$HOME/Projects/Nivuus/packages/media-manager" sudo -E make build-iso
+```
+
+It has no `resolve`, no `claims` and no `requires`: `tier: userspace`, two
+phases, and its dependencies declared in `apt:`. That is the demonstration
+that the contract is enough for a package which does not touch the boot chain
+— and its lack of a GPU claim is what keeps it co-installable with `console`,
+whose libvirt hooks share the card with its NVENC transcoding node.
+
+Both packages embed together, separated by a space:
+
+```bash
+PACKAGE_REPOS="$PWD/console $HOME/Projects/Nivuus/packages/media-manager" \
+  sudo -E make build-iso
+```
+
 ### Three phases, named relative to the reboot
 
 | Phase | When | Receives | May |
