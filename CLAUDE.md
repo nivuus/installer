@@ -104,14 +104,29 @@ things about it are easy to break:
   `plan_packages()` refuses a `disque` answer naming the **install target**,
   because a hook receives `hw` and its own answers but never the install
   config.
-* **`console/hooks/install.py` places seven things and no more** — the CPU
-  partition script, the two CPU wrappers, three host scripts and
-  `retro.json`. It does **not** deploy `console/host/libvirt/hooks/qemu`,
-  the dispatcher, so the wrappers it does write are never executed; nor the
-  GPU bind/rebind hooks, the `rules.sh` pair, the hugepage hooks, or the
-  `vm-trigger-*` wake units. That is parity with the deleted `install.sh`,
-  not a regression, and `console/README.md` lists it exactly. The console is
-  **not functional from an install alone** until phase 2b.
+* **`console/hooks/install.py` now places the whole host-side lifecycle**
+  (2026-08-28, tasks 1-4 of `2026-08-28-console-cablage-hote`): the libvirt
+  dispatcher, the two GPU hooks, the `rules.sh` pair, `vm-cpu-partition.sh`,
+  the two generated CPU wrappers, four host scripts (`vm-wake-gate.py`,
+  `handle-vm-start.sh`, `winvm`, and `vm-idle-shutdown.sh`), six systemd
+  units plus their shared no-start-limit drop-in copied into two `.d/`
+  directories, and `retro.json`. `console/hooks/activate.py` is no longer a
+  stub: it arms three of those six units (the two wake sockets and the
+  idle-shutdown timer) with a symlink into their `.wants/` directory. The
+  three hugepage hooks (`00-set-hugepages.sh`, `00-hugepages-fix.sh`,
+  `hugepages-reset.sh`) were **deleted**, not deployed — the hugepage pool
+  is already set declaratively by the engine from the manifest's
+  `hugepages-mib`, so deploying them would have done nothing; documenting
+  them as "to be wired" had already misled the README once. The one thing
+  still missing: **`vm-idle-shutdown.sh` was never versioned anywhere before
+  this plan** — same class of gap as `handle-vm-start.sh` before
+  2026-08-24, a script that existed only deployed on the production host.
+  Both are now source in `console/host/`. The console is **still not
+  functional from an install alone**: `activate` arms the wake/idle units
+  but does not build the Windows guest — it can manage a `Windows` domain
+  if one already exists, not create one. That is phase 2c
+  (`installer/windows-guest/` folding into this package, `domain.py`
+  repaired, `activate` building the VM), tracked separately.
 
 `hardware.py` is now split by that same principle: `installer/common/hardware.py`
 detects **capabilities** (coarse: is there an IOMMU, a discrete GPU, a spare
@@ -119,9 +134,11 @@ NVMe — `list_gpus` no longer carries `ids`, `cpu_topology` no longer carries
 `isolcpus`), and `console/hardware.py` detects the **details** in its resolve
 phase.
 
-**`domain.py` is DEAD until phase 2b, dated 2026-08-27 — measured, not
-inferred.** Both `domain.py xml` and `domain.py define` fail at `main()`'s
-entry, before any hardware is touched:
+**`domain.py` is DEAD until phase 2c, dated 2026-08-27 — measured, not
+inferred.** Phase 2b (2026-08-28, `console/hooks/install.py` + `activate.py`
+wiring the rest of the host-side lifecycle) did not touch it — it was out of
+that plan's scope and stays deferred. Both `domain.py xml` and `domain.py
+define` fail at `main()`'s entry, before any hardware is touched:
 
 ```
 main -> ImportError cannot import name 'HardwareError' from 'common.hardware'
@@ -137,7 +154,7 @@ reachable by calling that function directly. `HardwareError`,
 functions, which is *why* merely importing the module does not fail.
 
 Neither is a live command: `python3 installer/windows-guest/domain.py` in the
-Development Commands below is listed for phase-2b context only — it cannot
+Development Commands below is listed for phase-2c context only — it cannot
 run today.
 
 The aggregator now carries a **failing marker** for it:
@@ -278,9 +295,9 @@ sudo python3 installer/install-engine/run.py --stop-after partition
 
 # ── Windows guest ──────────────────────────────────────────────────────────
 python3 installer/windows-guest/build.py    # unattended LTSC ISO
-python3 installer/windows-guest/domain.py   # CASSE jusqu'a la phase 2b :
+python3 installer/windows-guest/domain.py   # CASSE jusqu'a la phase 2c :
 # ImportError des l'entree de main() (HardwareError a quitte common.hardware).
-# Voir "domain.py is DEAD until phase 2b" plus haut.
+# Voir "domain.py is DEAD until phase 2c" plus haut.
 python3 installer/windows-guest/retro_sync.py   # retrogaming (OPTIONAL): replay
 # `retro install` with the owner's manifest, refresh the durable witness on
 # D:\state\retro.status, then hold Steam and sync the library. It REFUSES to

@@ -10,7 +10,7 @@ enough for anyone.
 |---|---|
 | `resolve` | Read-only. Derives `vfio-pci.ids` from the discrete GPU's PCI slot and the dedicated NVMe, `nohz_full` from the CPU topology, and the hugepage budget from host RAM. **Refuses**, with a reason, a machine with no discrete GPU or no properly isolated NVMe. |
 | `install` | Places files on the target — exactly the list below, no more. |
-| `activate` | **Not implemented yet** (phase 2b). The Windows guest is still built by hand with `installer/windows-guest/build.py`. |
+| `activate` | Arms three of the six systemd units `install` placed (the two wake sockets, the idle-shutdown timer) with a symlink into their `.wants/` directory. It does **not** build the guest: the Windows VM is still made by hand with `installer/windows-guest/build.py` (phase 2c). |
 
 ## What `install` actually deploys
 
@@ -19,12 +19,20 @@ package author builds against:
 
 | Placed on the target | Where |
 |---|---|
+| `host/libvirt/hooks/qemu`, the dispatcher | `/etc/libvirt/hooks/qemu` |
 | `host/vm-cpu-partition.sh` | `/etc/libvirt/hooks/vm-cpu-partition.sh` |
+| `host/libvirt/hooks/qemu.d/Windows/prepare/begin/bind-vfio-gpu.sh` | `/etc/libvirt/hooks/qemu.d/Windows/prepare/begin/bind-vfio-gpu.sh` |
+| `host/libvirt/hooks/qemu.d/Windows/release/end/rebind-host-gpu.sh` | `/etc/libvirt/hooks/qemu.d/Windows/release/end/rebind-host-gpu.sh` |
+| `host/libvirt/hooks/qemu.d/Windows/started/begin/rules.sh` | `/etc/libvirt/hooks/qemu.d/Windows/started/begin/rules.sh` |
+| `host/libvirt/hooks/qemu.d/Windows/stopped/end/rules.sh` | `/etc/libvirt/hooks/qemu.d/Windows/stopped/end/rules.sh` |
 | the CPU-confine wrapper (written inline) | `/etc/libvirt/hooks/qemu.d/Windows/prepare/begin/10-cpu-confine.sh` |
 | the CPU-release wrapper (written inline) | `/etc/libvirt/hooks/qemu.d/Windows/release/end/10-cpu-release.sh` |
 | `host/vm-wake-gate.py` | `/usr/local/sbin/vm-wake-gate.py` |
 | `host/handle-vm-start.sh` | `/usr/local/sbin/handle-vm-start.sh` |
+| `host/vm-idle-shutdown.sh` | `/usr/local/sbin/vm-idle-shutdown.sh` |
 | `host/winvm` | `/usr/local/bin/winvm` |
+| `vm-trigger-47984.socket` + `.service`, `vm-trigger-47989.socket` + `.service`, `vm-idle-shutdown.service` + `.timer` (6 units) | `/etc/systemd/system/` |
+| the shared no-start-limit drop-in, copied twice | `/etc/systemd/system/vm-trigger-{47984,47989}.service.d/no-start-limit.conf` |
 | the retrogaming answer | `/etc/nivuus/retro.json` |
 
 `vm-cpu-partition.sh` lands under `/etc/libvirt/hooks/` and nowhere else —
@@ -32,30 +40,21 @@ the libvirtd AppArmor profile grants `/etc/libvirt/hooks/** rmix` but not
 `/usr/local/sbin/*`, so a copy placed there dies at VM start with a
 misleading `bad interpreter: Permission denied` and no DENIED line in dmesg.
 
-## What `install` does NOT deploy yet (phase 2b)
+The six units are placed by `install` at mode `0644` and **not enabled** —
+arming a `0.0.0.0` wake socket for a VM that does not exist yet would be
+exposure with no counterpart. `activate` arms three of them afterwards (the
+two wake sockets and the idle-shutdown timer) with a symlink into their
+`.wants/` directory; the two `vm-trigger-*.service` units and
+`vm-idle-shutdown.service` are never enabled directly, they run via socket
+and timer activation.
 
-This is parity with the `install.sh` this package replaced, not a regression
-— but it means the console is **not yet functional from an install alone**:
+## What `install` does NOT deploy yet (phase 2c)
 
-**Files that exist in `console/host/` but are not placed:**
-- **`host/libvirt/hooks/qemu`, the dispatcher.** Without it, libvirt runs no
-  hook at all, so the two CPU wrappers that *are* written are never executed.
-- `bind-vfio-gpu.sh` / `rebind-host-gpu.sh` — the GPU handover around VM
-  start and stop.
-- the `started/begin/rules.sh` + `stopped/end/rules.sh` pair — the firewalld
-  forward-ports for streaming.
-- the hugepage hooks (`00-set-hugepages.sh`, `00-hugepages-fix.sh`,
-  `hugepages-reset.sh`).
-
-These ship inside `console/host/` and are carried onto the target
-with the package directory, simply not placed. Wiring them is phase 2b's
-work.
-
-**Files that do not exist yet:**
-- the wake-on-demand units `vm-trigger-47984.socket` and
-  `vm-trigger-47989.socket`, and their corresponding `.service` files.
-  `vm-wake-gate.py` and `handle-vm-start.sh` are placed, but these unit
-  files must be written in phase 2b to activate them.
+The libvirt hooks, the wake path, and the host scripts are all wired and
+armed. What is left is the Windows guest itself: `activate` does not build
+it. The console can manage a `Windows` domain **if one already exists** —
+it cannot create one. That is `installer/windows-guest/build.py` +
+`domain.py`, run by hand today, folded into this package in phase 2c.
 
 ## PCI passthrough only
 
@@ -77,5 +76,5 @@ target**, because a hook never sees the install config.
 
 `installer/windows-guest/` (the unattended LTSC build, the libvirt domain
 generator, the provisioning scripts) still lives outside this directory. It
-moves in phase 2b, after which this package is self-contained and phase 3
+moves in phase 2c, after which this package is self-contained and phase 3
 is a `git filter-repo --path console` away.
