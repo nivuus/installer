@@ -177,6 +177,58 @@ with tempfile.TemporaryDirectory() as tmp:
                  lambda: load_manifest(str(d / "int-questions.yaml")),
                  "must be a string")
 
+# --- requires.packages : dépendances entre packages ---------------------
+# Un satellite (tablettes, stocks) doit s'installer APRÈS son socle. Sans ce
+# champ, plan_packages() ordonne alphabétiquement et `home-desk` passe avant
+# `home-manager`.
+dep = parse_manifest({**MINIMAL, "name": "home-desk",
+                      "requires": {"packages": ["home-manager"]}},
+                     "/pkg/home-desk")
+check("requires.packages est lu", dep.packages, ("home-manager",))
+
+check("absence de requires.packages donne un tuple vide",
+      parse_manifest(dict(MINIMAL), "/pkg/demo").packages, ())
+
+check("requires.packages cohabite avec capabilities et features",
+      parse_manifest({**MINIMAL, "requires": {
+          "packages": ["home-manager"], "capabilities": ["iommu"],
+          "features": ["networking"]}}, "/pkg/demo").packages,
+      ("home-manager",))
+
+# Un nom de package devient un répertoire et un nom d'instance systemd : un
+# nom qui ne peut désigner aucun package réel est une erreur, pas une
+# dépendance qu'on cherchera en vain au moment de l'installation.
+check_raises("nom de dépendance invalide refusé",
+             lambda: parse_manifest({**MINIMAL, "requires": {
+                 "packages": ["Home Manager"]}}, "/pkg/demo"),
+             "Home Manager")
+
+# Un package qui dépend de lui-même n'a pas d'ordre d'installation possible.
+# Le tri topologique le verrait comme un cycle ; le dire ici donne un message
+# bien plus clair que « cycle de dépendances : demo -> demo ».
+check_raises("auto-dépendance refusée",
+             lambda: parse_manifest({**MINIMAL, "requires": {
+                 "packages": ["demo"]}}, "/pkg/demo"),
+             "lui-même")
+
+# LE cas qui justifie le durcissement : `package` au singulier est la faute de
+# frappe évidente. Silencieusement ignorée, elle ferait installer un satellite
+# avant son socle sans que rien ne le signale - précisément le mode d'échec que
+# ce module dit vouloir rendre impossible.
+check_raises("clé inconnue sous requires refusée",
+             lambda: parse_manifest({**MINIMAL, "requires": {
+                 "package": ["home-manager"]}}, "/pkg/demo"),
+             "package")
+
+# Non-régression : les deux clés historiques restent acceptées telles quelles.
+legacy = parse_manifest({**MINIMAL, "requires": {
+    "capabilities": ["iommu", "gpu-discrete"],
+    "features": ["networking"]}}, "/pkg/demo")
+check("capabilities toujours lues", legacy.capabilities,
+      ("iommu", "gpu-discrete"))
+check("features toujours lues", legacy.features, ("networking",))
+
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
