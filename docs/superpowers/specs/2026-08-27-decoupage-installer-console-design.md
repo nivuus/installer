@@ -289,13 +289,23 @@ plus de pont, donc plus de garde-fou à maintenir.
 
 Le découpage laisse la place à ces quatre chantiers sans les traiter :
 
-1. **Téléchargement de la dernière version de Windows 11 IoT.** ⚠️ **Il n'existe
-   aucun chemin officiel** : Microsoft ne publie pas de lien direct pour l'ISO IoT
-   Enterprise LTSC — ni au Centre d'évaluation (qui n'offre que Enterprise, pas
-   IoT), ni via l'outil de création de média. Les seules voies connues sont UUP
-   dump (reconstruction depuis les serveurs de mise à jour) ou une ISO fournie
-   par l'utilisateur, ce que `build.py` exige aujourd'hui via `--windows-iso`.
-   **Cette exigence n'est pas acquise et doit être tranchée dans son propre spec.**
+1. **Téléchargement de la dernière version de Windows 11 IoT.** Correction
+   (2026-08-28, vérifiée) : l'affirmation « il n'existe aucun chemin officiel »
+   était fausse. Le fwlink `https://go.microsoft.com/fwlink/?linkid=2270353`
+   redirige (200) vers
+   `26100.1742.240906-0331.ge_release_svc_refresh_CLIENT_IOT_LTSC_EVAL_x64FRE_en-us.iso`
+   — bien une IoT Enterprise LTSC 2024, base 26100/24H2, la même base que celle
+   sur laquelle le HDR a été mesuré de bout en bout dans ce dépôt. Mais le nom
+   porte `_EVAL_` : c'est le média d'**évaluation**, 90 jours. L'invité prouvé en
+   production (`slmgr /dli` → `IoTEnterpriseS edition, VOLUME_MAK channel,
+   License Status: Licensed`) venait de l'ISO **volume**
+   `en-us_windows_11_iot_enterprise_ltsc_2024_x64_dvd_f6b14814.iso`, pas de
+   celle que sert ce fwlink. Une édition Évaluation de Windows **client** ne
+   s'est historiquement jamais convertie en licenciée par `slmgr /ipk` —
+   `DISM /Set-Edition` ne vaut que pour Server. **La question qui reste ouverte
+   n'est donc plus « existe-t-il un lien officiel » (oui) mais « la clé MAK de
+   production licencie-t-elle ce média d'évaluation »** — à mesurer dans son
+   propre spec en phase 2c, jamais à supposer.
 2. **Packages invités optionnels** (Apollo, Steam, retro, et au-delà) — affaire
    interne à `console`, sans contrat public, puisque le point d'extension tiers
    est côté hôte.

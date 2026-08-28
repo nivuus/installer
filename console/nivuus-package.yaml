@@ -17,6 +17,14 @@ platform:
   kernel-cmdline: ["intel_iommu=on", "iommu=pt"]
 
 apt:
+  # firewalld: the wake path and both rules.sh hooks drive firewall-cmd, and
+  # without it no DNAT is ever installed - the VM wakes and nothing reaches
+  # it. It is declared HERE rather than in requires.features, where `firewall`
+  # is an OPTIONAL installer feature: a package declares its own dependencies,
+  # and coupling the console to the engine's feature list would break the
+  # standalone install on an ordinary Debian, which is what this package
+  # exists to allow.
+  - firewalld
   - qemu-kvm
   - libvirt-daemon-system
   - libvirt-clients
