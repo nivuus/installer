@@ -101,12 +101,47 @@ check("un payload different change l empreinte",
 check("une taille de partition differente change l empreinte",
       steps.build_fingerprint(iso="/m/w.iso", payload_files={"a": "h1"},
                               answers={"retro": False}, data_gib=700) == a, False)
-# Secrets shape the guest but must not be hashed alongside the rest: the
-# `secrets` step has its own predicate, comparing file content to the answer.
-check("un secret ne rentre pas dans l empreinte",
+# Secrets are baked INTO the image (the product key and the administrator
+# password into the answer file, the Apollo password into secrets.psd1), so
+# they must move the fingerprint - otherwise `secrets` says "not done" while
+# `build` says "done", and the ISO ships the OLD password.
+with_key = steps.build_fingerprint(iso="/m/w.iso", payload_files={"a": "h1"},
+                                   answers={"retro": False, "ltsc_key": "AAA"},
+                                   data_gib=800)
+check("declarer un secret change l empreinte", with_key == a, False)
+check("changer un secret change l empreinte",
       steps.build_fingerprint(iso="/m/w.iso", payload_files={"a": "h1"},
-                              answers={"retro": False, "ltsc_key": "AAA"},
-                              data_gib=800) == a, True)
+                              answers={"retro": False, "ltsc_key": "BBB"},
+                              data_gib=800) == with_key, False)
+# ... but never in clear: the fingerprint file lives next to the ISO.
+check("le materiau de l empreinte ne porte pas le secret en clair",
+      "AAA" in json.dumps(steps._secret_digest("ltsc_key", "AAA")), False)
+check("deux reponses de meme valeur ne se confondent pas",
+      steps._secret_digest("ltsc_key", "X") == steps._secret_digest("admin_password", "X"),
+      False)
+
+# --- les entrees de construction du paquet ------------------------------ #
+# A package upgrade must not reuse an ISO built by the previous version.
+check("les entrees de construction changent l empreinte",
+      steps.build_fingerprint(iso="/m/w.iso", payload_files={"a": "h1"},
+                              answers={"retro": False}, data_gib=800,
+                              build_inputs={"guest/build.py": "d1"}) == a, False)
+check("et une entree modifiee aussi",
+      steps.build_fingerprint(iso="/m/w.iso", payload_files={"a": "h1"},
+                              answers={"retro": False}, data_gib=800,
+                              build_inputs={"guest/build.py": "d1"}) ==
+      steps.build_fingerprint(iso="/m/w.iso", payload_files={"a": "h1"},
+                              answers={"retro": False}, data_gib=800,
+                              build_inputs={"guest/build.py": "d2"}), False)
+real_inputs = steps.package_inputs()
+check("le paquet reel declare bien build.py parmi ses entrees",
+      "guest/build.py" in real_inputs, True)
+check("et le gabarit du fichier de reponses",
+      "guest/templates/autounattend.xml.j2" in real_inputs, True)
+check("et l arborescence de provisionnement",
+      any(k.startswith("guest/provision/") for k in real_inputs), True)
+check("aucune entree du paquet ne manque",
+      sorted(k for k, v in real_inputs.items() if v == "missing"), [])
 
 # --- un fichier d empreinte illisible veut dire RECONSTRUIRE ------------- #
 with tempfile.TemporaryDirectory() as tmp:
@@ -176,6 +211,11 @@ def by_name(plan_list):
     return {s.name: s for s in plan_list}
 
 
+def arg(cmd, flag):
+    """The value a flag actually carries - presence alone proves nothing."""
+    return cmd[cmd.index(flag) + 1] if flag in cmd else None
+
+
 NO_DOMAIN = {"dumpxml": (1, ""), "domstate": (1, "")}
 RUNNING = {"dumpxml": (0, "<domain/>"), "domstate": (0, "running\n")}
 OFF = {"dumpxml": (0, "<domain/>"), "domstate": (0, "shut off\n")}
@@ -199,22 +239,40 @@ with tempfile.TemporaryDirectory() as tmp:
     payload_cmd = st["payload"].command
     check("payload appelle fetch_payload.py",
           payload_cmd[1].endswith("guest/fetch_payload.py"), True)
-    check("payload passe --drivers-dir", "--drivers-dir" in payload_cmd, True)
+    check("payload passe --drivers-dir avec le meme repertoire que build",
+          arg(payload_cmd, "--drivers-dir"), os.path.join(tmp, "payload"))
     check("payload passe le choix retro explicitement",
           "--no-retro" in payload_cmd, True)
 
     build_cmd = st["build"].command
     check("build appelle build.py", build_cmd[1].endswith("guest/build.py"), True)
-    for flag in ("--windows-iso", "--drivers-dir", "--output", "--key-file",
-                 "--password-file", "--apollo-password-file", "--apollo-user",
-                 "--data-partition-gb", "--hostname", "--no-retro"):
-        check(f"build passe {flag}", flag in build_cmd, True)
+    # Presence is NOT enough: swapping --password-file and
+    # --apollo-password-file leaves every flag present, and hands the Windows
+    # Administrator the Apollo password. Each flag is pinned to its value.
+    secrets_dir = os.path.join(tmp, "secrets")
+    expected_args = {
+        "--windows-iso": ANSWERS["windows_iso"],
+        "--drivers-dir": os.path.join(tmp, "payload"),
+        "--output": os.path.join(tmp, "nivuus-unattend.iso"),
+        "--key-file": os.path.join(secrets_dir, "windows-ltsc.key"),
+        "--password-file": os.path.join(secrets_dir, "windows-admin.pass"),
+        "--apollo-password-file": os.path.join(secrets_dir, "apollo-ui.pass"),
+        "--apollo-user": "nivuus",
+        "--hostname": "NIVUUS-WIN",
+        "--data-partition-gb": str(steps.data_partition_gib(DISK_BYTES)),
+    }
+    for flag, want in expected_args.items():
+        check(f"build passe {flag} avec sa valeur", arg(build_cmd, flag), want)
+    check("build passe le choix retro explicitement",
+          "--no-retro" in build_cmd, True)
     check("build ne met JAMAIS un secret sur la ligne de commande",
           any(ANSWERS[k] in build_cmd
               for k in ("ltsc_key", "admin_password", "apollo_password")), False)
-    check("build dimensionne la partition de jeux depuis le disque reel",
-          build_cmd[build_cmd.index("--data-partition-gb") + 1],
-          str(steps.data_partition_gib(DISK_BYTES)))
+    # The three secret files carry three DIFFERENT paths: a copy/paste that
+    # points two flags at one file is caught here even if both files exist.
+    check("les trois fichiers de secret sont distincts",
+          len({arg(build_cmd, f) for f in ("--key-file", "--password-file",
+                                           "--apollo-password-file")}), 3)
 
     define_cmd = st["define"].command
     check("define appelle domain.py define",
@@ -238,7 +296,12 @@ with tempfile.TemporaryDirectory() as tmp:
     os.chmod(key_file, 0o644)
     check("un secret lisible par le groupe doit etre reecrit",
           st["secrets"].already_done(), False)
-    os.chmod(key_file, 0o600)
+    # Rewriting over a file that already exists in 0644 must land in 0600:
+    # os.open's mode only applies at CREATION, so the fchmod is what fixes it.
+    os.chmod(key_file, 0o644)
+    st["secrets"].run()
+    check("reecrire par-dessus un fichier trop ouvert le referme",
+          os.stat(key_file).st_mode & 0o777, 0o600)
     # A stale value is not "done" either: the answer changed, the file must.
     other = by_name(plan(tmp, FakeVirsh(NO_DOMAIN), {"ltsc_key": "ZZZZZ"}))
     check("un secret perime doit etre reecrit",
@@ -275,6 +338,21 @@ with tempfile.TemporaryDirectory() as tmp:
                            {"windows_iso": str(source_iso), "retro": True}))
     check("changer une reponse invalide l empreinte",
           changed["build"].already_done(), False)
+    # The one that used to slip through: a new administrator password left
+    # `secrets` undone but `build` done, so the ISO shipped the OLD password.
+    for secret in ("admin_password", "ltsc_key", "apollo_password"):
+        moved = by_name(plan(tmp, FakeVirsh(NO_DOMAIN),
+                             {"windows_iso": str(source_iso),
+                              secret: "une-toute-autre-valeur"}))
+        check(f"changer {secret} force la reconstruction de l ISO",
+              moved["build"].already_done(), False)
+    # And a package upgrade must not reuse the previous version's ISO.
+    upgraded = steps.plan_steps(
+        dict(ANSWERS, guest_workdir=tmp, windows_iso=str(source_iso)), {}, tmp,
+        virsh=FakeVirsh(NO_DOMAIN), size_of=lambda d: DISK_BYTES,
+        build_inputs={"guest/build.py": "une-version-suivante"})
+    check("une mise a jour du paquet force la reconstruction de l ISO",
+          by_name(upgraded)["build"].already_done(), False)
     # A missing medium cannot be fingerprinted: rebuild, never skip.
     gone = by_name(plan(tmp, FakeVirsh(NO_DOMAIN),
                         {"windows_iso": str(pathlib.Path(tmp) / "absent.iso")}))
@@ -307,6 +385,37 @@ with tempfile.TemporaryDirectory() as tmp:
     st = by_name(plan(tmp, FakeVirsh({})))
     check("un virsh injoignable ne fait sauter aucune etape",
           (st["define"].already_done(), st["start"].already_done()), (False, False))
+
+
+# --- les etats du domaine dont il faut SORTIR --------------------------- #
+# `in shutdown` and `crashed` are not successes: read as "already started"
+# they would leave a crashed guest untouched and the console dark.
+for state, up in (("running", True), ("idle", True), ("paused", True),
+                  ("pmsuspended", True), ("shut off", False),
+                  ("in shutdown", False), ("crashed", False)):
+    with tempfile.TemporaryDirectory() as tmp:
+        st = by_name(plan(tmp, FakeVirsh({"dumpxml": (0, "<domain/>"),
+                                          "domstate": (0, state + "\n")})))
+        check(f"domstate '{state}' compte comme demarre", st["start"].already_done(), up)
+
+
+# --- un echec nomme la commande, pas son premier argument ---------------- #
+check("un script est nomme par son fichier",
+      steps.command_label(["/usr/bin/python3", "/opt/x/guest/build.py", "--a"]),
+      "build.py")
+check("virsh est nomme virsh, jamais 'start'",
+      steps.command_label(["virsh", "start", "Windows"]), "virsh")
+
+
+# --- la dependance que la chaine appelle vraiment ------------------------ #
+# guest/unattend_iso.py runs the `xorriso` binary; without the package, the
+# activate phase fetches the whole payload and only then dies at image
+# creation. Same class of gap as firewalld and python3-jinja2 before it.
+iso_src = pathlib.Path(CONSOLE, "guest", "unattend_iso.py").read_text()
+manifest = pathlib.Path(CONSOLE, "nivuus-package.yaml").read_text()
+check("unattend_iso.py appelle bien xorriso", '"xorriso"' in iso_src, True)
+check("et le manifeste le declare",
+      any(line.strip() == "- xorriso" for line in manifest.splitlines()), True)
 
 
 # --- les refus nomment leur cause --------------------------------------- #

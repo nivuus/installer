@@ -62,6 +62,12 @@ MIN_GAMES_GIB = 100
 
 # guest/domain.py's DOMAIN_NAME. Same copy-not-import reason.
 DOMAIN_NAME = "Windows"
+# The states in which the guest is already up, listed positively rather than
+# excluding "shut off". `in shutdown` and `crashed` are states to get OUT of,
+# not successes: read as "already started" they would leave a crashed guest
+# untouched and the console dark. virsh emits them in English under LC_ALL=C,
+# which default_virsh forces.
+DOMAIN_UP_STATES = frozenset({"running", "idle", "paused", "pmsuspended"})
 # guest/build.py's own defaults for the two answers the wizard does not ask.
 DEFAULT_APOLLO_USER = "nivuus"
 DEFAULT_HOSTNAME = "NIVUUS-WIN"
@@ -107,19 +113,41 @@ def data_partition_gib(disk_bytes: int) -> int:
     return games
 
 
+def _secret_digest(key: str, value: object) -> str:
+    """Irreversible stand-in for a secret, for the fingerprint material.
+
+    The fingerprint file sits next to the ISO. Putting a password in it in
+    clear would undo the care taken to keep secrets off argv, so what enters
+    the material is a digest, domain-separated by the answer's own name so
+    two answers holding the same string still read as different inputs.
+    """
+    return hashlib.sha256(f"{key}\x00{value}".encode("utf-8")).hexdigest()
+
+
 def build_fingerprint(iso: str, payload_files: Mapping[str, str],
-                      answers: Mapping[str, object], data_gib: int) -> str:
+                      answers: Mapping[str, object], data_gib: int,
+                      build_inputs: Mapping[str, str] | None = None) -> str:
     """Identity of what ENTERS the image, as a hex digest.
 
     Dates are deliberately not part of it: the payload gets touched without
     the ISO needing a rebuild, and the reverse happens too. What counts is
     the source medium's identity, the payload tree, the answers that shape
-    the image, and the partition size derived from the disk.
+    the image, the partition size derived from the disk, and the package's
+    own build inputs.
 
-    The three secrets are excluded: they shape the guest but the `secrets`
-    step has its own predicate, comparing each file's content to its answer.
-    Every OTHER answer is included, known or not - a new answer added later
-    enters the fingerprint by default, which errs towards rebuilding.
+    THE SECRETS COUNT TOO, and that is not obvious: each of the three is
+    baked into the image (the product key and the administrator password
+    into the answer file, the Apollo password into secrets.psd1). Leaving
+    them out let `secrets` report "not done" while `build` reported "done",
+    so a changed administrator password shipped an ISO still carrying the
+    old one - exactly the failure this mechanism exists to prevent. They
+    enter as digests, never in clear: see _secret_digest.
+
+    `build_inputs` is the package's own code and data that shape the image -
+    build.py, the answer-file template, provision/, assets/. Without it, a
+    package upgrade would happily reuse an ISO built by the previous
+    version. It is a parameter rather than a read, so this function stays
+    pure; plan_steps always supplies it (see package_inputs).
     """
     material = {
         "version": FINGERPRINT_VERSION,
@@ -127,6 +155,9 @@ def build_fingerprint(iso: str, payload_files: Mapping[str, str],
         "payload": {name: payload_files[name] for name in sorted(payload_files)},
         "answers": {key: answers[key] for key in sorted(answers)
                     if key not in SECRET_FILES},
+        "secrets": {key: _secret_digest(key, answers[key])
+                    for key in sorted(SECRET_FILES) if key in answers},
+        "inputs": {name: build_inputs[name] for name in sorted(build_inputs or {})},
         "data_gib": data_gib,
     }
     blob = json.dumps(material, sort_keys=True, default=repr, ensure_ascii=False)
@@ -174,6 +205,8 @@ def payload_tree(directory: str) -> dict[str, str]:
     """
     root = Path(directory)
     tree: dict[str, str] = {}
+    if not root.is_dir():
+        return tree
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
@@ -183,6 +216,45 @@ def payload_tree(directory: str) -> dict[str, str]:
                 digest.update(chunk)
         tree[path.relative_to(root).as_posix()] = digest.hexdigest()
     return tree
+
+
+# The package's own files that shape the image: the build script and every
+# module it renders from, the templates, and everything staged into the ISO
+# from inside the package. About 200 KiB in total - reading them is the same
+# trade-off already made for media_identity, on the cheap side of it: a few
+# code files are affordable to hash, several gigabytes of medium are not.
+BUILD_INPUT_FILES = ("build.py", "unattend_iso.py", "autounattend.py",
+                     "apollo.py", "media.py", "payload.py")
+BUILD_INPUT_DIRS = ("templates", "provision", "probe", "assets")
+
+
+def package_inputs(guest_dir: str | Path = GUEST_DIR,
+                   console_dir: str | Path = HERE) -> dict[str, str]:
+    """Hash the package files that shape the image. Missing ones are recorded.
+
+    A missing input is a sentinel, not an exception: the build will fail on
+    it anyway with a better message, and a predicate that raises here would
+    have to be caught somewhere to mean "rebuild" - simpler to let the
+    fingerprint change.
+    """
+    guest = Path(guest_dir)
+    inputs: dict[str, str] = {}
+    for name in BUILD_INPUT_FILES:
+        inputs[f"guest/{name}"] = _file_digest(guest / name)
+    for name in BUILD_INPUT_DIRS:
+        for key, digest in payload_tree(str(guest / name)).items():
+            inputs[f"guest/{name}/{key}"] = digest
+    # build.py imports it for the retro marker path, and a change there moves
+    # where the retrogaming choice is read from.
+    inputs["retro.py"] = _file_digest(Path(console_dir) / "retro.py")
+    return inputs
+
+
+def _file_digest(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return "missing"
 
 
 def media_identity(iso_path: str) -> str:
@@ -228,13 +300,26 @@ def default_virsh(*args: str) -> subprocess.CompletedProcess:
                           env=env, check=False)
 
 
+def command_label(argv: list[str]) -> str:
+    """Name a command the way an operator would: the thing that ran.
+
+    argv[1] is the script only when argv[0] is an interpreter; for
+    `virsh start Windows` it is the SUBCOMMAND, and naming it would report
+    that "start exited with status 1".
+    """
+    head = Path(argv[0]).name
+    if len(argv) > 1 and head.startswith("python"):
+        return Path(argv[1]).name
+    return head
+
+
 def default_runner(argv: list[str]) -> None:
     """Launch a step's command, refusing loudly on a non-zero exit."""
     proc = subprocess.run(argv, check=False)
     if proc.returncode != 0:
         raise GuestBuildError(
-            f"{Path(argv[1] if len(argv) > 1 else argv[0]).name} exited with "
-            f"status {proc.returncode}: {' '.join(argv)}")
+            f"{command_label(argv)} exited with status {proc.returncode}: "
+            f"{' '.join(argv)}")
 
 
 def _secret(answers: Mapping[str, object], key: str) -> str:
@@ -280,7 +365,8 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
                workdir: str, *, virsh: Callable[..., object] | None = None,
                runner: Callable[[list[str]], None] | None = None,
                size_of: Callable[[str], int] | None = None,
-               python: str | None = None) -> list[Step]:
+               python: str | None = None,
+               build_inputs: Mapping[str, str] | None = None) -> list[Step]:
     """The five steps, in order, for this host's answers. Runs nothing.
 
     `virsh`, `runner` and `size_of` are injectable so tests can replace them:
@@ -313,11 +399,21 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
     stamp = build_stamp_path(str(iso_out))
     secret_paths = {key: secret_dir / name for key, name in SECRET_FILES.items()}
 
+    inputs_cache: dict[str, Mapping[str, str]] = {}
+
+    def resolved_inputs() -> Mapping[str, str]:
+        if build_inputs is not None:
+            return build_inputs
+        if "value" not in inputs_cache:
+            inputs_cache["value"] = package_inputs()
+        return inputs_cache["value"]
+
     def fingerprint() -> str:
         return build_fingerprint(
             iso=media_identity(source_iso),
             payload_files=payload_tree(str(payload_dir)),
-            answers=answers, data_gib=data_gib)
+            answers=answers, data_gib=data_gib,
+            build_inputs=resolved_inputs())
 
     payload_cmd = [python, str(GUEST_DIR / "fetch_payload.py"),
                    "--drivers-dir", str(payload_dir)] + retro_flag
@@ -341,8 +437,16 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         secret_dir.mkdir(parents=True, exist_ok=True)
         secret_dir.chmod(0o700)
         for key, path in secret_paths.items():
-            path.write_text(secrets[key] + "\n")
-            path.chmod(0o600)
+            # os.open with an explicit mode, not write_text: the file must
+            # never exist in 0644, not even for the instant before a chmod.
+            # The mode argument only applies at CREATION, so an already
+            # existing file still needs the fchmod below.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+                os.write(fd, (secrets[key] + "\n").encode("utf-8"))
+            finally:
+                os.close(fd)
 
     def secrets_done() -> bool:
         return all(_secret_is_current(path, secrets[key])
@@ -375,7 +479,7 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         proc = virsh("domstate", DOMAIN_NAME)
         if getattr(proc, "returncode", 1) != 0:
             return False        # unreachable libvirtd is not "already done"
-        return (proc.stdout or "").strip() != "shut off"
+        return (proc.stdout or "").strip() in DOMAIN_UP_STATES
 
     return [
         Step("secrets", secrets_done, write_secrets, None, None,
