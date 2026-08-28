@@ -143,6 +143,46 @@ check("et l arborescence de provisionnement",
 check("aucune entree du paquet ne manque",
       sorted(k for k, v in real_inputs.items() if v == "missing"), [])
 
+# --- le garde-fou de derive de l empreinte ------------------------------- #
+# BUILD_INPUT_FILES est une liste EXPLICITE, et une liste explicite est
+# precisement ce que l on oublie d etendre en ajoutant un module. L oubli est
+# invisible : rien ne casse, l ISO garde son ancienne empreinte, et une mise a
+# jour du paquet reutilise une image construite par le code precedent. Ce
+# depot a deja paye cette panne une fois, sur une table de placement.
+# Donc : chaque .py directement sous guest/ est classe, d un cote ou de
+# l autre, et l orphelin est NOMME.
+_orphelins = steps.undeclared_guest_modules()
+check("chaque module de guest/ est declare ou exclu explicitement",
+      _orphelins, [])
+if _orphelins:
+    failures.append(
+        "modules de console/guest/ absents de BUILD_INPUT_FILES comme de "
+        f"BUILD_INPUT_EXCLUDED : {', '.join(_orphelins)}. Ajoute chacun aux "
+        "entrees s il entre dans l image, ou aux exclusions AVEC sa raison.")
+# Les deux listes se contredisent si un nom figure dans les deux : l exclusion
+# serait alors une fausse promesse, puisque le fichier est quand meme hache.
+check("aucun module n est a la fois entree et exclusion",
+      sorted(set(steps.BUILD_INPUT_FILES) & set(steps.BUILD_INPUT_EXCLUDED)), [])
+# Une exclusion sans raison ecrite n est pas une decision, c est un oubli
+# range. Chacune porte une phrase qu un relecteur peut contester.
+check("chaque exclusion porte sa raison",
+      sorted(name for name, why in steps.BUILD_INPUT_EXCLUDED.items()
+             if not str(why).strip()), [])
+# Le garde-fou doit savoir echouer : un module non declare doit ressortir,
+# nomme. Sans cette epreuve, une implementation qui rend toujours [] passerait
+# pour un garde-fou.
+with tempfile.TemporaryDirectory() as _tmp_guest:
+    _faux = pathlib.Path(_tmp_guest)
+    (_faux / "build.py").write_text("# declare")
+    (_faux / "domain.py").write_text("# exclu")
+    (_faux / "un_module_neuf.py").write_text("# ni l un ni l autre")
+    (_faux / "notes.txt").write_text("pas un module")
+    check("le garde-fou nomme le module orphelin",
+          steps.undeclared_guest_modules(_faux), ["un_module_neuf.py"])
+    (_faux / "un_module_neuf.py").unlink()
+    check("et ne voit rien quand tout est classe",
+          steps.undeclared_guest_modules(_faux), [])
+
 # --- un fichier d empreinte illisible veut dire RECONSTRUIRE ------------- #
 with tempfile.TemporaryDirectory() as tmp:
     stamp = pathlib.Path(tmp) / "build.fingerprint"
@@ -280,6 +320,25 @@ with tempfile.TemporaryDirectory() as tmp:
           True)
     check("define ne passe pas --replace, qui jetterait la session hibernee",
           "--replace" in define_cmd, False)
+    # DEUX medias, et pas n importe lesquels. Le gabarit de production amorce
+    # sinon le NVMe, vierge a ce stade : Setup ne demarrerait jamais. Le media
+    # officiel est celui qui amorce ; l ISO produite par build.py n est PAS
+    # amorcable, c est le media de reponses que Setup lit une fois demarre.
+    check("define passe le media Windows officiel",
+          arg(define_cmd, "--windows-iso"), ANSWERS["windows_iso"])
+    check("define passe l ISO de reponses que build vient de produire",
+          arg(define_cmd, "--unattend-iso"),
+          os.path.join(tmp, "nivuus-unattend.iso"))
+    # Les deux flags ne portent PAS le meme chemin : les intervertir laisse
+    # tous les flags presents et produit un domaine qui amorce une ISO non
+    # amorcable. C est exactement l erreur que la presence seule ne voit pas.
+    check("les deux medias sont deux fichiers differents",
+          arg(define_cmd, "--windows-iso") == arg(define_cmd, "--unattend-iso"),
+          False)
+    check("l ISO de reponses de define est celle que build produit",
+          arg(define_cmd, "--unattend-iso"), arg(build_cmd, "--output"))
+    check("et le media Windows de define est celui que build consomme",
+          arg(define_cmd, "--windows-iso"), arg(build_cmd, "--windows-iso"))
     check("start demande virsh start sur le domaine de production",
           st["start"].command, ["virsh", "start", "Windows"])
 

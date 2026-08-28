@@ -77,6 +77,34 @@
     <emulator>/usr/bin/qemu-system-x86_64</emulator>
     <controller type='usb' index='0' model='qemu-xhci'/>
     <controller type='sata' index='0'/>
+{%- if install_media %}
+    <!-- INSTALL MEDIA. Attached only while Windows Setup has not yet run; the
+         domain is redefined without them once the guest is provisioned.
+
+         TWO media, never one. The ISO build.py produces is NOT bootable: it
+         carries the answer file and the offline payload, which Windows Setup
+         reads once it has ALREADY booted from the official Windows medium.
+         That is why only the Windows medium takes a boot order, and why the
+         NVMe hostdev below gives its own up while these are attached - a
+         single-drive install domain boots straight into a blank NVMe and
+         Setup never starts.
+
+         Form copied verbatim from templates/domain-test.xml.j2 (bus, targets,
+         readonly, boot order): that one has driven real installations. -->
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='{{ install_media.windows_iso }}'/>
+      <target dev='sdb' bus='sata'/>
+      <readonly/>
+      <boot order='1'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='{{ install_media.unattend_iso }}'/>
+      <target dev='sdc' bus='sata'/>
+      <readonly/>
+    </disk>
+{%- endif %}
 {%- for s in shares %}
     <filesystem type='mount' accessmode='passthrough'>
       <driver type='virtiofs' queue='1024'/>
@@ -108,7 +136,16 @@
       <source>
         <address domain='{{ nvme.domain }}' bus='{{ nvme.bus }}' slot='{{ nvme.slot }}' function='{{ nvme.function }}'/>
       </source>
+{#- Steady state only: the NVMe is what boots. While the install media are
+    attached the Windows medium takes this order instead, exactly as
+    domain-test.xml.j2 does - its system disk carries no boot element either.
+    Windows Setup writes its own UEFI boot entry, so the guest still comes
+    back on the NVMe at every reboot of the install. A Jinja comment, not an
+    XML one: this explains an ABSENCE in the install domain, which is a
+    template concern and has no business in every emitted steady-state XML. #}
+{%- if not install_media %}
       <boot order='1'/>
+{%- endif %}
     </hostdev>
 {%- for fn in gpu_functions %}
     <hostdev mode='subsystem' type='pci' managed='yes'>

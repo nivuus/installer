@@ -227,6 +227,31 @@ BUILD_INPUT_FILES = ("build.py", "unattend_iso.py", "autounattend.py",
                      "apollo.py", "media.py", "payload.py")
 BUILD_INPUT_DIRS = ("templates", "provision", "probe", "assets")
 
+# The modules under guest/ that deliberately do NOT enter the fingerprint,
+# each with the reason it does not shape the image. This list is not
+# decoration: undeclared_guest_modules() refuses any .py under guest/ that
+# appears in neither it nor BUILD_INPUT_FILES, because a new module slipping
+# into the image unfingerprinted would let a package upgrade reuse a stale
+# ISO - silently, which is the whole failure class this mechanism exists to
+# prevent. Adding a module here is a DECISION; make it explicitly.
+BUILD_INPUT_EXCLUDED = {
+    # Builds the libvirt domain, not the image. Listing it would force a
+    # twenty-minute ISO rebuild every time the XML changes, which is the
+    # opposite of what the fingerprint is for.
+    "domain.py": "shapes the domain, not the image",
+    # Same, for the throwaway HDR bench domain: never part of the console.
+    "testdomain.py": "throwaway bench domain, never shipped",
+    # Produces the payload tree, whose CONTENT is already hashed by
+    # payload_tree(). Hashing the fetcher too would rebuild on a change that
+    # provably downloaded the same bytes.
+    "fetch_payload.py": "its output is fingerprinted by payload_tree()",
+    # Host-side, post-install and optional: replays `retro install` against a
+    # guest that already exists. Nothing of it is staged into the ISO.
+    "retro_sync.py": "runs on the host after the install, not in the image",
+    # Operator tool for running one command in a live guest over WinRM.
+    "winrm_exec.py": "operator tool, not staged into the image",
+}
+
 
 def package_inputs(guest_dir: str | Path = GUEST_DIR,
                    console_dir: str | Path = HERE) -> dict[str, str]:
@@ -248,6 +273,27 @@ def package_inputs(guest_dir: str | Path = GUEST_DIR,
     # where the retrogaming choice is read from.
     inputs["retro.py"] = _file_digest(Path(console_dir) / "retro.py")
     return inputs
+
+
+def undeclared_guest_modules(guest_dir: str | Path = GUEST_DIR) -> list[str]:
+    """Modules under guest/ that are in neither the inputs nor the exclusions.
+
+    BUILD_INPUT_FILES is an explicit list, and an explicit list is exactly
+    what someone adding a module forgets to extend. The omission is invisible
+    - nothing errors, the ISO simply keeps its old fingerprint and a package
+    upgrade reuses an image built from the previous code. This repository has
+    already paid that failure once, on a placement table.
+
+    So every `.py` directly under guest/ must be classified, one way or the
+    other, and the caller reports the ones that are not BY NAME: the person
+    reading that message six months from now has just added a file and needs
+    to be told which one, not that "something" is missing.
+    """
+    guest = Path(guest_dir)
+    if not guest.is_dir():
+        return []
+    known = set(BUILD_INPUT_FILES) | set(BUILD_INPUT_EXCLUDED)
+    return sorted(p.name for p in guest.glob("*.py") if p.name not in known)
 
 
 def _file_digest(path: Path) -> str:
@@ -430,7 +476,16 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
                  "--data-partition-gb", str(data_gib)] + retro_flag
     # No --replace: redefining an existing domain makes the next boot of a
     # hibernated Windows resume into changed hardware and discard the session.
-    define_cmd = [python, str(GUEST_DIR / "domain.py"), "define"]
+    #
+    # BOTH media, and they are not interchangeable. The production template
+    # otherwise boots the NVMe, which at this point is blank: Setup would
+    # never start. The official medium is what boots; iso_out - the ISO the
+    # build step just produced - is NOT bootable, it is the answer and payload
+    # medium Setup reads once running. A later step redefines the domain
+    # without either, once the guest is installed.
+    define_cmd = [python, str(GUEST_DIR / "domain.py"), "define",
+                  "--windows-iso", source_iso,
+                  "--unattend-iso", str(iso_out)]
     start_cmd = ["virsh", "start", DOMAIN_NAME]
 
     def write_secrets() -> None:

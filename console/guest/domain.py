@@ -121,13 +121,47 @@ def existing_uuid(name: str = DOMAIN_NAME) -> str | None:
     return match.group(1) if match else None
 
 
+def install_media(windows_iso: str | None,
+                  unattend_iso: str | None) -> dict | None:
+    """The two install media as ONE indivisible pair, or None for steady state.
+
+    They are validated together rather than rendered independently because
+    either one alone yields a domain that cannot install: the official medium
+    without the answer ISO stops at Setup's first question (there is no
+    keyboard on a headless console to answer it), and the answer ISO without
+    the official medium is not bootable at all - it carries the answer file
+    and the payload, nothing that a firmware can start. A partial pair is
+    therefore a refusal, never a half-configured domain.
+    """
+    windows = (windows_iso or "").strip()
+    unattend = (unattend_iso or "").strip()
+    if not windows and not unattend:
+        return None
+    if not windows or not unattend:
+        missing = "the Windows medium" if not windows else "the answer ISO"
+        raise DomainError(
+            f"the install media go together and {missing} is missing: an "
+            "install domain needs BOTH the official Windows medium (which "
+            "boots) and the ISO build.py produced (which Setup reads once "
+            "booted). Pass --windows-iso and --unattend-iso, or neither.")
+    return {"windows_iso": windows, "unattend_iso": unattend}
+
+
 def domain_xml(*, gpu_functions: list[dict], nvme: dict, plan: dict,
                memory_kib: int = MEMORY_KIB, name: str = DOMAIN_NAME,
                mac: str = MAC, bridge: str = BRIDGE,
                nvram_path: str = NVRAM_PATH,
                shares: tuple = SHARES,
-               uuid: str | None = None) -> str:
-    """Render the production domain XML."""
+               uuid: str | None = None,
+               windows_iso: str | None = None,
+               unattend_iso: str | None = None) -> str:
+    """Render the production domain XML.
+
+    With both `windows_iso` and `unattend_iso` given, the domain is the
+    INSTALL one: it attaches the two media and lets the Windows medium boot.
+    With neither, it is the steady-state domain that boots the NVMe. The
+    guest is installed with the first and then redefined with the second.
+    """
     if len(gpu_functions) < 1:
         raise DomainError("no GPU function to pass through")
     env = Environment(
@@ -139,6 +173,7 @@ def domain_xml(*, gpu_functions: list[dict], nvme: dict, plan: dict,
         name=name, memory_kib=memory_kib, plan=plan, mac=mac, bridge=bridge,
         nvram_path=nvram_path, gpu_functions=gpu_functions, nvme=nvme,
         shares=shares, uuid=uuid,
+        install_media=install_media(windows_iso, unattend_iso),
     )
 
 
@@ -212,13 +247,18 @@ def domain_exists(name: str = DOMAIN_NAME) -> bool:
     return domain_in_listing(proc.stdout, name)
 
 
-def build_domain_xml(*, announce: bool = False) -> str:
+def build_domain_xml(*, announce: bool = False,
+                     windows_iso: str | None = None,
+                     unattend_iso: str | None = None) -> str:
     """Detect this machine's hardware and render its domain.
 
     `announce`, when set, prints the selected passthrough NVMe controller's
     description and PCI address to stderr before rendering. That selection
     wipes a disk; on `define` it must be a decision the operator can read,
     not one baked silently into the XML.
+
+    The two media are passed straight through to domain_xml(): given, they
+    make the install domain; omitted, the steady-state one.
     """
     sys.path.insert(0, str(HERE.parent))
     import hardware  # noqa: PLC0415
@@ -243,6 +283,8 @@ def build_domain_xml(*, announce: bool = False) -> str:
         nvme=nvme,
         plan=vcpu_plan(pool),
         uuid=existing_uuid(),
+        windows_iso=windows_iso,
+        unattend_iso=unattend_iso,
     )
 
 
@@ -254,6 +296,14 @@ def main() -> int:
                              "-- the next boot of a hibernated Windows then "
                              "resumes into changed hardware and discards the "
                              "saved session")
+    # Both or neither: see install_media(). Paths, never secrets, so argv is
+    # the right place for them.
+    parser.add_argument("--windows-iso",
+                        help="official Windows medium to boot Setup from; "
+                             "requires --unattend-iso")
+    parser.add_argument("--unattend-iso",
+                        help="the ISO build.py produced, holding the answer "
+                             "file and the payload; requires --windows-iso")
     args = parser.parse_args()
 
     # Imported here, not at module scope: the tests put only
@@ -263,7 +313,9 @@ def main() -> int:
     from hardware import HardwareError  # noqa: PLC0415
 
     try:
-        xml_text = build_domain_xml(announce=(args.action == "define"))
+        xml_text = build_domain_xml(announce=(args.action == "define"),
+                                    windows_iso=args.windows_iso,
+                                    unattend_iso=args.unattend_iso)
         if args.action == "xml":
             print(xml_text)
             return 0

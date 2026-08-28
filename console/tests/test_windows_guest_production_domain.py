@@ -163,6 +163,84 @@ check("no vBIOS override", root.find("devices/hostdev/rom") is None, True)
 check("no i6300esb watchdog",
       [w.get("model") for w in root.findall("devices/watchdog")], ["itco"])
 
+# --- les deux medias d installation -------------------------------------- #
+# Le gabarit de production ne montait AUCUN cdrom et son unique <boot order>
+# portait sur le NVMe : `define` puis `start` auraient donc demarre un disque
+# vierge et Windows Setup ne se serait jamais lance. Et il en faut DEUX, pas
+# un : l ISO que build.py produit n est PAS amorcable, c est le media de
+# reponses et de charge utile que Setup lit une fois demarre depuis le media
+# officiel. C est pour cela que seul le media officiel porte un ordre.
+xml_install = domain.domain_xml(gpu_functions=GPU, nvme=NVME, plan=plan,
+                                windows_iso="/media/backup/ltsc.iso",
+                                unattend_iso="/var/lib/nivuus/guest/nivuus-unattend.iso")
+install_root = ET.fromstring(xml_install)
+
+install_cdroms = [d for d in install_root.findall("devices/disk")
+                  if d.get("device") == "cdrom"]
+check("le domaine d installation monte deux medias", len(install_cdroms), 2)
+check("les deux medias sont bien ceux demandes",
+      sorted(c.find("source").get("file") for c in install_cdroms),
+      ["/media/backup/ltsc.iso",
+       "/var/lib/nivuus/guest/nivuus-unattend.iso"])
+# Forme reprise telle quelle de domain-test.xml.j2, qui a servi a de vraies
+# installations : bus sata, cibles sdb/sdc, readonly sur les deux.
+check("les deux medias sont sur le bus sata",
+      [c.find("target").get("bus") for c in install_cdroms], ["sata", "sata"])
+check("les deux medias ont des cibles distinctes",
+      sorted(c.find("target").get("dev") for c in install_cdroms),
+      ["sdb", "sdc"])
+check("les deux medias sont en lecture seule",
+      [c.find("readonly") is not None for c in install_cdroms], [True, True])
+
+# UN SEUL ordre de demarrage dans tout le domaine. Deux pieges se cachent
+# ici : si le NVMe garde le sien, il amorce le disque vierge ; si l ISO de
+# reponses en recoit un, le firmware tente d amorcer un media qui n est pas
+# amorcable.
+check("un seul ordre de demarrage dans le domaine d installation",
+      xml_install.count("<boot order="), 1)
+booting = [c for c in install_cdroms if c.find("boot") is not None]
+check("et il porte sur le media Windows, pas sur l ISO de reponses",
+      [c.find("source").get("file") for c in booting],
+      ["/media/backup/ltsc.iso"])
+check("le NVMe n amorce pas pendant l installation",
+      [h.find("boot") for h in install_root.findall("devices/hostdev")],
+      [None, None, None])
+
+# Le domaine de regime : aucun media, et c est le NVMe qui amorce a nouveau.
+check("le domaine de regime ne monte aucun cdrom", "cdrom" in xml_text, False)
+check("le domaine de regime a un seul ordre de demarrage",
+      xml_text.count("<boot order="), 1)
+_nvme_boot = [h for h in root.findall("devices/hostdev")
+              if h.find("source/address").get("bus") == "0x03"]
+check("et c est le NVMe qui le porte",
+      _nvme_boot[0].find("boot").get("order"), "1")
+
+# Les deux medias vont ENSEMBLE : le media officiel seul bloque Setup sur sa
+# premiere question (il n y a pas de clavier sur une console sans ecran), et
+# l ISO de reponses seule n est pas amorcable du tout. Une paire incomplete
+# est donc un refus, jamais un domaine a moitie configure.
+check_raises("le media officiel seul est refuse", domain.DomainError,
+             lambda: domain.domain_xml(gpu_functions=GPU, nvme=NVME, plan=plan,
+                                       windows_iso="/m/w.iso"))
+check_raises("l ISO de reponses seule est refusee", domain.DomainError,
+             lambda: domain.domain_xml(gpu_functions=GPU, nvme=NVME, plan=plan,
+                                       unattend_iso="/v/u.iso"))
+try:
+    domain.install_media("/m/w.iso", None)
+except domain.DomainError as exc:
+    check("le refus nomme le media manquant", "answer ISO" in str(exc), True)
+check("aucun media donne veut dire regime, pas refus",
+      domain.install_media(None, None), None)
+# Une chaine vide est un « pas de media », pas un chemin : sans cela une
+# reponse vide du magasinier produirait <source file=''/>, que libvirt accepte
+# et que QEMU refuse ensuite au demarrage.
+check("une chaine vide compte comme absente",
+      domain.install_media("", "   "), None)
+check("la paire complete est rendue telle quelle",
+      domain.install_media("/m/w.iso", "/v/u.iso"),
+      {"windows_iso": "/m/w.iso", "unattend_iso": "/v/u.iso"})
+
+
 # domain_in_listing() must correctly parse virsh list --all --name output
 # and reject partial matches (a domain named "Windows-LTSC-test" must not
 # satisfy a query for "Windows").
