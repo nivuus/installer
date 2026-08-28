@@ -53,25 +53,26 @@ test-vm:
 
 # Run the package-engine test suite (no root, no chroot, no ISO).
 #
-# PYTHON is overridable because three of these suites import pydantic, which is
-# NOT in the Debian base: `make test-packages PYTHON=/path/to/venv/bin/python3`.
+# PYTHON is overridable because two of the 11 suites below need a dependency
+# that is NOT in the Debian base: test_webapp_models needs pydantic v2
+# (bookworm ships v1) and test_install_engine_features needs jinja2. Measured
+# suite by suite, 2026-08-28. `make test-packages PYTHON=/path/to/venv/bin/python3`.
 # The CI runs no Python tests at all (ci.yml sets test-paths: ""), so this target
 # is the only aggregator there is - and an aggregator that fails for a missing
 # dependency reads as "the engine is broken", which is the wrong thing to learn.
 #
-# 30 suites (2026-08-28, measured): 11 run directly below (the engine/webapp/
-# packages suites that stay outside console/), and 19 are delegated to
-# `console/Makefile`'s own `test` target - the 20 suites that test code living
+# 31 suites (2026-08-28, measured): 11 run directly below (the engine/webapp/
+# packages suites that stay outside console/), and 20 are delegated to
+# `console/Makefile`'s own `test` target - every suite testing code that lives
 # under console/ moved to console/tests/ so that a later `git filter-repo
-# --path console` is mechanical (everything the package owns is already
-# under it); test_handle_vm_start.sh moved with them but was never part of
-# this count, since it is shell, not Python, and this loop only ever ran
-# .py files - see console/Makefile for why it stays unwired. PYTHON is
-# propagated to the sub-make so the console suites that need pydantic don't
-# silently fall back to a bare python3. console/guest/domain.py is exercised
-# for real by test_windows_guest_production_domain.py, which calls main()
-# end-to-end rather than stubbing it out - see CLAUDE.md, Installer
-# Architecture, "domain.py is REPAIRED", for how that suite closed the gap.
+# --path console` is mechanical (everything the package owns is already under
+# it). That includes the shell suite test_handle_vm_start.sh, wired up on the
+# console side (this loop only ever ran .py files). PYTHON is propagated to the
+# sub-make because 9 console suites import jinja2 - not pydantic, which nothing
+# under console/ uses. console/guest/domain.py is exercised for real by
+# test_windows_guest_production_domain.py, which calls main() end-to-end rather
+# than stubbing it out - see CLAUDE.md, Installer Architecture, "domain.py is
+# REPAIRED", for how that suite closed the gap.
 PYTHON ?= python3
 
 test-packages:
