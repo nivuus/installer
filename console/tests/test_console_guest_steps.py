@@ -810,6 +810,169 @@ with tempfile.TemporaryDirectory() as tmp:
           dest.read_bytes(), before)
 
 
+# --- l espace de preparation et les droits qemu (tache 2) ---------------- #
+# Two measured failures from the same evening: build.py stages ~1.8 GiB of
+# drivers under tempfile's default location (/tmp unless TMPDIR says
+# otherwise), and /tmp here is a 10 GiB tmpfs already 97% full - "No space
+# left on device" mid-build. Then, ISO built, `virsh start` refused twice
+# with "Permission denied": once on the workdir (drwxr-x--- root:root,
+# unreadable to libvirt-qemu), once on the ISO itself (root:root 0600).
+# Both are proven here without building a real ISO or touching the real
+# /var/lib/libvirt/qemu or passwd database - everything is injected.
+
+class FakeBuildRunner:
+    """A fake runner that MIMICS build.py's own observable contract (write
+    the ISO at --output, chmod it 0600) instead of just recording the call -
+    "a fake bench must implement the WHOLE interface the code reads" is a
+    mistake this suite has already paid for once (see the module docstring).
+    Without this, build_run()'s own chown step would have nothing real to
+    act on."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, argv, *, env=None):
+        self.calls.append((list(argv), dict(env) if env is not None else None))
+        out = pathlib.Path(arg(argv, "--output"))
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"fake unattend iso")
+        os.chmod(out, 0o600)
+
+
+class RecordingChown:
+    """A fake chown: records every call, optionally fails on chosen paths -
+    real os.chown to an arbitrary uid needs root, which the test process is
+    not."""
+
+    def __init__(self, fail_on=None):
+        self.calls = []
+        self.fail_on = fail_on or set()
+
+    def __call__(self, path, uid, gid):
+        self.calls.append((path, uid, gid))
+        if path in self.fail_on:
+            raise PermissionError(13, "Permission denied")
+
+
+QEMU_UID, QEMU_GID = 64055, 64055  # libvirt-qemu:libvirt-qemu on this host,
+# measured 2026-08-28 via resolve_qemu_owner() itself against the real
+# /var/lib/libvirt/qemu - injected here, never hardcoded in guest_steps.py
+
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    runner = FakeBuildRunner()
+    chown = RecordingChown()
+    given = dict(ANSWERS, guest_workdir=tmp)
+    build_step = by_name(steps.plan_steps(
+        given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=runner,
+        size_of=lambda d: DISK_BYTES,
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown))["build"]
+    build_step.run()
+
+    check("build ne lance qu une seule commande", len(runner.calls), 1)
+    argv, env = runner.calls[0]
+    check("la commande lancee est bien build.py",
+          argv[1].endswith("guest/build.py"), True)
+    check("build.py recoit un TMPDIR explicite", env is not None and "TMPDIR" in env, True)
+    staged = pathlib.Path(env["TMPDIR"])
+    check("l espace de preparation vit SOUS le repertoire de travail",
+          str(staged).startswith(str(pathlib.Path(tmp)) + os.sep), True)
+    check("l espace de preparation n est pas le /tmp du systeme",
+          str(staged) == "/tmp", False)
+    check("le repertoire de preparation existe reellement sur le disque",
+          staged.is_dir(), True)
+    check("le reste de l environnement (PATH, etc.) est conserve",
+          env.get("PATH"), os.environ.get("PATH"))
+
+    # The two chowns the field report needed by hand: the workdir (so qemu
+    # can TRAVERSE it) and the ISO itself (so qemu can OPEN it).
+    chowned = {c[0]: (c[1], c[2]) for c in chown.calls}
+    check("le repertoire de travail est chowne pour l utilisateur qemu",
+          chowned.get(str(pathlib.Path(tmp))), (QEMU_UID, QEMU_GID))
+    iso_target = str(pathlib.Path(tmp, "nivuus-unattend.iso"))
+    check("l ISO produite est chownee pour l utilisateur qemu",
+          chowned.get(iso_target), (QEMU_UID, QEMU_GID))
+
+    # THE FALSIFICATION THIS STEP EXISTS TO PREVENT: only the owner may
+    # change. build.py's own deliberate 0600 (it carries the product key and
+    # two passwords in clear - see its own printed warning) must survive
+    # untouched; widening it would be a security regression dressed up as a
+    # fix. (Verified by hand during implementation: forcing an extra
+    # os.chmod(iso_out, 0o644) into build_run made this single assertion
+    # fail, and only this one - the guard is load-bearing, not decorative.)
+    check("le mode de l ISO reste 0600, jamais elargi",
+          os.stat(iso_target).st_mode & 0o777, 0o600)
+
+# A chown failure (a real "Permission denied" from the kernel, e.g. the
+# process running the install is not actually root) is refused BY NAME, not
+# swallowed - the operator needs to know qemu still cannot open the file.
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    iso_target = str(pathlib.Path(tmp, "nivuus-unattend.iso"))
+    chown = RecordingChown(fail_on={iso_target})
+    given = dict(ANSWERS, guest_workdir=tmp)
+    build_step = by_name(steps.plan_steps(
+        given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=FakeBuildRunner(),
+        size_of=lambda d: DISK_BYTES,
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown))["build"]
+    try:
+        build_step.run()
+        failures.append("un chown en echec sur l ISO n a pas ete refuse")
+    except steps.GuestBuildError as exc:
+        check("le refus de chown nomme le fichier vise", iso_target in str(exc), True)
+        check("le refus de chown nomme l uid qemu vise", str(QEMU_UID) in str(exc), True)
+
+# --- resolve_qemu_owner : lu du systeme, jamais devine -------------------- #
+class _FakeStat:
+    def __init__(self, uid, gid):
+        self.st_uid = uid
+        self.st_gid = gid
+
+
+def _stat_ok(path):
+    check("resolve_qemu_owner interroge /var/lib/libvirt/qemu",
+          path, steps.QEMU_STATE_DIR)
+    return _FakeStat(QEMU_UID, QEMU_GID)
+
+
+def _getpwuid_ok(uid):
+    check("resolve_qemu_owner cherche le compte du bon uid", uid, QEMU_UID)
+    return object()  # only existence matters here, never a hardcoded name
+
+
+check("resolve_qemu_owner lit (uid, gid) sur le systeme, sans nom code en dur",
+      steps.resolve_qemu_owner(stat_fn=_stat_ok, getpwuid=_getpwuid_ok),
+      (QEMU_UID, QEMU_GID))
+
+
+def _stat_missing(path):
+    raise FileNotFoundError(2, "No such file or directory")
+
+
+try:
+    steps.resolve_qemu_owner(stat_fn=_stat_missing)
+    failures.append("un /var/lib/libvirt/qemu absent n a pas ete refuse")
+except steps.GuestBuildError as exc:
+    check("l absence de libvirt est refusee nommement (le repertoire)",
+          steps.QEMU_STATE_DIR in str(exc), True)
+
+
+def _stat_orphan(path):
+    return _FakeStat(999999, 999999)
+
+
+def _getpwuid_unknown(uid):
+    raise KeyError(uid)
+
+
+try:
+    steps.resolve_qemu_owner(stat_fn=_stat_orphan, getpwuid=_getpwuid_unknown)
+    failures.append("un uid sans compte systeme n a pas ete refuse")
+except steps.GuestBuildError as exc:
+    check("un utilisateur qemu inexistant est refuse EN LE NOMMANT (l uid)",
+          "999999" in str(exc), True)
+
+
 if failures:
     for item in failures:
         print(f"FAIL - {item}")

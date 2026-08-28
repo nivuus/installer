@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pwd
 import re
 import shutil
 import subprocess
@@ -582,13 +583,96 @@ def command_label(argv: list[str]) -> str:
     return head
 
 
-def default_runner(argv: list[str]) -> None:
-    """Launch a step's command, refusing loudly on a non-zero exit."""
-    proc = subprocess.run(argv, check=False)
+def default_runner(argv: list[str], *,
+                   env: Mapping[str, str] | None = None) -> None:
+    """Launch a step's command, refusing loudly on a non-zero exit.
+
+    `env` is optional and additive in spirit even though `subprocess.run`
+    treats it as a full replacement: every caller that needs it (only the
+    build step, for TMPDIR - see build_run) passes `dict(os.environ, ...)`
+    itself, so PATH and the rest of the parent environment stay intact.
+    Every other step passes None, which means "inherit unchanged", exactly
+    the behaviour before this parameter existed.
+    """
+    proc = subprocess.run(argv, check=False, env=env)
     if proc.returncode != 0:
         raise GuestBuildError(
             f"{command_label(argv)} exited with status {proc.returncode}: "
             f"{' '.join(argv)}")
+
+
+# libvirtd's own per-domain runtime-state directory. The libvirt-daemon
+# package chowns it, at install time, to the EXACT user/group its qemu
+# processes run as - libvirt-qemu on Debian/Arch, qemu on Fedora/RHEL, and
+# no two distributions agree on the literal name (measured on this host,
+# 2026-08-28: libvirt-qemu, uid 64055). It exists on any libvirt install
+# before a single domain has ever run, which is why resolve_qemu_owner()
+# below reads IT rather than a hardcoded name or a commented-out default in
+# qemu.conf (this host's own /etc/libvirt/qemu.conf has `#user =
+# "libvirt-qemu"` - commented, i.e. "use the packaged default" - so parsing
+# that file would find nothing on the very host this was written against).
+QEMU_STATE_DIR = "/var/lib/libvirt/qemu"
+
+
+def resolve_qemu_owner(state_dir: str = QEMU_STATE_DIR, *,
+                       stat_fn: Callable[[str], os.stat_result] | None = None,
+                       getpwuid: Callable[[int], object] | None = None
+                       ) -> tuple[int, int]:
+    """(uid, gid) qemu itself runs as - READ from the live system, never a
+    literal guessed here. See QEMU_STATE_DIR's own comment for why this
+    directory, specifically, is the thing to read.
+
+    Two distinct refusals, both naming their cause rather than raising a
+    bare OSError/KeyError: the state directory itself is missing or
+    unreadable (libvirt is not installed as expected), or it IS readable but
+    owned by a uid with no account in the passwd database (an orphaned
+    ownership, e.g. after the qemu account was removed). Either way the
+    caller gets a sentence naming what was looked at, not a traceback - the
+    same rule the whole module follows (see the module docstring).
+
+    `stat_fn`/`getpwuid` are injectable so tests never touch the real
+    /var/lib/libvirt/qemu directory or the real passwd database.
+    """
+    stat_fn = stat_fn or os.stat
+    getpwuid = getpwuid or pwd.getpwuid
+    try:
+        info = stat_fn(state_dir)
+    except OSError as exc:
+        raise GuestBuildError(
+            f"cannot determine the user qemu runs as: {state_dir} is not "
+            f"readable ({exc.strerror or exc}) - is libvirt-daemon "
+            "installed on this host?") from None
+    try:
+        getpwuid(info.st_uid)
+    except KeyError:
+        raise GuestBuildError(
+            f"cannot determine the user qemu runs as: {state_dir} is owned "
+            f"by uid {info.st_uid}, which has no account on this system. "
+            "The qemu user account may have been removed after libvirt "
+            "was installed.") from None
+    return info.st_uid, info.st_gid
+
+
+def _grant_qemu_access(paths: list[Path], owner: tuple[int, int],
+                       chown: Callable[[str, int, int], None]) -> None:
+    """chown each of `paths` to the user qemu runs as. NEVER touches mode.
+
+    The ISO carries the product key and two passwords in clear (see
+    guest/build.py's own printed warning) and is deliberately 0600 - see
+    write_secrets() and build.py itself for the same rule applied to the
+    secret files. Changing the OWNER is enough for the SAME-uid qemu
+    process to open a file it does not have group/other access to; widening
+    the mode would be a security regression dressed up as a fix.
+    """
+    uid, gid = owner
+    for path in paths:
+        try:
+            chown(str(path), uid, gid)
+        except OSError as exc:
+            raise GuestBuildError(
+                f"could not hand {path} to the qemu user (uid {uid}): "
+                f"{exc.strerror or exc}. qemu would get 'Permission denied' "
+                "opening it.") from None
 
 
 def _secret(answers: Mapping[str, object], key: str) -> str:
@@ -632,20 +716,26 @@ def _retro_flag(answers: Mapping[str, object]) -> list[str]:
 
 def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
                workdir: str, *, virsh: Callable[..., object] | None = None,
-               runner: Callable[[list[str]], None] | None = None,
+               runner: Callable[..., None] | None = None,
                size_of: Callable[[str], int] | None = None,
                python: str | None = None,
                build_inputs: Mapping[str, str] | None = None,
-               pci_address_of: Callable[[str], str | None] | None = None
+               pci_address_of: Callable[[str], str | None] | None = None,
+               qemu_owner: Callable[[], tuple[int, int]] | None = None,
+               chown: Callable[[str, int, int], None] | None = None
                ) -> list[Step]:
     """The five steps, in order, for this host's answers. Runs nothing.
 
-    `virsh`, `runner`, `size_of` and `pci_address_of` are injectable so
-    tests can replace them: the real ones read - and, for `start`, drive -
-    the production domain, or walk the real /sys/block tree.
+    `virsh`, `runner`, `size_of`, `pci_address_of`, `qemu_owner` and `chown`
+    are injectable so tests can replace them: the real ones read - and, for
+    `start`, drive - the production domain, walk the real /sys/block tree,
+    read /var/lib/libvirt/qemu's owner, or actually chown a file only root
+    can hand off.
     """
     virsh = virsh or default_virsh
     runner = runner or default_runner
+    qemu_owner = qemu_owner or resolve_qemu_owner
+    chown = chown or os.chown
     python = python or sys.executable or "python3"
 
     secrets = {key: _secret(answers, key) for key in SECRET_FILES}
@@ -756,10 +846,29 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
             return False        # cannot tell => rebuild, never skip
         return build_is_current(stamp, expected)
 
+    # build.py stages driver copies (~1.8 GiB) under tempfile's default
+    # location, which is /tmp unless TMPDIR says otherwise - and on this
+    # host /tmp is a 10 GiB tmpfs, already 97% full (see CLAUDE.md's
+    # tmpfs/swap notes for the same class of failure). stage_dir sits on the
+    # SAME filesystem as iso_out (both under the workdir, on the data disk),
+    # so the fix is also cheaper than a cross-filesystem TMPDIR would be:
+    # build.py's tempfile.TemporaryDirectory ends with an os.replace/rename
+    # of the finished ISO, and rename() only avoids a full copy when source
+    # and destination share a filesystem.
+    stage_dir = root / "tmp"
+
     def build_run() -> None:
         media_identity(source_iso)      # refuse a missing medium by name
-        runner(build_cmd)
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ, TMPDIR=str(stage_dir))
+        runner(build_cmd, env=env)
         write_build_stamp(stamp, fingerprint())
+        # The ISO lands root:root 0600 (build.py's own deliberate choice -
+        # it carries the product key and two passwords in clear). qemu runs
+        # as a different, unprivileged user and can neither traverse `root`
+        # nor open the ISO without this. Only the OWNER changes; see
+        # _grant_qemu_access's own docstring for why the mode never does.
+        _grant_qemu_access([root, iso_out], qemu_owner(), chown)
 
     def defined_xml() -> str | None:
         """The domain's current definition, or None when it is not defined."""
