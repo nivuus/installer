@@ -245,6 +245,62 @@ def _domain_main_xml():
         sys.argv = argv
 
 
+# Discrete-GPU vendors, by PCI vendor id: NVIDIA and AMD/ATI, the same two
+# families parse_gpus() classifies as discrete. Intel (0x8086) is the iGPU
+# driving the host display and is never a passthrough candidate.
+_DISCRETE_GPU_VENDORS = {"0x10de", "0x1002", "0x1022"}
+_PCI_DEVICES = "/sys/bus/pci/devices"
+
+
+def _discrete_gpu_slots_from_sysfs() -> list[str]:
+    """Discrete GPU addresses, read straight from sysfs.
+
+    Deliberately NOT hardware.list_gpus(): the assertion below exists to
+    catch a list_gpus() that stops seeing the GPU, and a probe sharing that
+    code path would move in lockstep with the bug and keep the suite green.
+    Measured while writing this: with list_gpus() mutated to scan only bus
+    00:, a list_gpus()-based probe reported "no discrete GPU", declared the
+    prerequisites unmet, and swallowed the very refusal it was meant to
+    expose. sysfs answers the same question from an independent source -
+    PCI class 0x03xxxx (display controller) plus the vendor id.
+    """
+    slots = []
+    root = pathlib.Path(_PCI_DEVICES)
+    if not root.is_dir():
+        return slots
+    for dev in sorted(root.iterdir()):
+        try:
+            klass = (dev / "class").read_text().strip()
+            vendor = (dev / "vendor").read_text().strip()
+        except OSError:
+            continue
+        if klass.startswith("0x03") and vendor.lower() in _DISCRETE_GPU_VENDORS:
+            slots.append(dev.name)
+    return slots
+
+
+def _domain_prerequisites() -> tuple[bool, str]:
+    """Does THIS machine carry everything build_domain_xml() requires?
+
+    One discrete GPU (from sysfs, see above), its PCI slot functions, a
+    passthrough NVMe and a readable CPU topology - the same four questions
+    build_domain_xml() asks. Returns (met, why-not) so the caller can tell
+    "this builder has no gaming hardware" - a legitimate refusal - apart
+    from "the wiring is broken", which returns the very same code 1.
+    """
+    slots = _discrete_gpu_slots_from_sysfs()
+    if len(slots) != 1:
+        return False, f"discrete GPUs in sysfs: {slots}"
+    try:
+        if not hardware.pci_slot_functions(slots[0]):
+            return False, f"no PCI function under slot {slots[0]}"
+        hardware.passthrough_nvme()
+        hardware.cpu_topology()
+    except hardware.HardwareError as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    return True, ""
+
+
 # main() must now reach hardware detection instead of dying at import. Catch
 # WIDE here on purpose, then decide: a signature drift in any of the five
 # console/hardware.py entry points build_domain_xml() calls (list_gpus,
@@ -275,13 +331,28 @@ except Exception as exc:  # noqa: BLE001
         f"main() ne casse plus au cablage: raised {type(exc).__name__}: {exc}"
     )
 else:
-    check("main() ne casse plus au cablage (code de retour connu)",
-          _rc in (0, 1), True)
+    # Tolerating rc=1 unconditionally would accept a genuine wiring break:
+    # main() turns HardwareError/DomainError into return code 1, so a broken
+    # list_gpus() that reports no discrete GPU exits 1 with "found []" and
+    # nothing goes red. Measured, not assumed. So the tolerance is made
+    # CONDITIONAL on what this machine actually carries: ask console/
+    # hardware.py the same questions build_domain_xml() asks it, and if they
+    # all answer, rc MUST be 0. Nothing here asserts a value specific to this
+    # host - the prerequisites are re-detected at run time, so the suite stays
+    # correct on a builder with no discrete GPU and no spare NVMe.
+    _met, _why = _domain_prerequisites()
+    if _met:
+        check("main() rend 0 sur une machine qui remplit ses prerequis materiels",
+              _rc, 0)
+    else:
+        check("main() ne casse plus au cablage (code de retour connu)",
+              _rc in (0, 1), True)
     if _rc == 0:
         print("main() a produit du XML reel sur ce matos "
               f"({len(_stdout.getvalue())} caracteres)")
     else:
-        print("main() a refuse pour une raison materielle (code 1)")
+        print("main() a rendu 1: "
+              + (_why or "alors que ce materiel remplit les prerequis"))
 
 if failures:
     print(f"FAIL ({len(failures)})")
