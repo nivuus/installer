@@ -8,7 +8,7 @@ import sys
 import xml.etree.ElementTree as ET
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "installer" / "windows-guest"))
+sys.path.insert(0, str(REPO / "console" / "guest"))
 
 import autounattend as ua  # noqa: E402
 

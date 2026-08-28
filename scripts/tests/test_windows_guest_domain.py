@@ -8,7 +8,7 @@ import sys
 import xml.etree.ElementTree as ET
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "installer" / "windows-guest"))
+sys.path.insert(0, str(REPO / "console" / "guest"))
 
 import testdomain  # noqa: E402
 
@@ -258,7 +258,7 @@ check("sans uuid, aucune balise vide n est emise",
 # Ejecter le media ne suffit pas : le LECTEUR garde sa lettre meme vide, et ce
 # sont precisement celles que les partages veulent pour E: et F:. Mesure du
 # 2026-08-26 : apres ejection, deux volumes de 0 Go tenaient encore les lettres.
-_src = pathlib.Path(__file__).resolve().parents[2] / "installer" / "windows-guest" / "testdomain.py"
+_src = pathlib.Path(__file__).resolve().parents[2] / "console" / "guest" / "testdomain.py"
 _td = _src.read_text(encoding="utf-8")
 check("eject-media retire aussi le lecteur, pas seulement le media",
       "detach-disk" in _td, True)

@@ -10,7 +10,7 @@ import re
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-GUEST = REPO / "installer" / "windows-guest"
+GUEST = REPO / "console" / "guest"
 PROVISION = GUEST / "provision"
 PROBE = GUEST / "probe"
 

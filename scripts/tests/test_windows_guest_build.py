@@ -15,7 +15,7 @@ import sys
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "installer" / "windows-guest"))
+sys.path.insert(0, str(REPO / "console" / "guest"))
 
 import apollo  # noqa: E402
 import build  # noqa: E402

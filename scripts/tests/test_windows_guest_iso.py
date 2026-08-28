@@ -10,7 +10,7 @@ import sys
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-GUEST = REPO / "installer" / "windows-guest"
+GUEST = REPO / "console" / "guest"
 sys.path.insert(0, str(GUEST))
 
 import autounattend as ua  # noqa: E402
