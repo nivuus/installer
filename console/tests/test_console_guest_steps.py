@@ -255,13 +255,27 @@ def _default_pci_address_of(_disk):
     return DEFAULT_NVME_PCI
 
 
+def _inert_chown(path, uid, gid):
+    """The default `chown` for plan(): a no-op. build_done()'s True branch
+    now reasserts qemu ownership on every call (see guest_steps.py's
+    ensure_qemu_owned) - without this, every test in the file that reaches
+    that branch through plan() would fall back to the REAL os.chown and the
+    REAL /var/lib/libvirt/qemu, which happens to work only because THIS
+    particular test process runs as root on the real host (see CLAUDE.md's
+    'sessions run as root on the live server') and would break on any other
+    machine. Tests that actually want to OBSERVE the chown calls build their
+    own steps.plan_steps(...) directly and inject their own recorder -
+    see RecordingChown below."""
+
+
 def plan(tmp, virsh, answers=None, disk_bytes=DISK_BYTES, pci_address_of=None):
     given = dict(ANSWERS)
     given.update(answers or {})
     given["guest_workdir"] = tmp
     return steps.plan_steps(given, {}, tmp, virsh=virsh,
                             size_of=lambda device: disk_bytes,
-                            pci_address_of=pci_address_of or _default_pci_address_of)
+                            pci_address_of=pci_address_of or _default_pci_address_of,
+                            qemu_owner=lambda: (0, 0), chown=_inert_chown)
 
 
 def by_name(plan_list):
@@ -884,14 +898,19 @@ with tempfile.TemporaryDirectory() as tmp:
     check("le reste de l environnement (PATH, etc.) est conserve",
           env.get("PATH"), os.environ.get("PATH"))
 
-    # The two chowns the field report needed by hand: the workdir (so qemu
-    # can TRAVERSE it) and the ISO itself (so qemu can OPEN it).
+    # The TWO chowns the field report needed by hand, plus a third this
+    # round of review added: the workdir (so qemu can TRAVERSE it), the
+    # copied Windows medium `define`/`start` boot FROM, and the answer-file
+    # ISO itself (so qemu can OPEN both media it wires to the domain).
     chowned = {c[0]: (c[1], c[2]) for c in chown.calls}
     check("le repertoire de travail est chowne pour l utilisateur qemu",
           chowned.get(str(pathlib.Path(tmp))), (QEMU_UID, QEMU_GID))
     iso_target = str(pathlib.Path(tmp, "nivuus-unattend.iso"))
     check("l ISO produite est chownee pour l utilisateur qemu",
           chowned.get(iso_target), (QEMU_UID, QEMU_GID))
+    windows_medium_target = str(steps.windows_media_path(tmp))
+    check("le media Windows copie est LUI AUSSI chowne pour l utilisateur qemu",
+          chowned.get(windows_medium_target), (QEMU_UID, QEMU_GID))
 
     # THE FALSIFICATION THIS STEP EXISTS TO PREVENT: only the owner may
     # change. build.py's own deliberate 0600 (it carries the product key and
@@ -921,6 +940,79 @@ with tempfile.TemporaryDirectory() as tmp:
     except steps.GuestBuildError as exc:
         check("le refus de chown nomme le fichier vise", iso_target in str(exc), True)
         check("le refus de chown nomme l uid qemu vise", str(QEMU_UID) in str(exc), True)
+
+# --- ROUND 2 : l appropriation est une PROPRIETE de l artefact, pas un
+# effet de bord de sa construction ----------------------------------------- #
+# The first pass only chowned on a FRESH build; an already-current ISO
+# (the nominal case on every reprise) never got its ownership checked
+# again. Fixed by having build_done()'s "already current" branch reassert
+# it too - proven here by writing the ISO BY HAND (mimicking "built once,
+# then found root-owned again"), never via build_step.run(), so a passing
+# `runner.calls == []` is the actual proof that no rebuild happened.
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    runner = FakeBuildRunner()
+    chown = RecordingChown()
+    given = dict(ANSWERS, guest_workdir=tmp)
+    build_step = by_name(steps.plan_steps(
+        given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=runner,
+        size_of=lambda d: DISK_BYTES,
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown))["build"]
+
+    iso_target = pathlib.Path(build_step.command[build_step.command.index("--output") + 1])
+    iso_target.parent.mkdir(parents=True, exist_ok=True)
+    iso_target.write_bytes(b"deja construite, mal possedee")
+    os.chmod(iso_target, 0o600)
+    steps.write_build_stamp(steps.build_stamp_path(str(iso_target)),
+                            build_step.fingerprint())
+
+    check("une ISO deja a jour reste consideree comme faite",
+          build_step.already_done(), True)
+    check("et surtout : AUCUNE reconstruction n a ete lancee pour l obtenir",
+          runner.calls, [])
+
+    chowned = {c[0]: (c[1], c[2]) for c in chown.calls}
+    check("le repertoire de travail finit possede par qemu SANS reconstruction",
+          chowned.get(str(pathlib.Path(tmp))), (QEMU_UID, QEMU_GID))
+    check("l ISO deja presente finit possedee par qemu SANS reconstruction",
+          chowned.get(str(iso_target)), (QEMU_UID, QEMU_GID))
+    check("le media Windows copie finit LUI AUSSI possede par qemu SANS reconstruction",
+          chowned.get(str(steps.windows_media_path(tmp))), (QEMU_UID, QEMU_GID))
+    check("le mode de l ISO deja presente reste 0600, jamais elargi",
+          os.stat(iso_target).st_mode & 0o777, 0o600)
+
+# A chown failure on that SAME "already done" branch must not be swallowed
+# into "not done" - that would send the caller into a full, multi-minute
+# rebuild that cannot fix a permission problem (the bytes are already
+# right). It is raised immediately, by name, exactly like the fresh-build
+# path above, and the rebuild it would otherwise trigger never happens.
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    given = dict(ANSWERS, guest_workdir=tmp)
+    probe = by_name(steps.plan_steps(
+        given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=FakeBuildRunner(),
+        size_of=lambda d: DISK_BYTES,
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=_inert_chown))["build"]
+    iso_target = pathlib.Path(probe.command[probe.command.index("--output") + 1])
+    iso_target.parent.mkdir(parents=True, exist_ok=True)
+    iso_target.write_bytes(b"deja construite")
+    os.chmod(iso_target, 0o600)
+    steps.write_build_stamp(steps.build_stamp_path(str(iso_target)), probe.fingerprint())
+
+    runner = FakeBuildRunner()  # must stay untouched below
+    chown = RecordingChown(fail_on={str(iso_target)})
+    build_step = by_name(steps.plan_steps(
+        given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=runner,
+        size_of=lambda d: DISK_BYTES,
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown))["build"]
+    try:
+        build_step.already_done()
+        failures.append("un chown en echec sur une ISO deja a jour n a pas ete refuse")
+    except steps.GuestBuildError as exc:
+        check("le refus (ISO deja a jour) nomme le fichier vise",
+              str(iso_target) in str(exc), True)
+    check("et surtout : le refus de chown n a PAS declenche de reconstruction",
+          runner.calls, [])
 
 # --- resolve_qemu_owner : lu du systeme, jamais devine -------------------- #
 class _FakeStat:

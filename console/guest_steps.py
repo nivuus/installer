@@ -632,6 +632,17 @@ def resolve_qemu_owner(state_dir: str = QEMU_STATE_DIR, *,
 
     `stat_fn`/`getpwuid` are injectable so tests never touch the real
     /var/lib/libvirt/qemu directory or the real passwd database.
+
+    CAVEAT, deliberately left as a caveat rather than "fixed": the gid this
+    returns is the GROUP THAT OWNS state_dir (e.g. "libvirt-qemu", gid 64055
+    on this host), not the qemu ACCOUNT's own primary gid from passwd (e.g.
+    "kvm", gid 104 here - measured via `id libvirt-qemu`). They differ, and
+    that is fine for what this function is used for (chown'ing files qemu
+    itself will open as that same uid; owner-bit access does not depend on
+    the group at all) - the production Windows medium this console's own
+    hooks read is ALREADY owned by this same directory-owning group, not by
+    "kvm". Do not "correct" this to pwd.getpwuid(uid).pw_gid without first
+    checking that assumption against the real host.
     """
     stat_fn = stat_fn or os.stat
     getpwuid = getpwuid or pwd.getpwuid
@@ -650,7 +661,8 @@ def resolve_qemu_owner(state_dir: str = QEMU_STATE_DIR, *,
             f"by uid {info.st_uid}, which has no account on this system. "
             "The qemu user account may have been removed after libvirt "
             "was installed.") from None
-    return info.st_uid, info.st_gid
+    return info.st_uid, info.st_gid  # gid: the DIRECTORY's group, see the
+    # docstring's CAVEAT above - not pw_gid, on purpose.
 
 
 def _grant_qemu_access(paths: list[Path], owner: tuple[int, int],
@@ -837,6 +849,25 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         return payload_dir.is_dir() and any(
             p.is_file() for p in payload_dir.rglob("*"))
 
+    # Ownership is a PROPERTY OF THE ARTEFACTS - the workdir, the copied
+    # Windows medium, the built ISO - not a side effect of having just built
+    # them. qemu needs all three readable/traversable every time `start`
+    # runs, whether this run just produced the ISO or found it already
+    # current from a previous one. So this is called from BOTH branches
+    # below: at the end of a fresh build, and from build_done()'s own
+    # "already current" branch - the one case a chown-only-in-run() version
+    # would silently skip forever (an ISO built once, correctly owned, then
+    # copied back by an operator as root, would stay root-owned across every
+    # later activation retry, since build_done() would keep saying "done").
+    #
+    # source_iso (the copied Windows medium, root:root from install.py's
+    # plain copy - see copy_windows_medium's own docstring) is included
+    # here, not only iso_out: `define`/`start` open BOTH media, and the
+    # 2026-08-28 field measurement hit "Permission denied" on each of them
+    # in turn, one manual chown apiece.
+    def ensure_qemu_owned() -> None:
+        _grant_qemu_access([root, source_iso, iso_out], qemu_owner(), chown)
+
     def build_done() -> bool:
         if not iso_out.is_file():
             return False
@@ -844,7 +875,16 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
             expected = fingerprint()
         except (GuestBuildError, OSError):
             return False        # cannot tell => rebuild, never skip
-        return build_is_current(stamp, expected)
+        if not build_is_current(stamp, expected):
+            return False
+        # Unlike every other predicate in this module, this call is allowed
+        # to raise instead of folding into "not done": returning False here
+        # would send the caller into a full rebuild (real minutes, real I/O)
+        # for a problem a rebuild cannot fix - the bytes are already right,
+        # only the owner would still be wrong once it finished. A named
+        # GuestBuildError, raised immediately, is the honest answer.
+        ensure_qemu_owned()
+        return True
 
     # build.py stages driver copies (~1.8 GiB) under tempfile's default
     # location, which is /tmp unless TMPDIR says otherwise - and on this
@@ -863,12 +903,7 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         env = dict(os.environ, TMPDIR=str(stage_dir))
         runner(build_cmd, env=env)
         write_build_stamp(stamp, fingerprint())
-        # The ISO lands root:root 0600 (build.py's own deliberate choice -
-        # it carries the product key and two passwords in clear). qemu runs
-        # as a different, unprivileged user and can neither traverse `root`
-        # nor open the ISO without this. Only the OWNER changes; see
-        # _grant_qemu_access's own docstring for why the mode never does.
-        _grant_qemu_access([root, iso_out], qemu_owner(), chown)
+        ensure_qemu_owned()
 
     def defined_xml() -> str | None:
         """The domain's current definition, or None when it is not defined."""
