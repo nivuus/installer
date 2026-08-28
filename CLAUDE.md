@@ -280,6 +280,33 @@ but never again let "imports cleanly" stand in for "runs cleanly" when a
 lazy import is involved; a suite that only imports proves nothing about the
 function that does the importing.
 
+**A test double MORE PERMISSIVE than production hides the disagreement it
+should reveal (2026-08-28, third occurrence on this project).** `build_run()`
+started calling `runner(build_cmd, env=env)`; `guest_steps.default_runner`
+grew the parameter, and so did the bench double (`FakeBuildRunner.__call__(self,
+argv, *, env=None)`) — but `console/hooks/activate.py`'s `classifying_runner`,
+**the only runner production ever uses**, did not. Measured: `TypeError`,
+classified as a "panne" at the `build` step, so `activate` died at the third of
+its five steps and neither the `TMPDIR` fix nor the qemu `chown` ever ran —
+with all 33 suites green. Two rules came out of it. (1) `classifying_runner`
+now forwards `**kwargs` blind: it adds nothing to the call, it only re-labels
+the exception, so the next parameter cannot reproduce this. (2) The corpus now
+drives the **production runner itself** through the `build` step
+(`test_console_activate.py`, with a fake *interpreter* standing in for
+`python`, never a fake runner) — that seam had no assertion at all, which is
+exactly how the defect crossed it.
+
+**A HIBERNATED CONSOLE IS `shut off` — `domain_up()` cannot tell it from a
+machine that never booted (2026-08-28).** The whole energy strategy rests on S4
+(`vm-idle-shutdown.sh` runs `shutdown /h /f`), and `virsh start` *resumes* that
+session. So the `start` step's boot-key assist (12 `KEY_ENTER` past the LTSC
+"Press any key to boot from CD or DVD......" prompt) was one `virsh domstate`
+away from typing into a live desktop, and the activation unit re-runs at every
+boot until the stamp exists. The discriminant that does hold is **what the
+domain is wired to**: keys are sent only while it carries BOTH installation
+media — the shape the `define` step produces and `redefine_steady_state()`
+removes once the guest is provisioned.
+
 **Package engine (2026-08-27)**: `installer/packages/` implements the
 `nivuus.dev/v1` contract — a declarative `nivuus-package.yaml` plus three hooks
 (`resolve`/`install`/`activate`). Packages are sibling repositories embedded
