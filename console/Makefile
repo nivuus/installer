@@ -20,7 +20,7 @@ help:
 # console/ imports it; the single pydantic-dependent suite (test_webapp_models)
 # stayed in installer/Makefile with the portal.
 #
-# 20 suites run here (2026-08-28): the 6 test_console_* suites,
+# 21 suites run here (2026-08-28): the 7 test_console_* suites,
 # test_retro_marker_bridge and test_vm_wake_gate (the wake-on-demand gate
 # and the units that arm it), the 11 test_windows_guest_* suites, and the
 # shell suite test_handle_vm_start. All moved here from scripts/tests/ so
@@ -39,6 +39,7 @@ PYTHON ?= python3
 test:
 	@for t in test_console_hardware test_console_resolve test_console_install \
 	          test_console_host_files test_console_wake_units test_console_activate \
+	          test_console_guest_steps \
 	          test_vm_wake_gate \
 	          test_retro_marker_bridge \
 	          test_windows_guest_apollo test_windows_guest_autounattend \
