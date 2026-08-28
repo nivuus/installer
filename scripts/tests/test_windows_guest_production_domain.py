@@ -245,26 +245,32 @@ def _domain_main_xml():
         sys.argv = argv
 
 
-# main() must now reach hardware detection instead of dying at import. An
-# ImportError or AttributeError here means the split broke a call path -
-# exactly how phase 2a failed (measured: ModuleNotFoundError, an ImportError
-# subclass, at `from common.hardware import HardwareError`, before its own
-# try block). A HardwareError/DomainError means the wiring works and this
-# particular machine's hardware does not match what build_domain_xml() wants
-# - main() catches those itself and returns 1, it never lets them escape.
-# This machine measurably HAS the targeted hardware (one discrete GPU, a
-# hybrid CPU, a spare NVMe controller), so the live outcome here is success
-# (return code 0, real domain XML) rather than a refusal - which is stronger
-# evidence the call path is live than a refusal would have been. Either
-# outcome is acceptable; only a wiring exception escaping is not. Phase 2a
-# pinned the broken state with a deliberate red marker asserting ImportError
-# - it goes away in the same change as the repair, which is the whole point
-# of having written it that way.
+# main() must now reach hardware detection instead of dying at import. Catch
+# WIDE here on purpose, then decide: a signature drift in any of the five
+# console/hardware.py entry points build_domain_xml() calls (list_gpus,
+# cpu_topology, passthrough_nvme, pci_slot_functions, HardwareError itself)
+# raises a TypeError, not an ImportError/AttributeError - and a signature
+# drift is exactly the kind of wiring break this split is most exposed to.
+# A narrow except that only watches Import/AttributeError would let a
+# TypeError crash this whole file with a raw traceback instead of a named
+# failure line - the one thing this test exists to avoid, on the failure
+# mode it is most likely to hit. So: catch broadly, then classify. A
+# HardwareError (or a DomainError, if main() is ever changed to let one
+# through - today it is not, both are caught inside main()'s own
+# try/except and turned into return code 1, so this branch is currently
+# unreachable but kept as the documented, deliberate exception for a
+# legitimate refusal) means the wiring works and this particular machine's
+# hardware does not match what build_domain_xml() wants - a real, expected
+# outcome, not a bug. Anything else is a wiring break and must fail loud,
+# named by type and message, not swallowed into a bare traceback.
 _stdout = io.StringIO()
 try:
     with contextlib.redirect_stdout(_stdout):
         _rc = _domain_main_xml()
-except (ImportError, AttributeError) as exc:
+except (domain.DomainError, hardware.HardwareError) as exc:
+    print("main() a refuse pour une raison materielle legitime: "
+          f"{type(exc).__name__}: {exc}")
+except Exception as exc:  # noqa: BLE001
     failures.append(
         f"main() ne casse plus au cablage: raised {type(exc).__name__}: {exc}"
     )
