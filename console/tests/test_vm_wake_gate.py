@@ -3,7 +3,7 @@
 
 Payloads below are REAL captures from journalctl (vm-wake-gate-*), including
 the false positives that woke the VM without any Moonlight client involved.
-Run: python3 scripts/tests/test_vm_wake_gate.py
+Run: python3 console/tests/test_vm_wake_gate.py
 """
 import importlib.util
 import pathlib

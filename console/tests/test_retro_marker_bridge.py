@@ -13,7 +13,7 @@ silent as before.
 It asserts the PATH, by driving the real install hook and reading the
 result with build.py's own default, rather than comparing two literals.
 
-Run: python3 scripts/tests/test_retro_marker_bridge.py
+Run: python3 console/tests/test_retro_marker_bridge.py
 """
 import json
 import pathlib

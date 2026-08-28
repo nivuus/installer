@@ -8,7 +8,7 @@ windowsPE pass long before any guest-side script runs. Does not build an
 ISO, read a real secret file, or touch a real Windows medium: every
 assertion here runs against nonexistent paths on purpose.
 
-Run: python3 scripts/tests/test_windows_guest_build.py
+Run: python3 console/tests/test_windows_guest_build.py
 """
 import ast
 import pathlib

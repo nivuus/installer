@@ -7,7 +7,7 @@ It is also where "PCI passthrough only" is enforced: a machine with no
 properly isolated NVMe must be refused with a sentence, not silently
 downgraded to a disk image.
 
-Run: python3 scripts/tests/test_console_resolve.py
+Run: python3 console/tests/test_console_resolve.py
 """
 import json
 import os

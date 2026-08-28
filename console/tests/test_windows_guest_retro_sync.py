@@ -21,7 +21,7 @@ Deux familles de controles :
     controle qui lit une chaine se satisfait d un commentaire, ou du contrat
     inscrit dans le temoin lui-meme.
 
-Lancer : python3 scripts/tests/test_windows_guest_retro_sync.py
+Lancer : python3 console/tests/test_windows_guest_retro_sync.py
 """
 import ast
 import base64

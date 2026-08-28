@@ -2,7 +2,7 @@
 """Tests for the secondary unattend ISO.
 
 Builds a real (tiny) ISO with xorriso, which must be installed.
-Run: python3 scripts/tests/test_windows_guest_iso.py
+Run: python3 console/tests/test_windows_guest_iso.py
 """
 import pathlib
 import shutil

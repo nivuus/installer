@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the generated production domain (sub-project C).
 
-Run: python3 scripts/tests/test_windows_guest_production_domain.py
+Run: python3 console/tests/test_windows_guest_production_domain.py
 """
 import contextlib
 import io

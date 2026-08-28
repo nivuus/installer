@@ -12,7 +12,7 @@ a hook runs INHERITING that profile, which allows exec of /bin, /sbin,
 installed there dies at VM start with a misleading "bad interpreter:
 Permission denied" and no DENIED line in dmesg.
 
-Run: python3 scripts/tests/test_console_install.py
+Run: python3 console/tests/test_console_install.py
 """
 import configparser
 import json
@@ -45,7 +45,7 @@ def load_unit(path):
     case-sensitive - StartLimitIntervalSec would silently become
     startlimitintervalsec.
 
-    Recopied from scripts/tests/test_console_wake_units.py rather than
+    Recopied from console/tests/test_console_wake_units.py rather than
     imported: suites in this repo are standalone scripts.
     """
     parser = configparser.ConfigParser(strict=False, interpolation=None)

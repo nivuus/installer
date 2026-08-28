@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the Windows unattended answer file renderer.
 
-Run: python3 scripts/tests/test_windows_guest_autounattend.py
+Run: python3 console/tests/test_windows_guest_autounattend.py
 """
 import pathlib
 import sys

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the throwaway LTSC test domain XML.
 
-Run: python3 scripts/tests/test_windows_guest_domain.py
+Run: python3 console/tests/test_windows_guest_domain.py
 """
 import pathlib
 import sys

@@ -5,7 +5,7 @@ The parsers are pure: they take captured `lspci` text. `_whole_disk_name` is
 exercised against a fake sysfs tree built in a temp dir. So these tests run
 anywhere and do not depend on the machine they execute on.
 
-Run: python3 scripts/tests/test_console_hardware.py
+Run: python3 console/tests/test_console_hardware.py
 """
 import os
 import pathlib
