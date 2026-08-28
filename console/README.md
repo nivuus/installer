@@ -80,7 +80,9 @@ what did not finish:
    `windows-admin.pass`, `apollo-ui.pass`) `guest/build.py` reads its secrets
    from, never on argv.
 2. **payload** — `guest/fetch_payload.py` fetches the offline driver/tool
-   binaries.
+   binaries and copies `agent.exe` out of the package itself (see
+   "`agent.exe` ships inside this package" below) — the one binary in the
+   offline payload that is never downloaded.
 3. **build** — `guest/build.py` renders the unattended ISO (answer file +
    payload), fingerprinted (medium identity, payload tree, answers, package
    code) so any change — not just a date — forces a rebuild.
@@ -207,6 +209,28 @@ what it took to actually build and boot the guest:
 | `apollo_password` | secret | the Apollo streaming UI's password |
 | `guest_workdir` | texte | where secrets/payload/the built ISO live, default `/var/lib/nivuus/guest` |
 
+## `agent.exe` ships inside this package
+
+`console/guest/payload/agent/agent.exe` is a **compiled** artefact — the
+Guacamole agent from `nivuus/desk` — vendored directly into this repository
+instead of being fetched or built. `fetch_payload.py` copies it into the
+offline payload tree at build time and verifies the copy's sha256 against
+the committed file; it is no longer "extracted from the current Windows VM
+before it is wiped", which used to mean a fresh machine — one that never ran
+that VM — had nothing to extract and could not install this console at all.
+
+**This is a deliberate, reviewed trade-off, not the natural home for this
+file.** `agent.exe` logically belongs to `nivuus/desk`, and no source
+checkout of that repository exists on this machine, so this package cannot
+build it from source and instead carries the binary directly. Two costs come
+with that: this repository now duplicates ownership of an artefact that is
+not its own, and the vendored copy **will drift** on every new agent
+version, since nothing here rebuilds or re-syncs it automatically — bumping
+it is a manual step, easy to forget. It also freezes ~11 MB into this
+repository's git history, permanently. See
+`console/guest/payload/agent/README.md` for the measured size/sha256 of the
+version currently vendored.
+
 ## Limites connues
 
 The host-side scripts were brought into the repository **verbatim** from the
@@ -269,7 +293,7 @@ Beyond `hooks/` and `host/`, the package also carries:
 
 | Directory | What it holds |
 |---|---|
-| `guest/` | The unattended LTSC build, the libvirt domain generator (`domain.py`), the retrogaming sync, and the provisioning scripts — 41 files, moved here from `installer/windows-guest/` so the package is self-contained. `activate` now drives `fetch_payload.py`, `build.py` and `domain.py` through `guest_steps.py` (see above). |
+| `guest/` | The unattended LTSC build, the libvirt domain generator (`domain.py`), the retrogaming sync, and the provisioning scripts — moved here from `installer/windows-guest/` so the package is self-contained. `activate` now drives `fetch_payload.py`, `build.py` and `domain.py` through `guest_steps.py` (see above). Includes `guest/payload/agent/agent.exe`, the one offline payload binary vendored in the repository instead of fetched or built (see "`agent.exe` ships inside this package" above). |
 | `tests/` | The package's own test suites — 22 files (21 Python plus the shell suite `test_handle_vm_start.sh`), all run by `console/Makefile`'s `test` target, which `installer/Makefile`'s `test-packages` delegates to. |
 
 No file under `console/` **source** imports from `installer/common` or

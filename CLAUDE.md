@@ -280,6 +280,33 @@ but never again let "imports cleanly" stand in for "runs cleanly" when a
 lazy import is involved; a suite that only imports proves nothing about the
 function that does the importing.
 
+**A test double MORE PERMISSIVE than production hides the disagreement it
+should reveal (2026-08-28, third occurrence on this project).** `build_run()`
+started calling `runner(build_cmd, env=env)`; `guest_steps.default_runner`
+grew the parameter, and so did the bench double (`FakeBuildRunner.__call__(self,
+argv, *, env=None)`) — but `console/hooks/activate.py`'s `classifying_runner`,
+**the only runner production ever uses**, did not. Measured: `TypeError`,
+classified as a "panne" at the `build` step, so `activate` died at the third of
+its five steps and neither the `TMPDIR` fix nor the qemu `chown` ever ran —
+with all 33 suites green. Two rules came out of it. (1) `classifying_runner`
+now forwards `**kwargs` blind: it adds nothing to the call, it only re-labels
+the exception, so the next parameter cannot reproduce this. (2) The corpus now
+drives the **production runner itself** through the `build` step
+(`test_console_activate.py`, with a fake *interpreter* standing in for
+`python`, never a fake runner) — that seam had no assertion at all, which is
+exactly how the defect crossed it.
+
+**A HIBERNATED CONSOLE IS `shut off` — `domain_up()` cannot tell it from a
+machine that never booted (2026-08-28).** The whole energy strategy rests on S4
+(`vm-idle-shutdown.sh` runs `shutdown /h /f`), and `virsh start` *resumes* that
+session. So the `start` step's boot-key assist (12 `KEY_ENTER` past the LTSC
+"Press any key to boot from CD or DVD......" prompt) was one `virsh domstate`
+away from typing into a live desktop, and the activation unit re-runs at every
+boot until the stamp exists. The discriminant that does hold is **what the
+domain is wired to**: keys are sent only while it carries BOTH installation
+media — the shape the `define` step produces and `redefine_steady_state()`
+removes once the guest is provisioned.
+
 **Package engine (2026-08-27)**: `installer/packages/` implements the
 `nivuus.dev/v1` contract — a declarative `nivuus-package.yaml` plus three hooks
 (`resolve`/`install`/`activate`). Packages are sibling repositories embedded
@@ -301,6 +328,25 @@ Three properties carry the design and are easy to break by accident:
   delegate. It stays coarse (`iommu`, `gpu-discrete`, `nvme-dedicated`,
   `cpu-hybrid`); the precise work — PCI functions, IOMMU groups, `vfio-pci.ids`
   — belongs to `resolve`.
+* **A fourth event carries what `resolve` measured across the reboot
+  (`installer/packages/facts.py`, 2026-08-28).** `{"event":"facts","facts":{…}}`
+  — `resolve` **returns** facts, the engine persists them into
+  `etc/nivuus/packages.json` (same 0600 file as the answers, mode unchanged),
+  and `activate_cli.py` merges them into the `hw` it hands the activate hook.
+  It exists because a `platform` package routinely measures something the
+  install itself destroys — the console's dedicated NVMe is bound to
+  `vfio-pci` by the very cmdline this installer writes, so at first boot
+  `/sys/block` no longer lists it. **Precedence is settled and enforced in
+  code: the fresh snapshot wins, a fact only fills a key detection did not
+  produce** — a fact describes the world *before* the reboot, so it may never
+  mask a measurement that can still be taken; a package wanting the
+  pre-reboot value of something still observable must name its fact
+  distinctly (`dedicated_nvme_size_bytes`, not `size_bytes`). A dropped fact
+  is warned about, never silent. Facts are **not** gated on tier: unlike
+  `kernel-cmdline`/`modules`/`hugepages-mib` they reach no boot chain, only
+  the activate phase of the package that produced them. The channel has three
+  links (runner → state file → activate_cli) and each has its own named
+  assertion in the suites: cutting one names it.
 
 Two more findings from implementing the engine, both worth knowing before
 touching it:

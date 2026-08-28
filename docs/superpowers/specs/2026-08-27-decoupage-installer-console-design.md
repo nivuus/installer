@@ -100,9 +100,9 @@ C'est ce qui rend les deux chemins d'entrée symétriques.
 
 | Phase | Quand | Reçoit | Peut |
 | --- | --- | --- | --- |
-| `resolve` | Avant toute écriture | `hw.json` + réponses du wizard | **Lecture seule.** Retourne le bloc `platform` résolu, ou un refus motivé |
+| `resolve` | Avant toute écriture | `hw.json` + réponses du wizard | **Lecture seule.** Retourne le bloc `platform` résolu **et ses faits mesurés**, ou un refus motivé |
 | `install` | Sur un système de fichiers cible | `--root` (`/mnt/target` en ISO, `/` en autonome) | Écrire dans ce root |
-| `activate` | Après le reboot, réseau disponible | — | Tout : téléchargement de Windows, `virsh define`, provisionnement |
+| `activate` | Après le reboot, réseau disponible | `hw` détecté à frais **+ les faits de son `resolve`** | Tout : téléchargement de Windows, `virsh define`, provisionnement |
 
 En mode ISO, `install` tourne dans le chroot ; en autonome, à `/`. **Même code,
 root différent.** `activate` passe dans les deux cas par
@@ -117,6 +117,37 @@ avant de partitionner. Le bootloader reste donc à sa place actuelle dans
 réordonnancement. C'est aussi là que vit le refus motivé du « passthrough PCI
 uniquement » : personne ne perd un disque avant d'apprendre que son matériel ne
 convient pas.
+
+### Les faits : ce que `resolve` mesure et que le redémarrage efface
+
+Un package `platform` mesure régulièrement une chose que l'installation
+elle-même détruit : un disque sur le point d'être lié à `vfio-pci`, un
+périphérique que la nouvelle ligne de commande noyau capture, un état
+transitoire. `resolve` est la seule phase qui les voit encore ; `activate`
+reconstruit son `hw` par une détection fraîche d'après le redémarrage, où ils
+ont disparu. D'où un quatrième événement, **`{"event":"facts","facts":{…}}`** :
+`resolve` **retourne** ses faits, **le moteur les persiste** dans
+`etc/nivuus/packages.json` (0600, à côté des réponses du wizard — les faits ne
+sont pas des secrets mais partagent leur fichier, et le mode ne s'élargit pas),
+et `activate_cli.py` les fusionne dans le `hw` du hook. `resolve` n'écrit
+toujours rien : c'est cette propriété qui garde `bootloader` à sa place dans
+`run.py`.
+
+Les faits **ne sont pas soumis au tier**. `kernel-cmdline`, `modules` et
+`hugepages-mib` sont refusés à un package `userspace` parce qu'ils atteignent
+la chaîne d'amorçage et que le wizard doit les montrer pour une confirmation
+distincte ; un fait n'atteint rien d'autre que la phase `activate` du package
+qui l'a produit.
+
+**Précédence, tranchée : la détection fraîche gagne.** Un fait décrit le monde
+d'*avant* le redémarrage ; il ne comble que les clefs que la détection ne
+produit pas. Là où la mesure reste possible, « maintenant » l'emporte sur
+« alors » — un fait périmé ne peut donc jamais masquer une mesure vivante. Un
+fait ne vaut que là où la détection s'est tue, ce qui est exactement le cas
+pour lequel il existe. Un package voulant la valeur d'avant d'une chose encore
+observable la nomme distinctement (`console` nomme la sienne
+`dedicated_nvme_size_bytes`, pas `size_bytes`). Le contrat normatif est
+`installer/packages/facts.py`.
 
 ### Le manifeste de `console`
 
@@ -193,7 +224,8 @@ et `installer/packages/wizard.py`. Un fichier JSON Schema séparé serait une
 seconde source de vérité qui dériverait de l'implémentation, exactement comme
 on redoute que les deux dépôts dérivent l'un de l'autre. Les deux modules
 exposent donc leurs constantes (`API_VERSION`, `TIERS`, `HOOK_PHASES`,
-`CLAIM_MODES`, `PLATFORM_KEYS`, `QUESTION_TYPES`), et la CI de `nivuus/console`
+`CLAIM_MODES`, `PLATFORM_KEYS`, `QUESTION_TYPES`) — `facts.py` de même
+(`FACTS_EVENT`, `STATE_KEY`) —, et la CI de `nivuus/console`
 assertera ces valeurs — une dérive du contrat casse alors un test, au lieu de
 laisser un document mentir en silence.
 

@@ -333,6 +333,163 @@ check("... naming the step it happened in",
 check("... and keeping the raw cause readable",
       "disque disparu" in unexpected)
 
+# --- LA COUTURE : le runner DE PRODUCTION traverse l etape 'build' ------- #
+#
+# Tout le reste de ce fichier pilote run_steps() avec des pas SIMULES, et
+# test_console_guest_steps.py plane l etape build avec un faux runner. Entre
+# les deux, personne ne faisait passer classifying_runner - le seul runner de
+# production - par un vrai plan_steps(). C est exactement la couture par
+# laquelle le defaut est passe : build_run() s est mis a appeler
+# runner(build_cmd, env=env), guest_steps.default_runner a gagne le
+# parametre, classifying_runner non - et la phase activate mourait au 3e des
+# 5 pas avec un TypeError, banc au vert. Le double de test etait PLUS
+# PERMISSIF que la production, il masquait le desaccord au lieu de le
+# reveler.
+#
+# Ce qui suit est la seule assertion du corpus ou la commande est REELLEMENT
+# lancee en sous-processus par le runner de production. L interpreteur est
+# un faux (un script shell mis a la place de `python`), jamais le vrai
+# build.py : construire une ISO prendrait des minutes et lirait un medium
+# qui n existe pas ici.
+
+GUEST_ANSWERS = {
+    "ltsc_key": "AAAAA-BBBBB-CCCCC-DDDDD-EEEEE",
+    "admin_password": "motdepasse",
+    "apollo_password": "motdepasse2",
+    "dedicated_nvme": "/dev/nvme1n1",
+    "windows_iso": "/media/inexistant/ltsc.iso",
+    "retro": False,
+}
+
+
+def fake_interpreter(directory, exit_code=0):
+    """Un `python` de facade : ecrit l ISO demandee, note son TMPDIR, sort.
+
+    Mis a la place de l interpreteur (plan_steps(python=...)), il recoit
+    exactement l argv que build_run() a compose et l environnement que le
+    runner de production lui a passe - donc il OBSERVE ce que la production
+    fait, sans rien construire.
+    """
+    script = os.path.join(directory, "fauxpython")
+    with open(script, "w") as fh:
+        fh.write(
+            "#!/bin/sh\n"
+            "out=\"\"\n"
+            "while [ $# -gt 0 ]; do\n"
+            "  [ \"$1\" = \"--output\" ] && out=\"$2\"\n"
+            "  shift\n"
+            "done\n"
+            f"[ {exit_code} -ne 0 ] && exit {exit_code}\n"
+            "printf '%s' \"$TMPDIR\" > \"$out.tmpdir\"\n"
+            ": > \"$out\"\n"
+            "chmod 600 \"$out\"\n"
+            "exit 0\n")
+    os.chmod(script, 0o755)
+    return script
+
+
+def build_step_with(workdir, exit_code=0):
+    """L etape 'build' d un VRAI plan, cablee sur le runner de production."""
+    steps_mod = activate.guest_steps
+    steps_mod.windows_media_path(workdir).write_bytes(b"medium")
+    answers = dict(GUEST_ANSWERS, guest_workdir=workdir)
+    planned = steps_mod.plan_steps(
+        answers, {}, workdir,
+        virsh=lambda *a: subprocess.CompletedProcess(list(a), 1, "", ""),
+        runner=activate.classifying_runner,          # LE runner de production
+        size_of=lambda disk: 2000 * 1024 ** 3,
+        pci_address_of=lambda disk: "0000:03:00.0",
+        qemu_owner=lambda: (os.getuid(), os.getgid()),
+        chown=lambda path, uid, gid: None,
+        python=fake_interpreter(workdir, exit_code))
+    return {step.name: step for step in planned}["build"]
+
+
+with tempfile.TemporaryDirectory() as workdir:
+    step = build_step_with(workdir)
+    raised = None
+    try:
+        step.run()
+    except Exception as exc:                    # noqa: BLE001 - c est l epreuve
+        raised = exc
+    if raised is not None:
+        failures.append("le runner de production n a PAS traverse l etape "
+                        f"build : {type(raised).__name__}: {raised}")
+    iso = os.path.join(workdir, "nivuus-unattend.iso")
+    check("l ISO demandee a bien ete produite par la commande lancee",
+          os.path.isfile(iso))
+    # Et la tache 2 s execute VRAIMENT : le TMPDIR arrive jusqu au processus.
+    tmpdir_seen = ""
+    if os.path.isfile(iso + ".tmpdir"):
+        tmpdir_seen = open(iso + ".tmpdir").read()
+    check("le TMPDIR de la tache 2 atteint reellement le processus lance",
+          tmpdir_seen.startswith(workdir + os.sep))
+    check("... et ce n est pas le /tmp du systeme", tmpdir_seen != "/tmp")
+
+with tempfile.TemporaryDirectory() as workdir:
+    # Et le classement survit au passage : une commande qui sort non-zero
+    # reste une 'panne', nommee, jamais une trace.
+    step = build_step_with(workdir, exit_code=1)
+    message = ""
+    try:
+        activate.run_steps([step], emit_fn=lambda event: None)
+    except activate.ActivationFailure as exc:
+        message = str(exc)
+    check("un build.py en echec reste classe comme une panne de construction",
+          "construction" in message.lower())
+    check("... et nomme l etape", "'build'" in message)
+
+# --- une exception depuis already_done() est CLASSEE, pas une trace ------ #
+# build_done() a le droit de lever (il reaffirme les droits qemu sur la
+# branche "ISO deja a jour", ou rendre False declencherait une
+# reconstruction de plusieurs minutes qui ne corrige rien). run_steps()
+# n entourait que run() : l exception sortait non classee, main() ne connait
+# qu ActivationFailure, et l operateur recevait une trace Python au lieu de
+# la ligne unique que ce module promet.
+def raising_done_step(name, exc):
+    def boom():
+        raise exc
+    return activate.guest_steps.Step(name, boom, lambda: None, None, None, "")
+
+
+def classified_done_failure(label, name, exc):
+    """Le message classe qu already_done() produit - ou un FAIL nomme.
+
+    Le `except Exception` large n est pas de la prudence decorative : c est
+    la falsification elle-meme. Sans lui, retirer le garde de run_steps()
+    ferait sortir l exception brute et TUERAIT le fichier a cet endroit -
+    une trace, exactement le defaut sous epreuve, au lieu d un FAIL nomme.
+    """
+    try:
+        activate.run_steps([raising_done_step(name, exc)],
+                           emit_fn=lambda event: None)
+    except activate.ActivationFailure as classified:
+        return str(classified)
+    except Exception as raw:                    # noqa: BLE001 - c est l epreuve
+        failures.append(f"{label} : already_done() a laisse fuir "
+                        f"{type(raw).__name__} sans classement ({raw})")
+        return ""
+    failures.append(f"{label} : rien n a echoue")
+    return ""
+
+
+refused_predicate = classified_done_failure(
+    "un refus leve par already_done()", "build",
+    activate.guest_steps.GuestBuildError(
+        "could not hand /var/lib/nivuus/guest/nivuus-unattend.iso to the "
+        "qemu user (uid 64055): Operation not permitted"))
+check("un refus leve par already_done() ressort CLASSE",
+      refused_predicate.startswith("console activate:"))
+check("... nommant l etape ou il s est produit", "'build'" in refused_predicate)
+check("... et classe comme un refus motive, pas une panne",
+      "entree refusee" in refused_predicate.lower())
+
+surprise = classified_done_failure(
+    "une exception inattendue depuis already_done()", "define",
+    RuntimeError("libvirtd a disparu"))
+check("une exception inattendue depuis already_done() est classee elle aussi",
+      surprise.startswith("console activate:") and "libvirtd a disparu" in surprise)
+
 # already_done() is honoured: a step that says it is already done must
 # never have its run() called at all.
 ran = []

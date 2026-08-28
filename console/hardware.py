@@ -279,6 +279,30 @@ def _device_to_pci_address(device: str,
     return tail if tail.count(":") == 2 else None
 
 
+def block_device_for_pci_address(address: str,
+                                 sysfs_root: Optional[str] = None) -> Optional[str]:
+    """The block device name backed by `address`, or None if none is found.
+
+    The reverse of `_device_to_pci_address()`. resolve.py needs this only
+    when the passthrough NVMe was AUTO-SELECTED - no `dedicated_nvme` answer
+    to start a size lookup from, only the PCI address `passthrough_nvme()`
+    picked. Like `_device_to_pci_address`, this only finds anything while
+    the device is still bound to a driver that exposes a block device under
+    `sysfs_root`; once vfio-pci owns it there is nothing here to walk, which
+    is exactly why the size lookup that uses this must be best-effort, never
+    a refusal on its own (see resolve.py's dedicated_nvme_size_bytes()).
+    """
+    root = sysfs_root or _sysfs_block_root()
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return None
+    for name in sorted(names):
+        if _device_to_pci_address(name, root) == address:
+            return name
+    return None
+
+
 def select_passthrough_nvme(controllers: list[dict],
                             host_addresses: Optional[set[str]],
                             wanted_address: Optional[str] = None) -> dict:
@@ -439,12 +463,18 @@ def pci_address_for_device(path: str,
     return _device_to_pci_address(name, sysfs_root)
 
 
-def block_device_size_bytes(device: str, sysfs_root: str = "/sys/block") -> int:
+def block_device_size_bytes(device: str, sysfs_root: Optional[str] = None) -> int:
     """Size in bytes of a block device, read from sysfs - never assumed.
 
     `activate` sizes the guest's partitions from the REAL size of the
     dedicated disk, not a hardcoded figure; this is the one read that number
-    comes from.
+    comes from. resolve.py also calls this, best-effort, at resolve time -
+    see its dedicated_nvme_size_bytes(). `sysfs_root` defaults through
+    `_sysfs_block_root()` (honouring NIVUUS_SYSFS_BLOCK) rather than a bare
+    "/sys/block" literal, the same seam `_device_to_pci_address` already
+    uses - both read the same fake sysfs tree in tests, and a caller that
+    overrides one without the other would silently read two different
+    trees.
 
     `/sys/block/<disk>/size` is ALWAYS expressed in 512-byte sectors,
     whatever the disk's physical sector size - a 4 KiB-formatted NVMe still
@@ -465,6 +495,7 @@ def block_device_size_bytes(device: str, sysfs_root: str = "/sys/block") -> int:
     Raises HardwareError if the device cannot be found under `sysfs_root`, or
     if its `size` file cannot be read.
     """
+    sysfs_root = sysfs_root or _sysfs_block_root()
     name = os.path.basename(device.rstrip("/"))
 
     disk_dir = os.path.join(sysfs_root, name)

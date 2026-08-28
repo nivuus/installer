@@ -30,6 +30,7 @@ from packages.conflicts import check_conflicts
 from packages.dependencies import (DependencyError, install_order,
                                    missing_dependencies)
 from packages.discovery import discover, eligibility
+from packages.facts import STATE_KEY as FACTS_STATE_KEY
 from packages.manifest import MANIFEST_NAME, ManifestError
 from packages.runner import HookError, run_install, run_resolve
 from packages.wizard import (DISK_TYPE, WizardError, load_questions,
@@ -375,8 +376,10 @@ def apply_packages(plan, target: str, nivuus_dir: str, hw: dict, emit) -> None:
 
     _deploy_activation(plan, target, nivuus_dir, emit)
 
-    # The answers must outlive the portal: the activate phase runs at first
-    # boot, long after there is anyone left to ask. Written incrementally,
+    # The answers - and the facts resolve measured - must outlive the portal:
+    # the activate phase runs at first boot, long after there is anyone left
+    # to ask, and long after the disk resolve measured has been handed to
+    # vfio-pci and stopped existing as a block device. Written incrementally,
     # after each package succeeds, and not once at the end: if package 2's
     # install hook raises, package 1 has already written into the target and
     # been armed for first boot. A state file written only on full success
@@ -384,13 +387,21 @@ def apply_packages(plan, target: str, nivuus_dir: str, hw: dict, emit) -> None:
     # package no file admits to having installed.
     state = {}
     state_path = os.path.join(target, STATE_REL_PATH)
-    for manifest, answers, _ in plan:
+    for manifest, answers, resolution in plan:
         emit.info("packages", 95, f"Applying package « {manifest.label} »…")
         try:
             run_install(manifest, hw, answers, target, emit)
         except HookError as exc:
             raise StepError(str(exc)) from exc
-        state[manifest.name] = {"version": manifest.version, "answers": answers}
+        record = {"version": manifest.version, "answers": answers}
+        # Link 2 of 3 of the resolve -> activate channel (facts.py): what
+        # resolve measured BEFORE the disk was touched, carried across the
+        # reboot that makes it unmeasurable. Written only when there is
+        # something to write, so a package that emits no fact produces byte
+        # for byte the state file it always did.
+        if resolution.facts:
+            record[FACTS_STATE_KEY] = resolution.facts
+        state[manifest.name] = record
         # 0600, not the default 0644: this file records each package's answers
         # VERBATIM so the activate phase can replay them after the reboot, and
         # a `secret` question lands here in cleartext - the console's Windows

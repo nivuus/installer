@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import hashlib
+import shutil
 import subprocess
 import sys
 import urllib.request
@@ -48,6 +49,16 @@ VIRTIO_ISO_URL = ("https://fedorapeople.org/groups/virt/virtio-win/"
 STEAM_URL = "https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe"
 WINFSP_URL = ("https://github.com/winfsp/winfsp/releases/download/"
               "v2.0/winfsp-2.0.23075.msi")
+
+# agent.exe is the ONE offline payload binary that is never downloaded: it is
+# a compiled artefact of the sibling repository nivuus/desk, vendored
+# straight into this package (see payload/agent/README.md and
+# console/README.md for the reserve behind that decision - no source
+# checkout of nivuus/desk exists on a build machine, so it cannot be built
+# here, and it used to have to be extracted from the one production Windows
+# VM that happened to be running it, which left a fresh machine with nothing
+# to extract at all).
+PACKAGED_AGENT_EXE = Path(__file__).resolve().parent / "payload" / "agent" / "agent.exe"
 
 # Retrogaming (OPTIONAL, --retro). Three artefacts the guest cannot obtain on
 # its own, ~30 MB in total: a payload built WITHOUT retrogaming carries none
@@ -240,6 +251,48 @@ def fetch(item: Download, drivers_dir: Path) -> str:
     return hexdigest
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def install_packaged_agent(drivers_dir: Path) -> str:
+    """Copy the package's own agent.exe into the offline payload tree.
+
+    Unlike fetch(), there is no network and no manifest here: the source of
+    truth is the file tracked in this repository's git history
+    (PACKAGED_AGENT_EXE), not a URL that can rot. What still matters is
+    verifying the COPY, not just making it - an 11 MB file that gets
+    silently truncated by a full disk or an interrupted process would
+    otherwise surface only deep inside provisioning, on a screenless guest,
+    as an agent.exe that will not run. Comparing sha256 at both ends catches
+    that immediately, at build time.
+    """
+    if not PACKAGED_AGENT_EXE.is_file():
+        raise FetchError(
+            f"the package does not carry agent.exe: {PACKAGED_AGENT_EXE} is "
+            "missing. See console/guest/payload/agent/README.md - the "
+            "binary must be committed there before this console can be "
+            "built at all."
+        )
+    dest = drivers_dir / "agent" / "agent.exe"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(PACKAGED_AGENT_EXE, dest)
+    src_digest = _sha256(PACKAGED_AGENT_EXE)
+    dest_digest = _sha256(dest)
+    if src_digest != dest_digest:
+        raise FetchError(
+            f"copying agent.exe from the package to {dest} produced a "
+            f"different sha256 ({dest_digest}) than the package's own copy "
+            f"({src_digest}) - the copy is corrupt, most likely truncated. "
+            f"Delete {dest} and re-run."
+        )
+    return dest_digest
+
+
 # w11/amd64 is the 24H2 driver set; the guest is build 26100.
 VIRTIO_MEMBERS = {"netkvm": "NetKVM/w11/amd64", "viofs": "viofs/w11/amd64"}
 
@@ -361,6 +414,8 @@ def main(argv=None) -> int:
             " (--retro/--no-retro given explicitly)" if args.retro is not None
             else " (from the install wizard's marker, no --retro/--no-retro "
                  "given)"))
+        print(f"  agent sha256 {install_packaged_agent(drivers)} "
+              "(bundled in the package, not downloaded)")
         for item in plan_downloads(drivers, retro=retro):
             print(f"  {item.name} sha256 {fetch(item, drivers)}")
         extract_virtio(drivers / BUILD_CACHE_DIRNAME / "virtio-win.iso", drivers)
@@ -377,8 +432,10 @@ def main(argv=None) -> int:
         print("\nRetrogaming is off for this payload: 7zr.exe, the Python "
               "installer and the retro wheels were NOT fetched, and "
               "32-retro.ps1 will say on the guest that the option is off.")
-    print("\nNot fetched, and never fetchable: agent/agent.exe must be "
-          "extracted from the current Windows VM before it is wiped.")
+    print(f"\nagent/agent.exe came from the package itself "
+          f"({PACKAGED_AGENT_EXE}), not from a live VM: see "
+          "console/guest/payload/agent/README.md for the reserve that "
+          "decision carries.")
     return 0
 
 

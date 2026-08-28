@@ -28,10 +28,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pwd
 import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
@@ -64,6 +66,12 @@ MIN_GAMES_GIB = 100
 
 # guest/domain.py's DOMAIN_NAME. Same copy-not-import reason.
 DOMAIN_NAME = "Windows"
+
+# The one payload file whose presence proves the CURRENT fetch_payload.py
+# ran, not merely that some payload/ tree exists. Mirrors that script's own
+# `dest = drivers_dir / "agent" / "agent.exe"` - copied, not imported (the
+# module docstring's rule). See payload_done() for why it is this file.
+PAYLOAD_WITNESS = Path("agent") / "agent.exe"
 # The states in which the guest is already up, listed positively rather than
 # excluding "shut off". `in shutdown` and `crashed` are states to get OUT of,
 # not successes: read as "already started" they would leave a crashed guest
@@ -582,13 +590,206 @@ def command_label(argv: list[str]) -> str:
     return head
 
 
-def default_runner(argv: list[str]) -> None:
-    """Launch a step's command, refusing loudly on a non-zero exit."""
-    proc = subprocess.run(argv, check=False)
+def default_runner(argv: list[str], *,
+                   env: Mapping[str, str] | None = None) -> None:
+    """Launch a step's command, refusing loudly on a non-zero exit.
+
+    `env` is optional and additive in spirit even though `subprocess.run`
+    treats it as a full replacement: every caller that needs it (only the
+    build step, for TMPDIR - see build_run) passes `dict(os.environ, ...)`
+    itself, so PATH and the rest of the parent environment stay intact.
+    Every other step passes None, which means "inherit unchanged", exactly
+    the behaviour before this parameter existed.
+    """
+    proc = subprocess.run(argv, check=False, env=env)
     if proc.returncode != 0:
         raise GuestBuildError(
             f"{command_label(argv)} exited with status {proc.returncode}: "
             f"{' '.join(argv)}")
+
+
+# --- the boot-key assist -------------------------------------------------- #
+# The LTSC medium shows "Press any key to boot from CD or DVD......" and the
+# firmware only waits a few seconds for it. Measured on the real console,
+# 2026-08-28: left untouched, the guest sat on that prompt for 42 MINUTES,
+# disk usage frozen at 194 KiB (nothing had been written), until the prompt
+# expired and UEFI gave up with "BdsDxe: No bootable option or device was
+# found" - there being no OTHER bootable device, the blank target disk. A
+# single KEY_ENTER sent by hand is what got Setup running and the disk
+# growing. This is not a superstition: it is the measured answer to a real
+# prompt on this exact medium.
+#
+# BOUNDED, and the bound is not an elegance, it is the correctness. The
+# prompt is live for a few seconds only; docs/superpowers/plans/recette-b.md
+# (the accepted recipe this mirrors) records what unbounded ENTERs hit once
+# it is gone - Windows Setup, mid-install, is showing screens of its own,
+# and a "Are you sure you want to quit?" dialog once froze a build at 8%
+# because the extra ENTER activated the focused Cancel button. Past the
+# boot window a "helpful" keystroke is not help, it is blind input into a
+# live installer.
+BOOT_KEY_ATTEMPTS = 12
+BOOT_KEY_INTERVAL_S = 1.0
+
+
+def send_boot_keys(virsh: Callable[..., object],
+                   sleep: Callable[[float], None] = time.sleep,
+                   domain: str = DOMAIN_NAME) -> None:
+    """Nudge past the CD boot prompt: KEY_ENTER, once a second, BOOT_KEY_ATTEMPTS times.
+
+    Never raises: this is an aid for a medium that shows the prompt, not a
+    condition the start step depends on - a medium with no such prompt is
+    completely unaffected by it (send-key lands on nothing, harmlessly), and
+    a `virsh send-key` failure (domain gone, libvirtd unreachable) is logged
+    and skipped rather than turned into a failed guest start.
+    """
+    for attempt in range(1, BOOT_KEY_ATTEMPTS + 1):
+        try:
+            proc = virsh("send-key", domain, "--codeset", "linux", "KEY_ENTER")
+            rc = getattr(proc, "returncode", 1)
+            if rc != 0:
+                print(f"send-key {attempt}/{BOOT_KEY_ATTEMPTS} to {domain}: "
+                     f"virsh exited {rc} (ignored, boot-prompt aid only)",
+                     file=sys.stderr)
+        except OSError as exc:
+            print(f"send-key {attempt}/{BOOT_KEY_ATTEMPTS} to {domain}: "
+                 f"{exc} (ignored, boot-prompt aid only)", file=sys.stderr)
+        sleep(BOOT_KEY_INTERVAL_S)
+
+
+# libvirtd's own per-domain runtime-state directory. The libvirt-daemon
+# package chowns it, at install time, to the EXACT user/group its qemu
+# processes run as - libvirt-qemu on Debian/Arch, qemu on Fedora/RHEL, and
+# no two distributions agree on the literal name (measured on this host,
+# 2026-08-28: libvirt-qemu, uid 64055). It exists on any libvirt install
+# before a single domain has ever run, which is why resolve_qemu_owner()
+# below reads IT rather than a hardcoded name or a commented-out default in
+# qemu.conf (this host's own /etc/libvirt/qemu.conf has `#user =
+# "libvirt-qemu"` - commented, i.e. "use the packaged default" - so parsing
+# that file would find nothing on the very host this was written against).
+QEMU_STATE_DIR = "/var/lib/libvirt/qemu"
+
+
+def resolve_qemu_owner(state_dir: str = QEMU_STATE_DIR, *,
+                       stat_fn: Callable[[str], os.stat_result] | None = None,
+                       getpwuid: Callable[[int], object] | None = None
+                       ) -> tuple[int, int]:
+    """(uid, gid) qemu itself runs as - READ from the live system, never a
+    literal guessed here. See QEMU_STATE_DIR's own comment for why this
+    directory, specifically, is the thing to read.
+
+    Two distinct refusals, both naming their cause rather than raising a
+    bare OSError/KeyError: the state directory itself is missing or
+    unreadable (libvirt is not installed as expected), or it IS readable but
+    owned by a uid with no account in the passwd database (an orphaned
+    ownership, e.g. after the qemu account was removed). Either way the
+    caller gets a sentence naming what was looked at, not a traceback - the
+    same rule the whole module follows (see the module docstring).
+
+    `stat_fn`/`getpwuid` are injectable so tests never touch the real
+    /var/lib/libvirt/qemu directory or the real passwd database.
+
+    CAVEAT, deliberately left as a caveat rather than "fixed": the gid this
+    returns is the GROUP THAT OWNS state_dir (e.g. "libvirt-qemu", gid 64055
+    on this host), not the qemu ACCOUNT's own primary gid from passwd (e.g.
+    "kvm", gid 104 here - measured via `id libvirt-qemu`). They differ, and
+    that is fine for what this function is used for (chown'ing files qemu
+    itself will open as that same uid; owner-bit access does not depend on
+    the group at all) - the production Windows medium this console's own
+    hooks read is ALREADY owned by this same directory-owning group, not by
+    "kvm". Do not "correct" this to pwd.getpwuid(uid).pw_gid without first
+    checking that assumption against the real host.
+    """
+    stat_fn = stat_fn or os.stat
+    getpwuid = getpwuid or pwd.getpwuid
+    try:
+        info = stat_fn(state_dir)
+    except OSError as exc:
+        raise GuestBuildError(
+            f"cannot determine the user qemu runs as: {state_dir} is not "
+            f"readable ({exc.strerror or exc}) - is libvirt-daemon "
+            "installed on this host?") from None
+    try:
+        getpwuid(info.st_uid)
+    except KeyError:
+        raise GuestBuildError(
+            f"cannot determine the user qemu runs as: {state_dir} is owned "
+            f"by uid {info.st_uid}, which has no account on this system. "
+            "The qemu user account may have been removed after libvirt "
+            "was installed.") from None
+    return info.st_uid, info.st_gid  # gid: the DIRECTORY's group, see the
+    # docstring's CAVEAT above - not pw_gid, on purpose.
+
+
+def _grant_qemu_access(paths: list[Path], owner: tuple[int, int],
+                       chown: Callable[[str, int, int], None]) -> None:
+    """chown each of `paths` to the user qemu runs as. NEVER touches mode.
+
+    The ISO carries the product key and two passwords in clear (see
+    guest/build.py's own printed warning) and is deliberately 0600 - see
+    write_secrets() and build.py itself for the same rule applied to the
+    secret files. Changing the OWNER is enough for the SAME-uid qemu
+    process to open a file it does not have group/other access to; widening
+    the mode would be a security regression dressed up as a fix.
+    """
+    uid, gid = owner
+    for path in paths:
+        try:
+            chown(str(path), uid, gid)
+        except OSError as exc:
+            raise GuestBuildError(
+                f"could not hand {path} to the qemu user (uid {uid}): "
+                f"{exc.strerror or exc}. qemu would get 'Permission denied' "
+                "opening it.") from None
+
+
+def _grant_qemu_traverse(path: Path, chmod: Callable[[str, int], None],
+                         stat_fn: Callable[[str], object] | None = None) -> None:
+    """Let qemu WALK THROUGH `path`, and nothing more: one added `o+x` bit.
+
+    TRAVERSING ASKS FOR LESS THAN OWNING. The first cut of this fix handed
+    the workdir to qemu with the same chown as the two media, which does
+    work - but owning a directory is the right to create, rename and delete
+    its entries, and this directory contains `secrets/` (0700 root: the
+    product key and two passwords in clear). A qemu compromised through one
+    of the many surfaces it exposes to a guest could then rename `secrets/`
+    aside and substitute its own before the next build read them. The
+    execute bit alone grants exactly what qemu actually needs - resolving
+    `<workdir>/nivuus-unattend.iso` down to a file it already owns - and
+    grants no right over the directory's contents. `secrets/` stays
+    unreadable to it on its own 0700.
+
+    Not the READ bit either: listing the directory is not needed to open a
+    path that is known in full, so `o+r` would be one more bit than the job
+    requires.
+
+    Idempotent by observation, not by hope: the mode is read first and the
+    chmod is skipped when the bit is already there, so a workdir an
+    operator deliberately widened is never rewritten by a retry.
+
+    SCOPE, stated because it is a real limit and not an oversight: only
+    THIS directory. qemu resolves the full path, so every ancestor must be
+    traversable too, and this does not walk up - exactly as the chown it
+    replaces did not. On a fresh install the chain is fine (the parents are
+    created by mkdir(parents=True) under the installer's umask, 0755), but
+    a pre-existing `/var/lib/nivuus` left at 0750 by another Nivuus
+    component - this development host has one, created 2026-08-16 by the
+    hardware blackbox - would block qemu one level up, with the same
+    "Permission denied" and nothing here to say so. Widening an ancestor
+    that belongs to another component is deliberately NOT done blind; if
+    the field ever hits it, the fix is to decide the mode of
+    /var/lib/nivuus once, where it is created.
+    """
+    stat_fn = stat_fn or os.stat
+    try:
+        mode = stat_fn(str(path)).st_mode & 0o7777      # type: ignore[attr-defined]
+        if mode & 0o001:
+            return
+        chmod(str(path), mode | 0o001)
+    except OSError as exc:
+        raise GuestBuildError(
+            f"could not make {path} traversable by the qemu user: "
+            f"{exc.strerror or exc}. qemu would get 'Permission denied' "
+            "resolving the media paths under it.") from None
 
 
 def _secret(answers: Mapping[str, object], key: str) -> str:
@@ -632,20 +833,33 @@ def _retro_flag(answers: Mapping[str, object]) -> list[str]:
 
 def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
                workdir: str, *, virsh: Callable[..., object] | None = None,
-               runner: Callable[[list[str]], None] | None = None,
+               runner: Callable[..., None] | None = None,
                size_of: Callable[[str], int] | None = None,
                python: str | None = None,
                build_inputs: Mapping[str, str] | None = None,
-               pci_address_of: Callable[[str], str | None] | None = None
+               pci_address_of: Callable[[str], str | None] | None = None,
+               qemu_owner: Callable[[], tuple[int, int]] | None = None,
+               chown: Callable[[str, int, int], None] | None = None,
+               chmod: Callable[[str, int], None] | None = None,
+               sleep: Callable[[float], None] | None = None
                ) -> list[Step]:
     """The five steps, in order, for this host's answers. Runs nothing.
 
-    `virsh`, `runner`, `size_of` and `pci_address_of` are injectable so
-    tests can replace them: the real ones read - and, for `start`, drive -
-    the production domain, or walk the real /sys/block tree.
+    `virsh`, `runner`, `size_of`, `pci_address_of`, `qemu_owner`, `chown`,
+    `chmod` and `sleep` are injectable so tests can replace them: the real
+    ones read -
+    and, for `start`, drive - the production domain, walk the real
+    /sys/block tree, read /var/lib/libvirt/qemu's owner, actually chown a
+    file only root can hand off, or actually wait a second twelve times
+    (see send_boot_keys) - none of which a test suite can afford to do for
+    real.
     """
     virsh = virsh or default_virsh
     runner = runner or default_runner
+    qemu_owner = qemu_owner or resolve_qemu_owner
+    chown = chown or os.chown
+    chmod = chmod or os.chmod
+    sleep = sleep or time.sleep
     python = python or sys.executable or "python3"
 
     secrets = {key: _secret(answers, key) for key in SECRET_FILES}
@@ -744,8 +958,46 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
     def payload_done() -> bool:
         # Shallow on purpose: fetch_payload.py is offline-first and cheap to
         # replay, so it re-verifies what is there far better than we could.
-        return payload_dir.is_dir() and any(
-            p.is_file() for p in payload_dir.rglob("*"))
+        #
+        # But shallow is not "anything at all". The witness is agent.exe
+        # SPECIFICALLY, and it is not an arbitrary pick: it is the newest
+        # thing fetch_payload.py places (it is copied out of the package
+        # itself, not downloaded - see guest/fetch_payload.py's
+        # PACKAGED_AGENT_EXE), so it is the one file an inherited payload/
+        # tree - one produced by an OLDER fetch_payload.py, on a host that
+        # has run this before - is guaranteed not to have. "Any file at all"
+        # accepted exactly that tree, skipped the step, and left step 40 of
+        # the provisioning with no agent to install: the void the packaging
+        # of agent.exe had just filled. Whatever ends up being the last
+        # payload piece added, this predicate must name it.
+        return (payload_dir / PAYLOAD_WITNESS).is_file()
+
+    # ACCESS IS A PROPERTY OF THE ARTEFACTS - the workdir, the copied
+    # Windows medium, the built ISO - not a side effect of having just built
+    # them. qemu needs the two media openable and the workdir traversable
+    # every time `start` runs, whether this run just produced the ISO or
+    # found it already current from a previous one. So this is called from BOTH branches
+    # below: at the end of a fresh build, and from build_done()'s own
+    # "already current" branch - the one case a chown-only-in-run() version
+    # would silently skip forever (an ISO built once, correctly owned, then
+    # copied back by an operator as root, would stay root-owned across every
+    # later activation retry, since build_done() would keep saying "done").
+    #
+    # source_iso (the copied Windows medium, root:root from install.py's
+    # plain copy - see copy_windows_medium's own docstring) is included
+    # here, not only iso_out: `define`/`start` open BOTH media, and the
+    # 2026-08-28 field measurement hit "Permission denied" on each of them
+    # in turn, one manual chown apiece.
+    #
+    # Two different grants, on purpose, because the two needs differ. The
+    # FILES change owner (qemu opens them; the mode stays 0600, they carry
+    # the product key and two passwords). The DIRECTORY only gains `o+x`:
+    # qemu has to walk through it, not own it - owning it would let a
+    # compromised qemu rename `secrets/` aside and substitute its own. See
+    # _grant_qemu_traverse.
+    def ensure_qemu_owned() -> None:
+        _grant_qemu_access([source_iso, iso_out], qemu_owner(), chown)
+        _grant_qemu_traverse(root, chmod)
 
     def build_done() -> bool:
         if not iso_out.is_file():
@@ -754,12 +1006,35 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
             expected = fingerprint()
         except (GuestBuildError, OSError):
             return False        # cannot tell => rebuild, never skip
-        return build_is_current(stamp, expected)
+        if not build_is_current(stamp, expected):
+            return False
+        # Unlike every other predicate in this module, this call is allowed
+        # to raise instead of folding into "not done": returning False here
+        # would send the caller into a full rebuild (real minutes, real I/O)
+        # for a problem a rebuild cannot fix - the bytes are already right,
+        # only the owner would still be wrong once it finished. A named
+        # GuestBuildError, raised immediately, is the honest answer.
+        ensure_qemu_owned()
+        return True
+
+    # build.py stages driver copies (~1.8 GiB) under tempfile's default
+    # location, which is /tmp unless TMPDIR says otherwise - and on this
+    # host /tmp is a 10 GiB tmpfs, already 97% full (see CLAUDE.md's
+    # tmpfs/swap notes for the same class of failure). stage_dir sits on the
+    # SAME filesystem as iso_out (both under the workdir, on the data disk),
+    # so the fix is also cheaper than a cross-filesystem TMPDIR would be:
+    # build.py's tempfile.TemporaryDirectory ends with an os.replace/rename
+    # of the finished ISO, and rename() only avoids a full copy when source
+    # and destination share a filesystem.
+    stage_dir = root / "tmp"
 
     def build_run() -> None:
         media_identity(source_iso)      # refuse a missing medium by name
-        runner(build_cmd)
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ, TMPDIR=str(stage_dir))
+        runner(build_cmd, env=env)
         write_build_stamp(stamp, fingerprint())
+        ensure_qemu_owned()
 
     def defined_xml() -> str | None:
         """The domain's current definition, or None when it is not defined."""
@@ -834,11 +1109,66 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
             return define_cmd
         return define_cmd + ["--replace"]
 
+    def carries_install_media() -> bool:
+        """Is the domain, RIGHT NOW, wired to BOTH installation media?
+
+        This is the "am I about to boot an installer?" question, and it is
+        NOT the same question as domain_defined() - which also answers True
+        for the steady-state domain carrying NEITHER medium, a terminal and
+        legitimate state. Here only the media-carrying shape counts.
+        """
+        xml = defined_xml()
+        if xml is None:
+            return False        # unreachable libvirtd proves nothing
+        return source_iso in xml and str(iso_out) in xml
+
     def domain_up() -> bool:
         proc = virsh("domstate", DOMAIN_NAME)
         if getattr(proc, "returncode", 1) != 0:
             return False        # unreachable libvirtd is not "already done"
         return (proc.stdout or "").strip() in DOMAIN_UP_STATES
+
+    def start_run() -> None:
+        """Start the domain, then help it past the CD boot prompt - IF, and
+        only if, this start is a start OF THE INSTALLATION MEDIA.
+
+        TWO conditions, and the second one is the load-bearing one.
+
+        `domain_up()` is read BEFORE `runner(start_cmd)`, never after: the
+        question is not "is the guest up now" (true the instant `virsh
+        start` returns), it is "was it already up before I touched it". In
+        the normal pipeline (activate.py's run_steps) that is already
+        guaranteed by already_done() gating whether run() is even called;
+        the check is repeated here so this step is safe on its own.
+
+        THAT CHECK ALONE IS NOT ENOUGH, and believing it was is the defect
+        this docstring used to carry. A HIBERNATED CONSOLE IS `shut off`.
+        The whole energy strategy of this host rests on S4 (`shutdown /h
+        /f` from vm-idle-shutdown.sh), and libvirt reports a hibernated
+        domain exactly as it reports one that never booted - so `was_up`
+        answers False for a console whose owner has a session, and games,
+        waiting inside it. `virsh start` RESUMES that session, and twelve
+        KEY_ENTER then land in it. The activation unit re-runs at every
+        boot until the stamp exists, and a GPU hook refusing the `start`
+        step is documented as EXPECTED, so this path is reachable, not
+        theoretical.
+
+        The discriminant that does hold is what the domain is wired to:
+        carries_install_media() is true only while BOTH installation media
+        are attached, which is the shape the `define` step above produces
+        and the shape guest-ready-watch.py's redefine_steady_state()
+        REMOVES once the guest is provisioned. A hibernated production
+        console is the steady-state domain: no media, no keystrokes. A
+        fresh install is about to sit on "Press any key to boot from CD or
+        DVD......": media, keystrokes. Read before the start, like the
+        other one, and for the same reason - it must describe the domain
+        this call found, not the one it leaves behind.
+        """
+        booting_media = carries_install_media()
+        was_up = domain_up()
+        runner(start_cmd)
+        if not was_up and booting_media:
+            send_boot_keys(virsh, sleep)
 
     return [
         Step("secrets", secrets_done, write_secrets, None, None,
@@ -851,7 +1181,7 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         # --replace at run time when a stale domain is actually there.
         Step("define", domain_defined, lambda: runner(define_argv()), define_cmd,
              None, "define the libvirt domain from detected hardware"),
-        Step("start", domain_up, lambda: runner(start_cmd), start_cmd, None,
+        Step("start", domain_up, start_run, start_cmd, None,
              "start the guest so Windows Setup runs unattended"),
     ]
 

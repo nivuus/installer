@@ -324,6 +324,40 @@ with tempfile.TemporaryDirectory() as fake_block:
                                           sysfs_root=fake_block),
           None)
 
+    # --- block_device_for_pci_address : le sens inverse ------------------ #
+    # resolve.py en a besoin quand le NVMe a passer est choisi AUTOMATIQUEMENT
+    # (pas de reponse dedicated_nvme) : il n a alors qu une adresse PCI, et
+    # doit retrouver le /dev/... pour lire sa taille avant que vfio-pci ne
+    # fasse disparaitre le peripherique bloc.
+    check("une adresse connue rend son peripherique bloc",
+          hardware.block_device_for_pci_address("0000:03:00.0",
+                                                sysfs_root=fake_block),
+          "nvme9n1")
+    check("une adresse absente de l arbre rend None",
+          hardware.block_device_for_pci_address("0000:09:09.9",
+                                                sysfs_root=fake_block),
+          None)
+
+# Sans sysfs_root explicite, block_device_for_pci_address() doit honorer
+# NIVUUS_SYSFS_BLOCK comme _device_to_pci_address() - c est le meme seam,
+# et resolve.py l appelle sans jamais passer sysfs_root lui-meme.
+with tempfile.TemporaryDirectory() as fake_block:
+    os.makedirs(os.path.join(fake_block, "nvme9n1", "device"))
+    os.makedirs(os.path.join(fake_block, "pci", "0000:03:00.0"))
+    os.symlink(os.path.join(fake_block, "pci", "0000:03:00.0"),
+               os.path.join(fake_block, "nvme9n1", "device", "device"))
+    saved = os.environ.get("NIVUUS_SYSFS_BLOCK")
+    os.environ["NIVUUS_SYSFS_BLOCK"] = fake_block
+    try:
+        check("NIVUUS_SYSFS_BLOCK est honore sans sysfs_root explicite",
+              hardware.block_device_for_pci_address("0000:03:00.0"),
+              "nvme9n1")
+    finally:
+        if saved is None:
+            os.environ.pop("NIVUUS_SYSFS_BLOCK", None)
+        else:
+            os.environ["NIVUUS_SYSFS_BLOCK"] = saved
+
 # --- block_device_size_bytes : la taille reelle, pas une supposition ----- #
 # /sys/block/<name>/size is ALWAYS in 512-byte sectors, whatever the disk's
 # physical sector size. A 4 KiB-formatted NVMe still reports here in units of
@@ -372,6 +406,28 @@ with tempfile.TemporaryDirectory() as tmp:
 check_raises("un peripherique inconnu est refuse", hardware.HardwareError,
              lambda: hardware.block_device_size_bytes("/dev/nexistepas",
                                                       sysfs_root="/nowhere"))
+
+# Sans sysfs_root explicite, block_device_size_bytes() doit honorer
+# NIVUUS_SYSFS_BLOCK - le meme seam que _device_to_pci_address(). Avant la
+# tache 1, sysfs_root valait le litteral "/sys/block" et ignorait la
+# variable d environnement : resolve.py, qui n en passe jamais, lisait alors
+# le VRAI /sys/block de la machine qui execute les tests au lieu du faux
+# arbre - c est exactement ce qui a fait echouer les premiers tests de
+# resolve ajoutes dans cette tache (voir le rapport).
+with tempfile.TemporaryDirectory() as tmp:
+    fake = pathlib.Path(tmp) / "nvme9n1"
+    fake.mkdir()
+    (fake / "size").write_text("2048\n")
+    saved = os.environ.get("NIVUUS_SYSFS_BLOCK")
+    os.environ["NIVUUS_SYSFS_BLOCK"] = tmp
+    try:
+        check("NIVUUS_SYSFS_BLOCK est honore sans sysfs_root explicite",
+              hardware.block_device_size_bytes("/dev/nvme9n1"), 2048 * 512)
+    finally:
+        if saved is None:
+            os.environ.pop("NIVUUS_SYSFS_BLOCK", None)
+        else:
+            os.environ["NIVUUS_SYSFS_BLOCK"] = saved
 
 # --- la selection du NVMe, de facon DETERMINISTE ------------------------- #
 # Sur du texte lspci capture, pas sur le materiel de cette machine : c est

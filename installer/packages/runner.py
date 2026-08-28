@@ -30,12 +30,23 @@ Events a hook may emit, one JSON object per line:
     {"event":"progress","pct":int,"msg":str}
     {"event":"platform","kernel-cmdline":[...],"modules":[...],
      "hugepages-mib":int}          - resolve only
+    {"event":"facts","facts":{str: any}}             - resolve only
     {"event":"refuse","reason":str}                  - resolve only
     {"event":"done"}                                 - advisory only, see below
 Anything else on stdout is relayed as a progress line rather than dropped: a
 hook that prints is easier to debug than a hook that is silently truncated -
 up to MAX_HOOK_OUTPUT_BYTES (below), past which an accidental print loop must
 not be allowed to OOM the installer mid-install.
+
+A `facts` event is the channel between resolve and activate: what resolve
+measured that the reboot will make unmeasurable (a disk about to be bound to
+vfio-pci, a device the new kernel command line captures). resolve RETURNS
+them here, the engine persists them into etc/nivuus/packages.json, and
+activate_cli.py merges them back into the `hw` it detects at first boot. See
+facts.py for the shape and, more importantly, for the precedence rule when a
+fact and the fresh snapshot speak about the same key. Unlike the platform
+block, facts are not gated on tier: they reach no boot chain, only the
+package that produced them.
 
 `done` is advisory, not enforced: nothing here checks that a hook emitted it,
 and nothing should start to - only the subprocess exit code decides success
@@ -79,8 +90,9 @@ import subprocess
 import sys
 import tempfile
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from .facts import FactsError, merge_into_hw, parse_facts_event
 from .manifest import Manifest, Platform
 
 # A hook is third-party code; it never gets to hang the install forever.
@@ -104,6 +116,10 @@ class Resolution:
     ok: bool
     reason: str
     platform: Platform
+    # What resolve measured for its own later use, NOT for the boot chain.
+    # Empty for a package that emits none, which is why the state file gains
+    # no `facts` key at all for such a package - see steps/packages.py.
+    facts: dict = field(default_factory=dict)
 
 
 def _context(manifest: Manifest, hw: dict, answers: dict) -> str:
@@ -260,12 +276,25 @@ def run_resolve(manifest: Manifest, hw: dict, answers: dict,
     events = _run_hook(manifest, "resolve", hw, answers, emit=emit)
 
     resolved = Platform()
+    measured: dict = {}
     for event in events:
         kind = event.get("event")
         if kind == "refuse":
             reason = str(event.get("reason") or "").strip() \
                 or "le package a refusé cette machine sans en donner la raison"
+            # No facts on a refusal: nothing will be installed, so there is
+            # no activate phase left to hand them to.
             return Resolution(ok=False, reason=reason, platform=manifest.platform)
+        if kind == "facts":
+            # Successive `facts` events accumulate, last writer wins per key -
+            # a hook may measure in several places and report as it goes.
+            try:
+                measured.update(parse_facts_event(event))
+            except FactsError as exc:
+                raise HookError(
+                    f"package {manifest.name}: hook 'resolve' emitted "
+                    f"{exc}") from exc
+            continue
         if kind == "platform":
             cmdline_raw = event.get("kernel-cmdline")
             if cmdline_raw is None:
@@ -285,7 +314,8 @@ def run_resolve(manifest: Manifest, hw: dict, answers: dict,
                 hugepages_mib=hugepages,
             )
     return Resolution(ok=True, reason="",
-                      platform=manifest.platform.merge(resolved))
+                      platform=manifest.platform.merge(resolved),
+                      facts=measured)
 
 
 def run_install(manifest: Manifest, hw: dict, answers: dict, root: str,
@@ -294,6 +324,15 @@ def run_install(manifest: Manifest, hw: dict, answers: dict, root: str,
     _run_hook(manifest, "install", hw, answers, root=root, emit=emit)
 
 
-def run_activate(manifest: Manifest, hw: dict, answers: dict, emit=None) -> None:
-    """Post-reboot phase, on the live system with network. Raises HookError."""
-    _run_hook(manifest, "activate", hw, answers, emit=emit)
+def run_activate(manifest: Manifest, hw: dict, answers: dict, emit=None,
+                 facts: dict | None = None) -> None:
+    """Post-reboot phase, on the live system with network. Raises HookError.
+
+    `facts` is what this package's own resolve measured before the reboot,
+    read back from the state file by activate_cli.py. It is merged into `hw`
+    here rather than by every caller, so the precedence rule (facts.py: the
+    fresh snapshot wins, a fact only fills a key detection did not produce)
+    has exactly one implementation on the activate path.
+    """
+    _run_hook(manifest, "activate", merge_into_hw(hw, facts or {}), answers,
+              emit=emit)

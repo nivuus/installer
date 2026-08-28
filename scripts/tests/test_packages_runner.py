@@ -197,6 +197,57 @@ with tempfile.TemporaryDirectory() as tmp:
         check("the error names hugepages-mib for the boolean case",
               "hugepages-mib" in str(exc), True)
 
+# --- MAILLON 1/3 du canal resolve -> activate : run_resolve doit RAPPORTER
+# les faits qu'un hook emet. Le maillon 2 (persistance dans
+# etc/nivuus/packages.json) et le maillon 3 (fusion dans le hw de activate)
+# sont eprouves dans test_install_engine_packages.py. --------------------- #
+mesureur = load_manifest(str(FIXTURES / "mesureur" / "nivuus-package.yaml"))
+res_facts = run_resolve(mesureur, HW, {})
+check("MAILLON 1 (runner) : run_resolve rapporte le fait emis par resolve — "
+      "sans lui rien ne quitte la phase resolve",
+      res_facts.facts.get("pre_reboot_measure"), 4242)
+check("MAILLON 1 (runner) : tous les faits emis sont rapportes, pas le premier",
+      res_facts.facts.get("total_cpus"), 999)
+check("un package userspace a droit aux faits : ils n'atteignent aucune "
+      "chaine d'amorcage, contrairement au bloc platform",
+      mesureur.tier, "userspace")
+
+# Un package qui n'emet aucun fait continue de fonctionner a l'identique : la
+# collection de faits ne doit rien changer pour lui, et .facts doit etre un
+# dict vide - jamais None, que les appelants auraient a tester.
+check("un package sans fait resout toujours", res.ok, True)
+check("et ses faits sont un dict vide, pas None", res.facts, {})
+check("un package sans hook resolve du tout a lui aussi des faits vides",
+      res_static.facts, {})
+check("un refus ne rapporte aucun fait : il n'y aura pas d'activate",
+      refused.facts, {})
+
+# Un evenement 'facts' malforme est un hook casse : refuser en nommant le
+# package, jamais avaler silencieusement - une cle de fait devient une cle du
+# hw que activate lit.
+with tempfile.TemporaryDirectory() as tmp:
+    bad_facts = _resolve_only_pkg(
+        tmp, "bad-facts",
+        RESOLVE_BOOTSTRAP +
+        "print(json.dumps({'event': 'facts', 'facts': 'taille=12'}))\n")
+    try:
+        run_resolve(bad_facts, HW, {})
+        failures.append("a non-mapping 'facts' payload did not raise HookError")
+    except HookError as exc:
+        check("l'erreur nomme le package", "bad-facts" in str(exc), True)
+        check("l'erreur nomme l'evenement fautif", "facts" in str(exc), True)
+
+with tempfile.TemporaryDirectory() as tmp:
+    no_payload = _resolve_only_pkg(
+        tmp, "empty-facts",
+        RESOLVE_BOOTSTRAP + "print(json.dumps({'event': 'facts'}))\n")
+    try:
+        run_resolve(no_payload, HW, {})
+        failures.append("a 'facts' event with no payload did not raise HookError")
+    except HookError as exc:
+        check("l'erreur nomme le package pour un evenement sans charge utile",
+              "empty-facts" in str(exc), True)
+
 # --- output cap: an accidental print loop must not OOM the installer. Round
 # 1 capped the *parsed events*, but capture_output=True had already read the
 # whole subprocess stdout into memory before that cap ever ran - measured at

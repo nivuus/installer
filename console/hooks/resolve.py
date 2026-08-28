@@ -95,6 +95,44 @@ def guest_memory_mib(hw: dict):
     return int(budget), None
 
 
+def dedicated_nvme_size_bytes(nvme: dict, wanted: str) -> int | None:
+    """Best-effort size, in bytes, of the NVMe chosen for passthrough.
+
+    Read HERE, and only here: resolve runs before partition() and before the
+    disk is bound to vfio-pci (see the module docstring), so this is the one
+    phase where the kernel still exposes a block device for it at all.
+    guest_steps.py's own fallback - hardware.block_device_size_bytes()
+    against /sys/block, at ACTIVATE time - has nothing left to read once the
+    target's kernel command line takes vfio-pci ownership of the device from
+    boot onward: measured on this very host, `lspci -nnk -d ::0108` shows the
+    dedicated NVMe bound to vfio-pci while `ls /sys/block` lists only the
+    host's own disk. See guest_steps.py::_disk_bytes for the consuming side.
+
+    `wanted` is the raw /dev/... answer when the operator named a disk - the
+    live-ISO path this package favours (see hardware.select_passthrough_nvme
+    for why). Without one, `nvme["address"]` is all resolve has, so the
+    block device is found by reversing the same sysfs lookup
+    pci_address_for_device() uses.
+
+    What carries it across the reboot is the engine's facts channel, not the
+    platform block: see installer/packages/facts.py, and main() below for the
+    event this becomes.
+
+    Never raises and never turns into a `refuse` on its own: an unreadable
+    size here must not withhold GPU/NVMe passthrough from an otherwise valid
+    machine. guest_steps.py falls back to sysfs by itself later, and refuses
+    BY NAME only if that also fails - this function returning None is
+    exactly the "at default" case its docstring describes.
+    """
+    device = wanted or hardware.block_device_for_pci_address(nvme.get("address") or "")
+    if not device:
+        return None
+    try:
+        return hardware.block_device_size_bytes(device)
+    except hardware.HardwareError:
+        return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", required=True)
@@ -180,6 +218,12 @@ def main() -> int:
 
     ids.append(nvme["id"])
 
+    # Best-effort: never gates the refuse/accept decision above (see the
+    # function's own docstring for why). Computed now, while resolve still
+    # has `wanted` and `nvme` in scope, so it can flow into the same
+    # `platform` event below rather than needing a second hardware pass.
+    nvme_size_bytes = dedicated_nvme_size_bytes(nvme, wanted)
+
     # isolation_plan RAISES on a malformed CPU snapshot rather than translating
     # it: what it returns lands on the kernel command line, and the allowlist
     # downstream guards shell metacharacters only - it would happily pass a
@@ -201,6 +245,19 @@ def main() -> int:
           "kernel-cmdline": cmdline,
           "modules": [],
           "hugepages-mib": guest_mib})
+    if nvme_size_bytes is not None:
+        # A `facts` event, NOT a fourth key of the platform block: this one
+        # never reaches the kernel command line. It is a measurement the
+        # reboot destroys - the kernel command line emitted just above binds
+        # this very disk to vfio-pci, after which no /sys/block entry
+        # describes it - so it travels through the engine's facts channel
+        # (installer/packages/facts.py): resolve returns it, the engine
+        # persists it in etc/nivuus/packages.json, activate gets it back
+        # inside its `hw`. snake_case, like the rest of a hw snapshot
+        # (memory_mib, total_cpus, ...), because that is where it lands:
+        # guest_steps.plan_steps() reads it there, see _disk_bytes().
+        emit({"event": "facts",
+              "facts": {"dedicated_nvme_size_bytes": nvme_size_bytes}})
     emit({"event": "done"})
     return 0
 

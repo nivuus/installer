@@ -7,6 +7,7 @@ takes its "already there" branch.
 
 Run: python3 console/tests/test_windows_guest_fetch_payload.py
 """
+import hashlib
 import pathlib
 import sys
 import tempfile
@@ -246,6 +247,65 @@ with tempfile.TemporaryDirectory() as tmp:
 # cherche les artefacts que celui-ci y depose.
 check("les deux modules nomment le meme dossier",
       fetch_payload.RETRO_DIRNAME, payload.RETRO_DIRNAME)
+
+
+# --- Tache 4 (chaine reelle) : agent.exe voyage desormais DANS le paquet,
+# et fetch_payload.py ne pretend plus qu il est "jamais recuperable" - sur
+# une machine neuve, sans VM Windows a extraire de quoi que ce soit, cette
+# ancienne phrase rendait l etape 40 du provisionnement impossible a
+# satisfaire des le depart.
+check("le paquet embarque bien console/guest/payload/agent/agent.exe",
+      fetch_payload.PACKAGED_AGENT_EXE.is_file(), True)
+# Une taille plancher plutot que la valeur exacte du jour : ce fichier sera
+# remplace a chaque nouvelle version de l agent (voir la reserve dans
+# payload/agent/README.md), la valeur exacte n a donc pas vocation a rester
+# fixe - seule une troncature grossiere doit faire echouer ce controle.
+if fetch_payload.PACKAGED_AGENT_EXE.is_file():
+    check("agent.exe embarque n est pas tronque (>5 Mo)",
+          fetch_payload.PACKAGED_AGENT_EXE.stat().st_size > 5_000_000, True)
+
+# install_packaged_agent() doit copier le binaire du paquet vers drivers/ ET
+# verifier la somme de controle a destination - une copie de 11 Mo tronquee
+# en silence ne se decouvrirait sinon qu a l etape 40, sur un invite sans
+# ecran.
+with tempfile.TemporaryDirectory() as tmp:
+    drivers = pathlib.Path(tmp) / "drivers"
+    digest = fetch_payload.install_packaged_agent(drivers)
+    dest = drivers / "agent" / "agent.exe"
+    check("install_packaged_agent copie bien le binaire dans drivers/agent/",
+          dest.is_file(), True)
+    check("le sha256 retourne correspond au fichier copie a destination",
+          hashlib.sha256(dest.read_bytes()).hexdigest(), digest)
+    check("le sha256 correspond au binaire du paquet",
+          digest,
+          hashlib.sha256(fetch_payload.PACKAGED_AGENT_EXE.read_bytes()).hexdigest())
+
+# Un paquet SANS agent.exe (le binaire retire ou jamais commite) doit faire
+# echouer le controle en le NOMMANT - c est la preuve, dans le sens de la
+# tache 4, que ce test detecte vraiment sa disparition.
+_real_agent = fetch_payload.PACKAGED_AGENT_EXE
+fetch_payload.PACKAGED_AGENT_EXE = pathlib.Path(tempfile.gettempdir()) / "agent-absent-du-paquet.exe"
+try:
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            fetch_payload.install_packaged_agent(pathlib.Path(tmp) / "drivers")
+            failures.append(
+                "install_packaged_agent: a accepte un paquet sans agent.exe")
+        except fetch_payload.FetchError as e:
+            if "agent.exe" not in str(e):
+                failures.append(
+                    f"install_packaged_agent ne nomme pas agent.exe manquant: {e}")
+finally:
+    fetch_payload.PACKAGED_AGENT_EXE = _real_agent
+
+# fetch_payload.py ne doit plus annoncer agent.exe comme "jamais
+# recuperable" - la phrase devient fausse des que le paquet le porte - et
+# doit dire d ou il vient reellement a la place.
+_src = pathlib.Path(fetch_payload.__file__).read_text()
+check("fetch_payload n annonce plus agent.exe comme jamais recuperable",
+      "never fetchable" in _src, False)
+check("... et dit desormais d ou il vient vraiment",
+      "payload/agent/README.md" in _src and "package itself" in _src, True)
 
 
 if failures:

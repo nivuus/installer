@@ -255,13 +255,27 @@ def _default_pci_address_of(_disk):
     return DEFAULT_NVME_PCI
 
 
+def _inert_chown(path, uid, gid):
+    """The default `chown` for plan(): a no-op. build_done()'s True branch
+    now reasserts qemu ownership on every call (see guest_steps.py's
+    ensure_qemu_owned) - without this, every test in the file that reaches
+    that branch through plan() would fall back to the REAL os.chown and the
+    REAL /var/lib/libvirt/qemu, which happens to work only because THIS
+    particular test process runs as root on the real host (see CLAUDE.md's
+    'sessions run as root on the live server') and would break on any other
+    machine. Tests that actually want to OBSERVE the chown calls build their
+    own steps.plan_steps(...) directly and inject their own recorder -
+    see RecordingChown below."""
+
+
 def plan(tmp, virsh, answers=None, disk_bytes=DISK_BYTES, pci_address_of=None):
     given = dict(ANSWERS)
     given.update(answers or {})
     given["guest_workdir"] = tmp
     return steps.plan_steps(given, {}, tmp, virsh=virsh,
                             size_of=lambda device: disk_bytes,
-                            pci_address_of=pci_address_of or _default_pci_address_of)
+                            pci_address_of=pci_address_of or _default_pci_address_of,
+                            qemu_owner=lambda: (0, 0), chown=_inert_chown)
 
 
 def by_name(plan_list):
@@ -271,6 +285,20 @@ def by_name(plan_list):
 def arg(cmd, flag):
     """The value a flag actually carries - presence alone proves nothing."""
     return cmd[cmd.index(flag) + 1] if flag in cmd else None
+
+
+# --- le temoin du payload est COPIE de fetch_payload.py, jamais devine --- #
+# guest_steps.py ne peut pas importer fetch_payload.py (regle du module :
+# rien sous console/guest/ n est importable depuis la phase activate, ces
+# fichiers importent jinja2). Le chemin est donc recopie - et une copie qui
+# derive silencieusement redonne exactement le defaut corrige ici : une
+# etape payload sautee alors qu agent.exe manque. Cette assertion lit la
+# SOURCE de fetch_payload.py et exige que le litteral y soit encore.
+_FETCH_SRC = pathlib.Path(CONSOLE, "guest", "fetch_payload.py").read_text()
+check("le temoin du payload est bien agent/agent.exe",
+      str(steps.PAYLOAD_WITNESS), os.path.join("agent", "agent.exe"))
+check("et fetch_payload.py depose TOUJOURS agent.exe a cet endroit",
+      'drivers_dir / "agent" / "agent.exe"' in _FETCH_SRC, True)
 
 
 NO_DOMAIN = {"dumpxml": (1, ""), "domstate": (1, "")}
@@ -387,16 +415,27 @@ with tempfile.TemporaryDirectory() as tmp:
     check("un secret perime doit etre reecrit",
           other["secrets"].already_done(), False)
 
-    # payload: the predicate is deliberately shallow - fetch_payload.py is
-    # offline-first and cheap to replay, so an existing non-empty tree is
-    # enough. An empty directory is not.
+    # payload: the predicate stays shallow - fetch_payload.py is offline-first
+    # and cheap to replay - but shallow is NOT "any file at all". It names one
+    # witness, agent.exe, because that is the piece an INHERITED payload/ tree
+    # (produced by an older fetch_payload.py, on a host that has run this
+    # before) cannot have: agent.exe is copied out of the package itself, it
+    # is not downloaded. "Any file" accepted such a tree, skipped the step,
+    # and left step 40 of the provisioning with no agent to install.
     payload_dir = pathlib.Path(payload_cmd[payload_cmd.index("--drivers-dir") + 1])
     payload_dir.mkdir(parents=True, exist_ok=True)
     check("un repertoire de payload vide n est pas fait",
           st["payload"].already_done(), False)
     (payload_dir / "nvidia").mkdir()
     (payload_dir / "nvidia" / "driver.exe").write_text("x")
-    check("un payload peuple est fait", st["payload"].already_done(), True)
+    check("UN ARBRE PAYLOAD HERITE, PEUPLE MAIS SANS agent.exe, N EST PAS FAIT",
+          st["payload"].already_done(), False)
+    witness = payload_dir / steps.PAYLOAD_WITNESS
+    witness.parent.mkdir(parents=True, exist_ok=True)
+    check("un repertoire agent/ vide ne suffit pas non plus",
+          st["payload"].already_done(), False)
+    witness.write_text("MZ")
+    check("un payload portant agent.exe est fait", st["payload"].already_done(), True)
 
     # build: the ISO alone never suffices - the fingerprint must agree.
     # The COPY console/hooks/install.py places under the workdir is what
@@ -644,6 +683,199 @@ for state, up in (("running", True), ("idle", True), ("paused", True),
         check(f"domstate '{state}' compte comme demarre", st["start"].already_done(), up)
 
 
+# --- l aide au demarrage : KEY_ENTER pour passer l invite du media --------
+# Sans elle, mesure sur la console reelle le 2026-08-28 : 42 MINUTES sur
+# "Press any key to boot from CD or DVD......", disque fige a 194 Ko, puis
+# "BdsDxe: No bootable option or device was found" - Setup ne demarre
+# jamais. C est ce defaut precis que start_run() corrige.
+#
+# runner EST TOUJOURS un faux ici, jamais steps.default_runner : celui-ci
+# lancerait un vrai `virsh start Windows` en sous-processus, exactement
+# l appel interdit contre le domaine de production (voir la consigne de la
+# tache).
+class Unbounded(Exception):
+    """Le faux virsh a ete appele plus que de raison."""
+
+
+class BoundedVirsh(FakeVirsh):
+    """FakeVirsh, mais qui REFUSE au-dela d un plafond.
+
+    Sans ce plafond, la falsification qui compte ici - retirer la borne de
+    send_boot_keys - ne fait pas ECHOUER la suite, elle la FIGE : le `sleep`
+    injecte rend la main aussitot, donc une boucle non bornee tourne pour
+    toujours. La signature au dehors est alors un `rc=124` de delai depasse,
+    strictement indiscernable d une contention d environnement (il y en a
+    eu cinq dans la meme journee). Un plafond transforme cet enlisement en
+    un FAIL nomme, ce qu une epreuve doit produire.
+    """
+
+    LIMIT = 4 * 12 + 20         # 4x la borne attendue, plus les lectures d etat
+
+    def __call__(self, *args):
+        if len(self.calls) >= self.LIMIT:
+            raise Unbounded(f"plus de {self.LIMIT} appels virsh")
+        return super().__call__(*args)
+
+
+def _install_domain_xml(tmp):
+    """Le XML du domaine d INSTALLATION : il porte les DEUX medias.
+
+    C est ce que l etape `define` produit, et c est le seul etat ou une
+    frappe a un sens - le firmware est sur "Press any key to boot from CD or
+    DVD......". Un domaine de regime (console provisionnee, hibernee) ne
+    porte plus aucun des deux : voir redefine_steady_state().
+    """
+    return ("<domain><devices>"
+            f"<disk><source file='{steps.windows_media_path(tmp)}'/></disk>"
+            f"<disk><source file='{pathlib.Path(tmp, 'nivuus-unattend.iso')}'/></disk>"
+            "</devices></domain>")
+
+
+def _run_start(tmp, virsh_answers):
+    """Lance l etape start avec des faux virsh/runner/sleep, et rend les
+    appels observes : (calls du virsh, argv lances par le runner,
+    duree de chaque pause)."""
+    fake_virsh = BoundedVirsh(virsh_answers)
+    launched = []
+    slept = []
+    given = dict(ANSWERS, guest_workdir=tmp)
+    st = by_name(steps.plan_steps(
+        given, {}, tmp, virsh=fake_virsh, runner=launched.append,
+        size_of=lambda d: DISK_BYTES, pci_address_of=_default_pci_address_of,
+        qemu_owner=lambda: (0, 0), chown=_inert_chown, sleep=slept.append))
+    try:
+        st["start"].run()
+    except Unbounded as exc:
+        failures.append(f"l envoi de frappes n est pas borne ({exc}) : une "
+                        "boucle sans borne finirait par frapper Windows Setup")
+    return fake_virsh.calls, launched, slept
+
+
+def off_and_keyable(tmp):
+    return {"dumpxml": (0, _install_domain_xml(tmp)),
+            "domstate": (0, "shut off\n"), "send-key": (0, "")}
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    calls, launched, slept = _run_start(tmp, off_and_keyable(tmp))
+    send_key_calls = [c for c in calls if c[0] == "send-key"]
+
+    check("virsh start est bien lance", launched, [["virsh", "start", "Windows"]])
+    check("start envoie KEY_ENTER apres avoir demarre un domaine eteint",
+          len(send_key_calls) > 0, True)
+    # BORNE, exactement - pas "au moins", pas "a peu pres". Un envoi non
+    # borne finirait par frapper Windows Setup une fois l invite passee
+    # (voir recette-b.md : un ENTER de trop y a valide un bouton Annuler
+    # focus et gele une construction a 8%).
+    check("l envoi est borne A EXACTEMENT BOOT_KEY_ATTEMPTS frappes",
+          len(send_key_calls), steps.BOOT_KEY_ATTEMPTS)
+    check("BOOT_KEY_ATTEMPTS vaut 12, comme la recette acceptee",
+          steps.BOOT_KEY_ATTEMPTS, 12)
+    check("chaque frappe cible le bon domaine, codeset linux, KEY_ENTER",
+          all(c == ["send-key", steps.DOMAIN_NAME, "--codeset", "linux",
+                    "KEY_ENTER"] for c in send_key_calls), True)
+    check("une pause separe chaque frappe, autant que de frappes",
+          len(slept), steps.BOOT_KEY_ATTEMPTS)
+    # Les DEUX lectures (les medias portes, puis l etat) precedent toute
+    # frappe : aucune ENTER n arrive avant que la question ait ete posee.
+    # Ecrit sans indexer en dur - retirer send_boot_keys ferait sortir un
+    # `calls[1]` en IndexError, c est-a-dire une trace, pas un FAIL nomme.
+    kinds = [c[0] for c in calls]
+    check("les lectures precedent la premiere frappe",
+          kinds[:kinds.index("send-key")] if "send-key" in kinds else None,
+          ["dumpxml", "domstate"])
+
+with tempfile.TemporaryDirectory() as tmp:
+    # Le domaine tournait DEJA : run() ne doit envoyer AUCUNE frappe. Une
+    # ENTER dans une session vivante irait a ce qui s y joue, pas a un
+    # firmware. Ce test appelle .run() DIRECTEMENT, sans passer par
+    # already_done() (que le pipeline reel consulte avant d appeler run())
+    # - c est le garde-fou interne a start_run() qui est ici sous epreuve,
+    # pas seulement le comportement du pipeline autour de lui.
+    running_and_keyable = {"dumpxml": (0, _install_domain_xml(tmp)),
+                           "domstate": (0, "running\n"), "send-key": (0, "")}
+    calls, launched, slept = _run_start(tmp, running_and_keyable)
+    send_key_calls = [c for c in calls if c[0] == "send-key"]
+    check("un domaine deja demarre ne recoit AUCUNE frappe",
+          send_key_calls, [])
+    check("et rien n a dormi entre des frappes qui n existent pas",
+          slept, [])
+
+# --- LA CONSOLE HIBERNEE : `shut off`, et pourtant une session vivante ---- #
+# Toute la strategie energetique de cet hote repose sur S4 : vm-idle-shutdown.sh
+# hiberne l invite avec `shutdown /h /f`, et libvirt rapporte alors EXACTEMENT
+# `shut off` - le meme mot que pour un domaine qui n a jamais demarre. Verifie
+# sur la VM de production le 2026-08-28, hibernee avec la session de son
+# proprietaire dedans. `virsh start` la REPREND. Le seul garde-fou `was_up`
+# etait donc defait par un etat que rien ne distingue.
+# Ce qui les separe : les medias portes. La console de regime (provisionnee,
+# puis hibernee) n en porte AUCUN - redefine_steady_state() les retire.
+with tempfile.TemporaryDirectory() as tmp:
+    hibernated = {"dumpxml": (0, "<domain><devices/></domain>"),
+                  "domstate": (0, "shut off\n"), "send-key": (0, "")}
+    calls, launched, slept = _run_start(tmp, hibernated)
+    check("une console hibernee est bien redemarree", launched,
+          [["virsh", "start", "Windows"]])
+    check("MAIS ELLE NE RECOIT AUCUNE FRAPPE : la session de son "
+          "proprietaire est dedans",
+          [c for c in calls if c[0] == "send-key"], [])
+    check("et rien n a dormi pour des frappes qui n existent pas", slept, [])
+
+with tempfile.TemporaryDirectory() as tmp:
+    # Le cas intermediaire : un domaine qui ne porte QU UN des deux medias
+    # n est pas un domaine d installation. Rien ne prouve qu il soit sur
+    # l invite du firmware, donc pas de frappe.
+    half = {"dumpxml": (0, "<domain><devices><disk><source file='"
+                        f"{steps.windows_media_path(tmp)}'/></disk></devices></domain>"),
+            "domstate": (0, "shut off\n"), "send-key": (0, "")}
+    calls, launched, slept = _run_start(tmp, half)
+    check("un domaine ne portant qu un seul media ne recoit aucune frappe",
+          [c for c in calls if c[0] == "send-key"], [])
+
+with tempfile.TemporaryDirectory() as tmp:
+    # libvirtd injoignable au moment de lire les medias : on ne sait pas ou
+    # on frappe, donc on ne frappe pas. `virsh start` reste tente (c est
+    # l etape), mais l aide au demarrage s abstient.
+    unreadable = {"domstate": (0, "shut off\n"), "send-key": (0, "")}
+    calls, launched, slept = _run_start(tmp, unreadable)
+    check("un dumpxml injoignable ne fait frapper personne",
+          [c for c in calls if c[0] == "send-key"], [])
+
+with tempfile.TemporaryDirectory() as tmp:
+    # Un send-key qui echoue (virsh injoignable, domaine disparu) est une
+    # aide, pas une condition : le demarrage ne doit PAS echouer pour ca,
+    # et les 12 tentatives doivent quand meme toutes avoir lieu (la
+    # premiere tentative ratee n arrete pas les suivantes).
+    fails_send_key = {"dumpxml": (0, _install_domain_xml(tmp)),
+                      "domstate": (0, "shut off\n"),
+                      "send-key": (1, "error: Domain not found")}
+    try:
+        calls, launched, slept = _run_start(tmp, fails_send_key)
+    except steps.GuestBuildError:
+        failures.append("un send-key en echec a fait echouer le demarrage "
+                        "(ce n est qu une aide, pas une condition)")
+    else:
+        send_key_calls = [c for c in calls if c[0] == "send-key"]
+        check("un send-key qui echoue n empeche pas les tentatives suivantes",
+              len(send_key_calls), steps.BOOT_KEY_ATTEMPTS)
+
+# send_boot_keys() directement : la fonction elle-meme, sans passer par
+# plan_steps - la meme regle de bornage doit valoir isolement. Le virsh est
+# PLAFONNE ici aussi : sans plafond, retirer la borne fait tourner cette
+# boucle pour toujours (le sleep injecte rend la main aussitot) et la suite
+# sort en rc=124, indiscernable d une contention d environnement.
+fake_virsh = BoundedVirsh({"send-key": (0, "")})
+slept = []
+try:
+    steps.send_boot_keys(fake_virsh, slept.append, domain="Windows")
+except Unbounded as exc:
+    failures.append(f"send_boot_keys seule n est pas bornee ({exc})")
+check("send_boot_keys seule envoie exactement BOOT_KEY_ATTEMPTS frappes",
+      len(fake_virsh.calls), steps.BOOT_KEY_ATTEMPTS)
+check("send_boot_keys seule cible le domaine passe en argument",
+      all(c[1] == "Windows" for c in fake_virsh.calls), True)
+
+
 # --- un echec nomme la commande, pas son premier argument ---------------- #
 check("un script est nomme par son fichier",
       steps.command_label(["/usr/bin/python3", "/opt/x/guest/build.py", "--a"]),
@@ -808,6 +1040,333 @@ with tempfile.TemporaryDirectory() as tmp:
     steps.copy_windows_medium(str(source), str(dest))
     check("une copie de meme taille n est pas refaite",
           dest.read_bytes(), before)
+
+
+# --- l espace de preparation et les droits qemu (tache 2) ---------------- #
+# Two measured failures from the same evening: build.py stages ~1.8 GiB of
+# drivers under tempfile's default location (/tmp unless TMPDIR says
+# otherwise), and /tmp here is a 10 GiB tmpfs already 97% full - "No space
+# left on device" mid-build. Then, ISO built, `virsh start` refused twice
+# with "Permission denied": once on the workdir (drwxr-x--- root:root,
+# unreadable to libvirt-qemu), once on the ISO itself (root:root 0600).
+# Both are proven here without building a real ISO or touching the real
+# /var/lib/libvirt/qemu or passwd database - everything is injected.
+
+class FakeBuildRunner:
+    """A fake runner that MIMICS build.py's own observable contract (write
+    the ISO at --output, chmod it 0600) instead of just recording the call -
+    "a fake bench must implement the WHOLE interface the code reads" is a
+    mistake this suite has already paid for once (see the module docstring).
+    Without this, build_run()'s own chown step would have nothing real to
+    act on."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, argv, *, env=None):
+        self.calls.append((list(argv), dict(env) if env is not None else None))
+        out = pathlib.Path(arg(argv, "--output"))
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"fake unattend iso")
+        os.chmod(out, 0o600)
+
+
+class RecordingChown:
+    """A fake chown: records every call, optionally fails on chosen paths -
+    real os.chown to an arbitrary uid needs root, which the test process is
+    not."""
+
+    def __init__(self, fail_on=None):
+        self.calls = []
+        self.fail_on = fail_on or set()
+
+    def __call__(self, path, uid, gid):
+        self.calls.append((path, uid, gid))
+        if path in self.fail_on:
+            raise PermissionError(13, "Permission denied")
+
+
+class RecordingChmod:
+    """Un faux chmod qui ENREGISTRE puis applique reellement.
+
+    Applique pour de vrai : le mode resultant du repertoire est ce qui est
+    ensuite verifie, et un chmod simule prouverait seulement qu un appel a
+    eu lieu, pas que qemu peut traverser."""
+
+    def __init__(self, fail_on=None):
+        self.calls = []
+        self.fail_on = fail_on or set()
+
+    def __call__(self, path, mode):
+        self.calls.append((path, mode))
+        if path in self.fail_on:
+            raise PermissionError(13, "Permission denied")
+        os.chmod(path, mode)
+
+
+QEMU_UID, QEMU_GID = 64055, 64055  # libvirt-qemu:libvirt-qemu on this host,
+# measured 2026-08-28 via resolve_qemu_owner() itself against the real
+# /var/lib/libvirt/qemu - injected here, never hardcoded in guest_steps.py
+
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    os.chmod(tmp, 0o750)        # drwxr-x--- : l etat mesure sur le terrain
+    runner = FakeBuildRunner()
+    chown = RecordingChown()
+    chmod = RecordingChmod()
+    given = dict(ANSWERS, guest_workdir=tmp)
+    planned = by_name(steps.plan_steps(
+        given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=runner,
+        size_of=lambda d: DISK_BYTES,
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown,
+        chmod=chmod))
+    # secrets/ is written by the REAL step, never fabricated: what the
+    # traverse grant must not expose is the directory that step creates.
+    planned["secrets"].run()
+    build_step = planned["build"]
+    build_step.run()
+
+    check("build ne lance qu une seule commande", len(runner.calls), 1)
+    argv, env = runner.calls[0]
+    check("la commande lancee est bien build.py",
+          argv[1].endswith("guest/build.py"), True)
+    # Ecrit pour ECHOUER NOMMEMENT si `env=` disparaissait de l appel :
+    # `env` vaut alors None, et un `env["TMPDIR"]` direct sortirait en
+    # TypeError - une trace, pas un FAIL nomme, et le reste du fichier ne
+    # tournerait meme pas.
+    check("build.py recoit un TMPDIR explicite",
+          env is not None and "TMPDIR" in env, True)
+    staged = pathlib.Path(env["TMPDIR"]) if env and "TMPDIR" in env else None
+    check("l espace de preparation vit SOUS le repertoire de travail",
+          staged is not None
+          and str(staged).startswith(str(pathlib.Path(tmp)) + os.sep), True)
+    check("l espace de preparation n est pas le /tmp du systeme",
+          str(staged) == "/tmp", False)
+    check("le repertoire de preparation existe reellement sur le disque",
+          staged is not None and staged.is_dir(), True)
+    check("le reste de l environnement (PATH, etc.) est conserve",
+          env.get("PATH") if env else None, os.environ.get("PATH"))
+
+    # Deux droits DIFFERENTS, et la difference est le correctif de ce tour.
+    # Les FICHIERS changent de proprietaire (qemu les ouvre) ; le
+    # REPERTOIRE ne gagne que le bit de traversee. Le posseder donnerait a
+    # qemu le droit de renommer `secrets/` - la clef produit et deux mots de
+    # passe - et d y substituer les siens. Traverser demande moins.
+    chowned = {c[0]: (c[1], c[2]) for c in chown.calls}
+    check("LE REPERTOIRE DE TRAVAIL N EST PAS DONNE A qemu",
+          str(pathlib.Path(tmp)) in chowned, False)
+    check("il devient traversable, et c est tout",
+          os.stat(tmp).st_mode & 0o007, 0o001)
+    check("aucun droit de LECTURE du repertoire n est concede",
+          os.stat(tmp).st_mode & 0o004, 0)
+    check("aucun droit d ECRITURE du repertoire n est concede",
+          os.stat(tmp).st_mode & 0o002, 0)
+    check("les droits du proprietaire et du groupe sont inchanges",
+          os.stat(tmp).st_mode & 0o770, 0o750)
+    check("secrets/ reste 0700, inatteignable par qemu",
+          os.stat(pathlib.Path(tmp, "secrets")).st_mode & 0o777, 0o700)
+    iso_target = str(pathlib.Path(tmp, "nivuus-unattend.iso"))
+    check("l ISO produite est chownee pour l utilisateur qemu",
+          chowned.get(iso_target), (QEMU_UID, QEMU_GID))
+    windows_medium_target = str(steps.windows_media_path(tmp))
+    check("le media Windows copie est LUI AUSSI chowne pour l utilisateur qemu",
+          chowned.get(windows_medium_target), (QEMU_UID, QEMU_GID))
+
+    # THE FALSIFICATION THIS STEP EXISTS TO PREVENT: only the owner may
+    # change. build.py's own deliberate 0600 (it carries the product key and
+    # two passwords in clear - see its own printed warning) must survive
+    # untouched; widening it would be a security regression dressed up as a
+    # fix. (Verified by hand during implementation: forcing an extra
+    # os.chmod(iso_out, 0o644) into build_run made this single assertion
+    # fail, and only this one - the guard is load-bearing, not decorative.)
+    check("le mode de l ISO reste 0600, jamais elargi",
+          os.stat(iso_target).st_mode & 0o777, 0o600)
+
+# A chown failure (a real "Permission denied" from the kernel, e.g. the
+# process running the install is not actually root) is refused BY NAME, not
+# swallowed - the operator needs to know qemu still cannot open the file.
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    iso_target = str(pathlib.Path(tmp, "nivuus-unattend.iso"))
+    chown = RecordingChown(fail_on={iso_target})
+    given = dict(ANSWERS, guest_workdir=tmp)
+    build_step = by_name(steps.plan_steps(
+        given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=FakeBuildRunner(),
+        size_of=lambda d: DISK_BYTES,
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown))["build"]
+    try:
+        build_step.run()
+        failures.append("un chown en echec sur l ISO n a pas ete refuse")
+    except steps.GuestBuildError as exc:
+        check("le refus de chown nomme le fichier vise", iso_target in str(exc), True)
+        check("le refus de chown nomme l uid qemu vise", str(QEMU_UID) in str(exc), True)
+
+# --- ROUND 2 : l appropriation est une PROPRIETE de l artefact, pas un
+# effet de bord de sa construction ----------------------------------------- #
+# The first pass only chowned on a FRESH build; an already-current ISO
+# (the nominal case on every reprise) never got its ownership checked
+# again. Fixed by having build_done()'s "already current" branch reassert
+# it too - proven here by writing the ISO BY HAND (mimicking "built once,
+# then found root-owned again"), never via build_step.run(), so a passing
+# `runner.calls == []` is the actual proof that no rebuild happened.
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    runner = FakeBuildRunner()
+    chown = RecordingChown()
+    chmod = RecordingChmod()
+    given = dict(ANSWERS, guest_workdir=tmp)
+    build_step = by_name(steps.plan_steps(
+        given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=runner,
+        size_of=lambda d: DISK_BYTES,
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown,
+        chmod=chmod))["build"]
+
+    iso_target = pathlib.Path(build_step.command[build_step.command.index("--output") + 1])
+    iso_target.parent.mkdir(parents=True, exist_ok=True)
+    iso_target.write_bytes(b"deja construite, mal possedee")
+    os.chmod(iso_target, 0o600)
+    steps.write_build_stamp(steps.build_stamp_path(str(iso_target)),
+                            build_step.fingerprint())
+
+    check("une ISO deja a jour reste consideree comme faite",
+          build_step.already_done(), True)
+    check("et surtout : AUCUNE reconstruction n a ete lancee pour l obtenir",
+          runner.calls, [])
+
+    chowned = {c[0]: (c[1], c[2]) for c in chown.calls}
+    check("le repertoire de travail n est PAS davantage donne a qemu ici",
+          str(pathlib.Path(tmp)) in chowned, False)
+    check("il finit traversable SANS reconstruction",
+          os.stat(tmp).st_mode & 0o001, 0o001)
+    check("l ISO deja presente finit possedee par qemu SANS reconstruction",
+          chowned.get(str(iso_target)), (QEMU_UID, QEMU_GID))
+    check("le media Windows copie finit LUI AUSSI possede par qemu SANS reconstruction",
+          chowned.get(str(steps.windows_media_path(tmp))), (QEMU_UID, QEMU_GID))
+    check("le mode de l ISO deja presente reste 0600, jamais elargi",
+          os.stat(iso_target).st_mode & 0o777, 0o600)
+
+# A chown failure on that SAME "already done" branch must not be swallowed
+# into "not done" - that would send the caller into a full, multi-minute
+# rebuild that cannot fix a permission problem (the bytes are already
+# right). It is raised immediately, by name, exactly like the fresh-build
+# path above, and the rebuild it would otherwise trigger never happens.
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    given = dict(ANSWERS, guest_workdir=tmp)
+    probe = by_name(steps.plan_steps(
+        given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=FakeBuildRunner(),
+        size_of=lambda d: DISK_BYTES,
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=_inert_chown))["build"]
+    iso_target = pathlib.Path(probe.command[probe.command.index("--output") + 1])
+    iso_target.parent.mkdir(parents=True, exist_ok=True)
+    iso_target.write_bytes(b"deja construite")
+    os.chmod(iso_target, 0o600)
+    steps.write_build_stamp(steps.build_stamp_path(str(iso_target)), probe.fingerprint())
+
+    runner = FakeBuildRunner()  # must stay untouched below
+    chown = RecordingChown(fail_on={str(iso_target)})
+    build_step = by_name(steps.plan_steps(
+        given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=runner,
+        size_of=lambda d: DISK_BYTES,
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown))["build"]
+    try:
+        build_step.already_done()
+        failures.append("un chown en echec sur une ISO deja a jour n a pas ete refuse")
+    except steps.GuestBuildError as exc:
+        check("le refus (ISO deja a jour) nomme le fichier vise",
+              str(iso_target) in str(exc), True)
+    check("et surtout : le refus de chown n a PAS declenche de reconstruction",
+          runner.calls, [])
+
+# --- la traversee : idempotente, et refusee NOMMEMENT si elle echoue ------ #
+# Un repertoire deja traversable ne doit pas etre reecrit : l activation
+# rejoue a chaque demarrage tant que le jalon n existe pas, et un operateur
+# qui a elargi le repertoire a la main ne doit pas voir son choix reecrit a
+# chaque tour.
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    os.chmod(tmp, 0o751)        # le bit de traversee est DEJA la
+    chmod = RecordingChmod()
+    given = dict(ANSWERS, guest_workdir=tmp)
+    build_step = by_name(steps.plan_steps(
+        given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=FakeBuildRunner(),
+        size_of=lambda d: DISK_BYTES,
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=_inert_chown,
+        chmod=chmod))["build"]
+    build_step.run()
+    check("un repertoire deja traversable n est pas rechmode", chmod.calls, [])
+    check("et il l est toujours", os.stat(tmp).st_mode & 0o777, 0o751)
+
+# Un chmod refuse par le noyau est nomme, jamais avale : sans traversee,
+# qemu recevra "Permission denied" sur les deux medias, et l operateur doit
+# lire pourquoi.
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    os.chmod(tmp, 0o750)
+    chmod = RecordingChmod(fail_on={str(pathlib.Path(tmp))})
+    given = dict(ANSWERS, guest_workdir=tmp)
+    build_step = by_name(steps.plan_steps(
+        given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=FakeBuildRunner(),
+        size_of=lambda d: DISK_BYTES,
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=_inert_chown,
+        chmod=chmod))["build"]
+    try:
+        build_step.run()
+        failures.append("un chmod en echec sur le repertoire n a pas ete refuse")
+    except steps.GuestBuildError as exc:
+        check("le refus de traversee nomme le repertoire vise",
+              str(pathlib.Path(tmp)) in str(exc), True)
+
+
+# --- resolve_qemu_owner : lu du systeme, jamais devine -------------------- #
+class _FakeStat:
+    def __init__(self, uid, gid):
+        self.st_uid = uid
+        self.st_gid = gid
+
+
+def _stat_ok(path):
+    check("resolve_qemu_owner interroge /var/lib/libvirt/qemu",
+          path, steps.QEMU_STATE_DIR)
+    return _FakeStat(QEMU_UID, QEMU_GID)
+
+
+def _getpwuid_ok(uid):
+    check("resolve_qemu_owner cherche le compte du bon uid", uid, QEMU_UID)
+    return object()  # only existence matters here, never a hardcoded name
+
+
+check("resolve_qemu_owner lit (uid, gid) sur le systeme, sans nom code en dur",
+      steps.resolve_qemu_owner(stat_fn=_stat_ok, getpwuid=_getpwuid_ok),
+      (QEMU_UID, QEMU_GID))
+
+
+def _stat_missing(path):
+    raise FileNotFoundError(2, "No such file or directory")
+
+
+try:
+    steps.resolve_qemu_owner(stat_fn=_stat_missing)
+    failures.append("un /var/lib/libvirt/qemu absent n a pas ete refuse")
+except steps.GuestBuildError as exc:
+    check("l absence de libvirt est refusee nommement (le repertoire)",
+          steps.QEMU_STATE_DIR in str(exc), True)
+
+
+def _stat_orphan(path):
+    return _FakeStat(999999, 999999)
+
+
+def _getpwuid_unknown(uid):
+    raise KeyError(uid)
+
+
+try:
+    steps.resolve_qemu_owner(stat_fn=_stat_orphan, getpwuid=_getpwuid_unknown)
+    failures.append("un uid sans compte systeme n a pas ete refuse")
+except steps.GuestBuildError as exc:
+    check("un utilisateur qemu inexistant est refuse EN LE NOMMANT (l uid)",
+          "999999" in str(exc), True)
 
 
 if failures:

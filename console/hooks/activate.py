@@ -143,15 +143,27 @@ class StepCommandFailed(guest_steps.GuestBuildError):
     """
 
 
-def classifying_runner(argv: list[str]) -> None:
+def classifying_runner(argv: list[str], **kwargs) -> None:
     """guest_steps.default_runner, tagging a command failure as such.
 
     Kept local to activate.py rather than a change to guest_steps.py's own
     default_runner: a human running a step by hand wants the plain message,
     not this hook's own bookkeeping type.
+
+    **kwargs, NOT a repeated `env=None`: this wrapper adds nothing to the
+    call, it only re-labels the exception, so every argument belongs to
+    default_runner and none of them are this function's business. Spelling
+    them out again is what broke it once - build_run() started passing
+    `env=` (the TMPDIR fix), guest_steps.default_runner grew the parameter,
+    and this wrapper did not, so the ONLY production runner died with a
+    TypeError at the third of the five steps while every test passed (the
+    bench double had the new signature; the real caller did not). Forwarding
+    blind means the next parameter cannot reproduce that. The guard against
+    a typo'd keyword is default_runner itself, which still raises TypeError
+    for anything it does not know.
     """
     try:
-        guest_steps.default_runner(argv)
+        guest_steps.default_runner(argv, **kwargs)
     except guest_steps.GuestBuildError as exc:
         raise StepCommandFailed(str(exc)) from exc
 
@@ -202,14 +214,28 @@ def run_steps(step_list, emit_fn=emit) -> None:
     """Run each step in order, skipping what already_done() says is done.
 
     Raises ActivationFailure with an already-classified message on the
-    first failure. Stopping there is correct, not merely convenient:
+    first failure - a failure of already_done() included, not only of
+    run(). Stopping there is correct, not merely convenient:
     guest_steps.plan_steps() orders the five steps so each depends on the
     one before it (secrets -> payload -> build -> define -> start).
     """
     count = len(step_list) or 1
     for index, step in enumerate(step_list):
         pct = 40 + int(55 * index / count)
-        if step.already_done():
+        # already_done() is inside the classified region, not before it.
+        # These predicates are not all pure observation: build_done() is
+        # allowed to RAISE (it reasserts qemu ownership on the "already
+        # current" branch, because returning False there would trigger a
+        # multi-minute rebuild that cannot fix an ownership problem - see
+        # guest_steps.build_done). An exception escaping from here reaches
+        # main(), which only knows ActivationFailure, so the operator would
+        # get a Python traceback instead of the single classified line this
+        # hook exists to produce.
+        try:
+            done = step.already_done()
+        except Exception as exc:  # noqa: BLE001 - classified, never a traceback
+            raise ActivationFailure(classify(step.name, exc)) from exc
+        if done:
             emit_fn({"event": "progress", "pct": pct,
                      "msg": f"{step.name} : deja fait, etape ignoree"})
             continue
