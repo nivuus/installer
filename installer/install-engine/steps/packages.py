@@ -27,6 +27,8 @@ import shutil
 
 from packages.capabilities import detect_capabilities
 from packages.conflicts import check_conflicts
+from packages.dependencies import (DependencyError, install_order,
+                                   missing_dependencies)
 from packages.discovery import discover, eligibility
 from packages.manifest import MANIFEST_NAME, ManifestError
 from packages.runner import HookError, run_install, run_resolve
@@ -156,6 +158,17 @@ def plan_packages(config: dict, hw: dict, emit):
             + "; ".join(details))
 
     chosen = [by_name[name] for name in sorted(selected)]
+
+    # Avant check_conflicts() et avant tout hook resolve, donc avant que
+    # partition() ait touché le disque : un pré-requis oublié doit se corriger
+    # dans le wizard, pas se découvrir sur une machine déjà effacée.
+    missing = missing_dependencies(chosen, manifests)
+    if missing:
+        raise StepError(" ; ".join(m.message() for m in missing))
+    try:
+        chosen = install_order(chosen)
+    except DependencyError as exc:
+        raise StepError(str(exc)) from exc
 
     target_disk = (config.get("disk") or {}).get("path", "") or ""
     capabilities = detect_capabilities(hw, target_disk)

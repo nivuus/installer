@@ -2,6 +2,17 @@
 
 Historique des versions et modifications de Nivuus.
 
+## [Non publié]
+
+### Ajouté
+- Contrat `nivuus.dev/v1` : `requires.packages` déclare les packages
+  pré-requis. Les installations sont ordonnées topologiquement, et un
+  pré-requis manquant est refusé au wizard plutôt qu'en cours d'installation.
+
+### Modifié
+- Une clé inconnue sous `requires:` est désormais une erreur de manifeste.
+  Aucun manifeste existant n'est concerné.
+
 ## [2.1.0] - 2026-04-09
 
 ### Optimisé

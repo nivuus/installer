@@ -36,6 +36,11 @@ VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 # Keys under `platform:` that only a platform-tier package may declare.
 PLATFORM_KEYS = ("kernel-cmdline", "modules", "hugepages-mib")
 
+# The only keys admitted under `requires:`. The list is CLOSED: an unknown key
+# is refused rather than ignored, because a silently dropped `package:` in the
+# singular would install a satellite before the package it needs.
+REQUIRES_KEYS = ("capabilities", "features", "packages")
+
 
 class ManifestError(RuntimeError):
     """Raised when a manifest cannot be parsed or violates the contract."""
@@ -74,6 +79,11 @@ class Manifest:
     root: str
     capabilities: tuple[str, ...] = ()
     features: tuple[str, ...] = ()
+    # Names of packages that must be installed BEFORE this one. The engine
+    # orders installs alphabetically by default, which puts `home-desk` before
+    # `home-manager`: a satellite would drop its custom_component into a
+    # directory its base package has not created yet.
+    packages: tuple[str, ...] = ()
     # Pairs rather than dicts: a frozen dataclass must stay hashable.
     claims: tuple[tuple[str, str], ...] = ()
     platform: Platform = Platform()
@@ -184,6 +194,24 @@ def parse_manifest(data: Any, root: str) -> Manifest:
     requires = data.get("requires") or {}
     if not isinstance(requires, dict):
         raise ManifestError(f"{what}: 'requires' must be a mapping")
+    unknown = [k for k in requires if k not in REQUIRES_KEYS]
+    if unknown:
+        raise ManifestError(
+            f"{what}: unknown key(s) under 'requires': {sorted(unknown)}; "
+            f"expected {list(REQUIRES_KEYS)} - a misspelt 'package' would "
+            "silently drop a dependency and install this package before the "
+            "one it needs")
+
+    required_packages = _str_list(requires, "packages", what)
+    for dependency in required_packages:
+        if not NAME_RE.match(dependency):
+            raise ManifestError(
+                f"{what}: required package {dependency!r} must match "
+                f"{NAME_RE.pattern} - it is the name of another package")
+        if dependency == name:
+            raise ManifestError(
+                f"{what}: le package {name!r} ne peut pas dépendre de "
+                "lui-même")
 
     claims_raw = data.get("claims") or {}
     claims = []
@@ -215,6 +243,7 @@ def parse_manifest(data: Any, root: str) -> Manifest:
         name=name, version=version, label=label, tier=tier, root=root,
         capabilities=_str_list(requires, "capabilities", what),
         features=_str_list(requires, "features", what),
+        packages=required_packages,
         claims=tuple(claims),
         platform=_parse_platform(data.get("platform") or {}, tier, what),
         apt=_str_list(data, "apt", what),

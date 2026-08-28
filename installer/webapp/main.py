@@ -81,6 +81,9 @@ async def api_packages(target_disk: str = "", features: str = "") -> JSONRespons
             "name": manifest.name, "label": manifest.label,
             "version": manifest.version, "tier": manifest.tier,
             "claims": [r for r, _ in manifest.claims],
+            # Les packages à cocher AVANT celui-ci. Le portail les affiche ;
+            # il ne les coche pas à la place de l'opérateur.
+            "requires_packages": list(manifest.packages),
             "questions": [],
         }
         if manifest.questions_file:
