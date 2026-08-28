@@ -3,14 +3,17 @@
 
 Run: python3 scripts/tests/test_windows_guest_production_domain.py
 """
+import contextlib
+import io
 import pathlib
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "console" / "guest"))
-sys.path.insert(0, str(REPO / "installer"))
+sys.path.insert(0, str(REPO / "console"))
 
 import domain  # noqa: E402
+import hardware  # noqa: E402
 
 failures = []
 
@@ -21,14 +24,19 @@ def check(label, got, want):
 
 
 def check_raises(label, exc_type, fn):
+    # exc_type may be a single exception class or a tuple of classes (`except
+    # exc_type` accepts both) -- so the failure message must not assume
+    # `.__name__` exists, which a tuple does not have.
+    want = " or ".join(t.__name__ for t in exc_type) if isinstance(exc_type, tuple) \
+        else exc_type.__name__
     try:
         fn()
     except exc_type:
         return
     except Exception as exc:  # noqa: BLE001
-        failures.append(f"{label}: raised {type(exc).__name__}, want {exc_type.__name__}")
+        failures.append(f"{label}: raised {type(exc).__name__}, want {want}")
         return
-    failures.append(f"{label}: did not raise {exc_type.__name__}")
+    failures.append(f"{label}: did not raise {want}")
 
 
 def parse_cpuset(cpuset_str: str) -> set:
@@ -217,21 +225,17 @@ check("aucun partage n expose une racine",
 check("tous les partages sont des sous-dossiers",
       all(s.count("/") >= 3 for s in _srcs), True)
 
-# --- MARQUEUR D ECHEC : domain.py est mort jusqu a la phase 2b ----------- #
-# Tout ce qui precede appelle domain_xml() avec des arguments explicites et
-# ne touche jamais la detection materielle - donc cette suite, et l agregateur
-# entier, restent verts alors que `domain.py xml` et `domain.py define` sont
-# inutilisables. Le marqueur est la pour que le vert cesse de sur-promettre.
-#
-# main() echoue des son entree, sur `from common.hardware import
-# HardwareError` : ce nom a quitte installer/common/hardware.py quand la
-# moitie precise de la detection est passee dans le package (console/), et
-# domain.py l importe encore. L echec est donc un ImportError a l entree, pas
-# l AttributeError qu on rencontre plus profond dans build_domain_xml().
-#
-# Ce test DOIT casser le jour ou quelqu un repare domain.py en phase 2b :
-# c est exactement le rappel voulu - retirez alors le marqueur en meme temps
-# que la reparation.
+# Prove the test's own sys.path reaches console/hardware.py the same way
+# domain.py's lazy `from hardware import HardwareError` does (Step 3) - this
+# is what lets the assertion below reason about the exception domain.py
+# raises for hardware mismatches without re-importing installer/.
+check("HardwareError vient bien de console/hardware.py",
+      hardware.HardwareError.__module__, "hardware")
+
+# Everything above calls domain_xml() with explicit arguments and never
+# touches hardware detection. This is the one assertion that actually calls
+# main(), which is why phase 2a's wiring break stayed invisible for a whole
+# phase: no suite reached it.
 def _domain_main_xml():
     argv = sys.argv
     sys.argv = ["domain.py", "xml"]
@@ -241,8 +245,37 @@ def _domain_main_xml():
         sys.argv = argv
 
 
-check_raises("domain.py main() reste casse jusqu a la phase 2b",
-             ImportError, _domain_main_xml)
+# main() must now reach hardware detection instead of dying at import. An
+# ImportError or AttributeError here means the split broke a call path -
+# exactly how phase 2a failed (measured: ModuleNotFoundError, an ImportError
+# subclass, at `from common.hardware import HardwareError`, before its own
+# try block). A HardwareError/DomainError means the wiring works and this
+# particular machine's hardware does not match what build_domain_xml() wants
+# - main() catches those itself and returns 1, it never lets them escape.
+# This machine measurably HAS the targeted hardware (one discrete GPU, a
+# hybrid CPU, a spare NVMe controller), so the live outcome here is success
+# (return code 0, real domain XML) rather than a refusal - which is stronger
+# evidence the call path is live than a refusal would have been. Either
+# outcome is acceptable; only a wiring exception escaping is not. Phase 2a
+# pinned the broken state with a deliberate red marker asserting ImportError
+# - it goes away in the same change as the repair, which is the whole point
+# of having written it that way.
+_stdout = io.StringIO()
+try:
+    with contextlib.redirect_stdout(_stdout):
+        _rc = _domain_main_xml()
+except (ImportError, AttributeError) as exc:
+    failures.append(
+        f"main() ne casse plus au cablage: raised {type(exc).__name__}: {exc}"
+    )
+else:
+    check("main() ne casse plus au cablage (code de retour connu)",
+          _rc in (0, 1), True)
+    if _rc == 0:
+        print("main() a produit du XML reel sur ce matos "
+              f"({len(_stdout.getvalue())} caracteres)")
+    else:
+        print("main() a refuse pour une raison materielle (code 1)")
 
 if failures:
     print(f"FAIL ({len(failures)})")

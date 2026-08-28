@@ -221,7 +221,7 @@ def build_domain_xml(*, announce: bool = False) -> str:
     not one baked silently into the XML.
     """
     sys.path.insert(0, str(HERE.parent))
-    from common import hardware  # noqa: PLC0415
+    import hardware  # noqa: PLC0415
 
     gpus = [g for g in hardware.list_gpus() if g["discrete"]]
     if len(gpus) != 1:
@@ -257,10 +257,10 @@ def main() -> int:
     args = parser.parse_args()
 
     # Imported here, not at module scope: the tests put only
-    # installer/windows-guest on sys.path, and a top-level import of
-    # common.hardware would break them.
+    # console/guest on sys.path, and a top-level import of hardware would
+    # break them.
     sys.path.insert(0, str(HERE.parent))
-    from common.hardware import HardwareError  # noqa: PLC0415
+    from hardware import HardwareError  # noqa: PLC0415
 
     try:
         xml_text = build_domain_xml(announce=(args.action == "define"))
