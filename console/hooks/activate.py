@@ -163,14 +163,24 @@ def classify(step_name: str, exc: Exception) -> str:
     """One line, already sorted into the class an operator needs to read.
 
     See the module docstring for the three classes. The 'start' step is
-    the discriminator for class 2: everything before it (secrets, payload,
-    the ISO, the domain definition) has already succeeded by the time it
-    runs, so a failure exactly there is never "the guest was not built" -
-    it lives in libvirt's own hooks (the GPU handover: detach from the
-    host, stop ollama, nvidia-persistenced, Tdarr), not in this phase's
-    construction of the guest.
+    the discriminator for class 2, but the step name ALONE is not enough -
+    it has to be paired with WHAT failed. libvirt's own dispatcher does
+    propagate a prepare hook's non-zero exit as the start failure (this is
+    established and tested elsewhere in this repository), and
+    classifying_runner tags exactly that case as StepCommandFailed: the
+    command ran, start to finish, and came back non-zero. That is real
+    evidence of a hook refusal.
+
+    A FileNotFoundError/PermissionError (virsh itself missing or
+    unusable) is NOT that evidence - subprocess.run() raises those before
+    the command ever runs, so nothing about a hook can be inferred from
+    them. Blaming hooks there would send an operator looking at the GPU
+    handover for a problem that is really "virsh is not on PATH". Both
+    keep the raw exception at the end of the message - that is what lets a
+    human (or the next debugging session) tell the two apart regardless of
+    which branch actually fires.
     """
-    if step_name == "start":
+    if step_name == "start" and isinstance(exc, StepCommandFailed):
         return (
             "console activate: le demarrage de la VM Windows a echoue a "
             "l etape 'start' ; l ISO et la definition du domaine sont deja "

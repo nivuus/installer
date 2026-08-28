@@ -261,9 +261,37 @@ def _refused_input_mid_step_run():
     return message_for("build", run_it)
 
 
+def _start_binary_missing_run():
+    # NOT a StepCommandFailed: subprocess.run() raises FileNotFoundError
+    # BEFORE any command ever executes when the binary itself is absent
+    # (e.g. 'virsh' not on PATH) - classifying_runner only wraps a
+    # guest_steps.GuestBuildError (a command that DID run and exited
+    # non-zero), so this propagates through run_steps() unwrapped. Round-1
+    # review: classify() used to key ONLY on the step name, so this used to
+    # be misreported as a hook refusal even though no hook - and no virsh -
+    # ever ran. Proves the fix: the step name alone must not be enough.
+    def run_it():
+        raise FileNotFoundError(2, "No such file or directory", "virsh")
+    return message_for("start", run_it)
+
+
+def _unexpected_exception_run():
+    # A totally unnamed failure (neither GuestBuildError nor
+    # StepCommandFailed) at a step that is NOT 'start'. This is what
+    # run_steps()'s broad `except Exception` exists to catch - narrowed to
+    # only GuestBuildError/StepCommandFailed, this exact exception would
+    # propagate out of run_steps() as a raw traceback instead of the
+    # classified message an operator can read on their first boot.
+    def run_it():
+        raise RuntimeError("disque disparu pendant la construction")
+    return message_for("payload", run_it)
+
+
 hook_refused = _start_refused_run()
 build_panne = _build_panne_run()
 refused_mid_step = _refused_input_mid_step_run()
+start_binary_missing = _start_binary_missing_run()
+unexpected = _unexpected_exception_run()
 
 check("a hook refusing the VM start is reported as such",
       "hook" in hook_refused.lower())
@@ -281,6 +309,26 @@ check("not confused with a build panne",
       "construction" not in refused_mid_step.lower())
 check("nor with a hook refusal",
       "hook" not in refused_mid_step.lower())
+
+# Round-1 review, point 1: classification of a 'start' failure must look at
+# WHAT failed, not just WHICH step failed.
+check("a missing virsh binary is NOT presented as a hook refusal",
+      "hook" not in start_binary_missing.lower())
+check("but the raw error naming the missing binary survives",
+      "virsh" in start_binary_missing)
+check("a real hook-refusal exit code is STILL reported as one",
+      "hook" in _start_refused_run().lower())
+
+# Round-1 review, point 2: run_steps()'s broad `except Exception` must turn
+# an utterly unexpected failure into a classified line, not a bare
+# traceback - the whole reason it is broad rather than narrowed to the
+# exception types this module already knows about.
+check("a totally unexpected exception still yields a classified message",
+      unexpected.startswith("console activate:"))
+check("... naming the step it happened in",
+      "'payload'" in unexpected)
+check("... and keeping the raw cause readable",
+      "disque disparu" in unexpected)
 
 # already_done() is honoured: a step that says it is already done must
 # never have its run() called at all.
