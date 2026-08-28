@@ -12,12 +12,21 @@ as REGULAR FILES, which systemd ignores with "is not a symlink, ignoring".
 Every link here is verified to point at an existing unit before it is
 created, so a unit that looks enabled always is.
 
+The links alone only make the NEXT boot correct. The unit that runs this
+phase, nivuus-package-activate@.service, is WantedBy=multi-user.target, so
+it runs AFTER sockets.target and timers.target have already been reached:
+without a daemon-reload and an explicit start, the wake sockets do not
+listen and the idle timer does not tick until a second reboot - while the
+stamp file says the package is activated. So the units are started here
+too, tolerating failure, because the links guarantee the next boot anyway.
+
 The VM itself is still built by hand (windows-guest/build.py then
 domain.py); wiring that in is phase 2c.
 """
 import argparse
 import json
 import os
+import subprocess
 import sys
 
 # unit file (under /etc/systemd/system) -> the .wants directory that enables it
@@ -59,6 +68,30 @@ def arm(root: str, unit: str, wants: str) -> None:
     os.symlink(target, link)
 
 
+def start_now(units) -> list:
+    """Reload systemd and start the units just armed. Returns what failed.
+
+    Never raises and never fails the phase: systemctl is legitimately
+    unusable in constrained environments (in a PID namespace it cannot even
+    reach systemd's private socket, and query subcommands then print nothing
+    rather than erroring), and every unit is already linked, so the next boot
+    is correct with or without this.
+    """
+    failed = []
+    commands = [["systemctl", "daemon-reload"]]
+    commands += [["systemctl", "start", unit] for unit in units]
+    for cmd in commands:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+        except OSError as exc:                      # systemctl absent
+            failed.append(f"{' '.join(cmd)} : {exc}")
+            continue
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()[:200]
+            failed.append(f"{' '.join(cmd)} : {detail or proc.returncode}")
+    return failed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", required=True)
@@ -76,6 +109,18 @@ def main() -> int:
             print(f"console activate: unite absente, rien arme : {exc}",
                   file=sys.stderr)
             return 1
+
+    # Only ever act on the CURRENT machine's systemd. With --root pointing at
+    # a target being installed (or a throwaway root in a test), reloading and
+    # starting would drive the WRONG systemd - the installer's own.
+    if root == "/":
+        broken = start_now(list(WANTS))
+        if broken:
+            print("console activate: unites liees mais non demarrees ; "
+                  "l armement prendra effet au prochain redemarrage",
+                  file=sys.stderr)
+            for item in broken:
+                print(f"  - {item}", file=sys.stderr)
 
     emit({"event": "progress", "pct": 100,
           "msg": "console : cycle de vie arme ; l invite Windows se construit "
