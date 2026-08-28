@@ -17,6 +17,7 @@ Run: python3 console/tests/test_retro_marker_bridge.py
 """
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -44,11 +45,20 @@ def check(label, got, want):
 check("build.py's default marker equals the shared path, rooted at /",
       build.DEFAULT_RETRO_MARKER, console_retro.retro_state_path())
 
+# A small stand-in for the wizard's live-medium 'windows_iso' answer:
+# install.py now refuses outright when it is missing (see console/guest_steps.py
+# copy_windows_medium / require_windows_iso_answer), and this suite is about
+# the retro marker, not the medium - so it just needs SOME readable file.
+_fixtures = pathlib.Path(tempfile.mkdtemp(prefix="nivuus-retro-bridge-test-"))
+_SOURCE_ISO = _fixtures / "live-medium.iso"
+_SOURCE_ISO.write_bytes(b"NIVUUS-FAKE-WINDOWS-MEDIUM")
+
 CTX = json.dumps({
     "package": {"name": "console", "version": "1.0.0", "root": str(CONSOLE)},
     "hw": {"gpus": [{"slot": "01:00.0", "discrete": True}]},
     "answers": {"dedicated_nvme": "/dev/nvme1n1", "retro": True,
-                "admin_password": "hunter2hunter2"},
+                "admin_password": "hunter2hunter2",
+                "windows_iso": str(_SOURCE_ISO)},
 })
 
 
@@ -90,6 +100,8 @@ with tempfile.TemporaryDirectory() as tmp:
           expected.is_file(), True)
     check("build.py lit le temoin depose par le hook (disabled)",
           build.read_retro_marker(str(expected)), False)
+
+shutil.rmtree(_fixtures, ignore_errors=True)
 
 if failures:
     print(f"FAIL ({len(failures)})")

@@ -210,6 +210,10 @@ with tempfile.TemporaryDirectory() as tmp:
 
 
 # --- les cinq etapes, leurs commandes et leurs predicats ----------------- #
+# ANSWERS["windows_iso"] is read ONLY for its non-emptiness now (via
+# require_windows_iso_answer) - plan_steps points every step at
+# windows_media_path(guest_workdir) instead, never at this literal. It is
+# kept as a plausible-looking path purely so a stray print reads sensibly.
 ANSWERS = {
     "dedicated_nvme": "/dev/nvme1n1",
     "retro": False,
@@ -291,7 +295,9 @@ with tempfile.TemporaryDirectory() as tmp:
     # Administrator the Apollo password. Each flag is pinned to its value.
     secrets_dir = os.path.join(tmp, "secrets")
     expected_args = {
-        "--windows-iso": ANSWERS["windows_iso"],
+        # The copy under the workdir, not ANSWERS["windows_iso"]: see the
+        # comment on that key above and on source_iso in plan_steps itself.
+        "--windows-iso": str(steps.windows_media_path(tmp)),
         "--drivers-dir": os.path.join(tmp, "payload"),
         "--output": os.path.join(tmp, "nivuus-unattend.iso"),
         "--key-file": os.path.join(secrets_dir, "windows-ltsc.key"),
@@ -327,7 +333,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # officiel est celui qui amorce ; l ISO produite par build.py n est PAS
     # amorcable, c est le media de reponses que Setup lit une fois demarre.
     check("define passe le media Windows officiel",
-          arg(define_cmd, "--windows-iso"), ANSWERS["windows_iso"])
+          arg(define_cmd, "--windows-iso"), str(steps.windows_media_path(tmp)))
     check("define passe l ISO de reponses que build vient de produire",
           arg(define_cmd, "--unattend-iso"),
           os.path.join(tmp, "nivuus-unattend.iso"))
@@ -380,10 +386,14 @@ with tempfile.TemporaryDirectory() as tmp:
     check("un payload peuple est fait", st["payload"].already_done(), True)
 
     # build: the ISO alone never suffices - the fingerprint must agree.
+    # The COPY console/hooks/install.py places under the workdir is what
+    # this step reads now, never the wizard's raw 'windows_iso' answer - so
+    # the fixture writes bytes at windows_media_path(tmp), the fixed
+    # convention, instead of at a path the answer used to be free to name.
     iso_out = pathlib.Path(build_cmd[build_cmd.index("--output") + 1])
-    source_iso = pathlib.Path(tmp) / "source.iso"
-    source_iso.write_bytes(b"windows medium")
-    fresh = by_name(plan(tmp, FakeVirsh(NO_DOMAIN), {"windows_iso": str(source_iso)}))
+    medium = steps.windows_media_path(tmp)
+    medium.write_bytes(b"windows medium")
+    fresh = by_name(plan(tmp, FakeVirsh(NO_DOMAIN)))
     fresh_cmd = fresh["build"].command
     iso_out = pathlib.Path(fresh_cmd[fresh_cmd.index("--output") + 1])
     iso_out.parent.mkdir(parents=True, exist_ok=True)
@@ -395,28 +405,28 @@ with tempfile.TemporaryDirectory() as tmp:
     check("une ISO avec l empreinte attendue peut etre sautee",
           fresh["build"].already_done(), True)
     # Change one answer that shapes the image: the stamp no longer applies.
-    changed = by_name(plan(tmp, FakeVirsh(NO_DOMAIN),
-                           {"windows_iso": str(source_iso), "retro": True}))
+    changed = by_name(plan(tmp, FakeVirsh(NO_DOMAIN), {"retro": True}))
     check("changer une reponse invalide l empreinte",
           changed["build"].already_done(), False)
     # The one that used to slip through: a new administrator password left
     # `secrets` undone but `build` done, so the ISO shipped the OLD password.
     for secret in ("admin_password", "ltsc_key", "apollo_password"):
         moved = by_name(plan(tmp, FakeVirsh(NO_DOMAIN),
-                             {"windows_iso": str(source_iso),
-                              secret: "une-toute-autre-valeur"}))
+                             {secret: "une-toute-autre-valeur"}))
         check(f"changer {secret} force la reconstruction de l ISO",
               moved["build"].already_done(), False)
     # And a package upgrade must not reuse the previous version's ISO.
     upgraded = steps.plan_steps(
-        dict(ANSWERS, guest_workdir=tmp, windows_iso=str(source_iso)), {}, tmp,
+        dict(ANSWERS, guest_workdir=tmp), {}, tmp,
         virsh=FakeVirsh(NO_DOMAIN), size_of=lambda d: DISK_BYTES,
         build_inputs={"guest/build.py": "une-version-suivante"})
     check("une mise a jour du paquet force la reconstruction de l ISO",
           by_name(upgraded)["build"].already_done(), False)
-    # A missing medium cannot be fingerprinted: rebuild, never skip.
-    gone = by_name(plan(tmp, FakeVirsh(NO_DOMAIN),
-                        {"windows_iso": str(pathlib.Path(tmp) / "absent.iso")}))
+    # A missing medium cannot be fingerprinted: rebuild, never skip. The
+    # answer no longer selects the file read, so the fixture is removed
+    # instead of pointing 'windows_iso' at a nonexistent path.
+    medium.unlink()
+    gone = by_name(plan(tmp, FakeVirsh(NO_DOMAIN)))
     check("un media introuvable ne fait jamais sauter la construction",
           gone["build"].already_done(), False)
     check_raises("et lancer la construction sans media est refuse nommement",
@@ -432,7 +442,7 @@ with tempfile.TemporaryDirectory() as tmp:
 # amorcerait un NVMe vierge sans que rien ne le signale.
 def installed_xml(tmp, windows_iso=None):
     """Le XML que virsh rendrait pour un domaine d installation correct."""
-    windows = windows_iso or ANSWERS["windows_iso"]
+    windows = windows_iso or str(steps.windows_media_path(tmp))
     unattend = os.path.join(tmp, "nivuus-unattend.iso")
     return ("<domain><devices>"
             f"<disk device='cdrom'><source file='{windows}'/></disk>"
@@ -467,7 +477,7 @@ with tempfile.TemporaryDirectory() as tmp:
 # defini qui installe un ecran de langue et rien d autre.
 with tempfile.TemporaryDirectory() as tmp:
     moitie = ("<domain><devices><disk device='cdrom'>"
-              f"<source file='{ANSWERS['windows_iso']}'/></disk>"
+              f"<source file='{steps.windows_media_path(tmp)}'/></disk>"
               "</devices></domain>")
     st = by_name(plan(tmp, FakeVirsh({"dumpxml": (0, moitie),
                                       "domstate": (0, "shut off\n")})))
@@ -510,7 +520,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # ne remplace rien de la ligne.
     for etiquette, argv in (("vierge", frais), ("preexistant", perime)):
         check(f"define ({etiquette}) garde le media Windows",
-              arg(argv, "--windows-iso"), ANSWERS["windows_iso"])
+              arg(argv, "--windows-iso"), str(steps.windows_media_path(tmp)))
         check(f"define ({etiquette}) garde l ISO de reponses",
               arg(argv, "--unattend-iso"),
               os.path.join(tmp, "nivuus-unattend.iso"))
@@ -607,6 +617,99 @@ with tempfile.TemporaryDirectory() as tmp:
     (root / "apollo" / "setup.exe").write_bytes(b"two")
     check("un contenu modifie change l arborescence",
           steps.payload_tree(str(root)) == tree, False)
+
+
+# --- le media Windows survit au redemarrage ------------------------------ #
+# The wizard's 'windows_iso' answer names a file on the LIVE medium the
+# installer runs from; after the reboot that medium is gone. install is the
+# only phase that ever sees both roots, so it is the only place the medium
+# can be copied - see console/hooks/install.py's own module docstring. What
+# is tested here is copy_windows_medium() itself: the function install.py
+# calls, and the one plan_steps above now trusts for source_iso.
+check("DEFAULT_GUEST_WORKDIR suit le defaut declare dans wizard.yaml",
+      f'default: "{steps.DEFAULT_GUEST_WORKDIR}"'
+      in pathlib.Path(CONSOLE, "wizard.yaml").read_text(), True)
+check("windows_media_path place la copie sous le repertoire de travail",
+      steps.windows_media_path("/var/lib/nivuus/guest"),
+      pathlib.Path("/var/lib/nivuus/guest") / steps.WINDOWS_MEDIA_FILENAME)
+
+check_raises("require_windows_iso_answer refuse une reponse vide",
+             steps.GuestBuildError,
+             lambda: steps.require_windows_iso_answer({"windows_iso": "   "}))
+check("require_windows_iso_answer nettoie la reponse",
+      steps.require_windows_iso_answer({"windows_iso": "  /media/x.iso  "}),
+      "/media/x.iso")
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    source = root / "live-medium.iso"
+    dest = root / "target" / steps.WINDOWS_MEDIA_FILENAME
+
+    # Source absent: refused by name, nothing written - install must refuse
+    # while the operator is still at the wizard, not after the reboot.
+    check_raises("un media source absent est refuse", steps.GuestBuildError,
+                 lambda: steps.copy_windows_medium(str(source), str(dest)))
+    check("rien n est ecrit quand la source est absente", dest.exists(), False)
+
+    # A directory where a file was expected: os.stat() alone does not catch
+    # this (it succeeds on a directory too) - only the copy attempt does,
+    # which is why copy_windows_medium wraps that in its own try/except.
+    as_dir = root / "not-a-file.iso"
+    as_dir.mkdir()
+    check_raises("un media source qui est un repertoire est refuse",
+                 steps.GuestBuildError,
+                 lambda: steps.copy_windows_medium(str(as_dir), str(dest)))
+    check("rien n est ecrit quand la source est un repertoire",
+          dest.exists(), False)
+
+    # Not enough room: refused BEFORE a single byte lands at dest, and the
+    # message names both figures. free_bytes is injected on purpose - this
+    # does not require an actual full disk (see copy_windows_medium's own
+    # docstring for the same trade-off made for the skip-when-complete case
+    # below: cheap and correct beats a several-GB hash on every install).
+    source.write_bytes(b"x" * 1000)
+    try:
+        steps.copy_windows_medium(str(source), str(dest),
+                                  free_bytes=lambda p: 10)
+        failures.append("un media trop gros pour la place disponible "
+                        "n a pas ete refuse")
+    except steps.GuestBuildError as exc:
+        check("le refus de place nomme la taille du media", "1000" in str(exc), True)
+        check("le refus de place nomme l espace libre", "10" in str(exc), True)
+    check("rien n est ecrit quand la place manque", dest.exists(), False)
+
+    # A DIFFERENT size at dest is NOT "already done": this is the case that
+    # tells "skip on size match" apart from "skip whenever dest exists" -
+    # the mutation that slipped past every other check in this block on the
+    # first pass at writing it. dest must end up holding source's bytes.
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(b"z" * 3)  # deliberately not len(source)
+    steps.copy_windows_medium(str(source), str(dest))
+    check("une taille differente au but est bien recopiee",
+          dest.read_bytes(), source.read_bytes())
+
+    # A normal copy: bytes land at dest, matching the source exactly, and no
+    # .partial leftover survives a successful run.
+    dest.unlink()
+    steps.copy_windows_medium(str(source), str(dest))
+    check("le media copie est bien present", dest.is_file(), True)
+    check("le contenu copie est identique a la source",
+          dest.read_bytes(), source.read_bytes())
+    check("aucun fichier .partial ne survit a une copie reussie",
+          dest.with_name(dest.name + ".partial").exists(), False)
+
+    # Already complete (SAME SIZE): not redone. Proven by mutating the
+    # source's CONTENT while keeping its size identical - a real re-copy
+    # would pick up the new bytes; the skip leaves dest untouched. This is
+    # exactly the trade-off documented on copy_windows_medium and, before
+    # it, on media_identity(): size, not a hash, decides "already done".
+    before = dest.read_bytes()
+    source.write_bytes(b"y" * 1000)
+    check("la source a bien change de contenu a taille egale",
+          source.read_bytes() == before, False)
+    steps.copy_windows_medium(str(source), str(dest))
+    check("une copie de meme taille n est pas refaite",
+          dest.read_bytes(), before)
 
 
 if failures:

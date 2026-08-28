@@ -18,6 +18,7 @@ import configparser
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,13 @@ import tempfile
 REPO = pathlib.Path(__file__).resolve().parents[2]
 CONSOLE = REPO / "console"
 HOOK = CONSOLE / "hooks" / "install.py"
+
+# Only for deriving the on-target copy path the SAME way install.py does -
+# never to call guest_steps functions directly. That distinction is the
+# whole point of this suite (see the module docstring): it asserts what the
+# hook subprocess LEAVES on the filesystem, never mocks its internals.
+sys.path.insert(0, str(CONSOLE))
+import guest_steps  # noqa: E402
 
 failures = []
 
@@ -54,11 +62,28 @@ def load_unit(path):
     return parser
 
 
+# Stands in for the wizard's LIVE-MEDIUM Windows ISO: a small file (never
+# the real ~4.8 GB medium - see the plan's own ban on copying that) that
+# install.py is asked to copy onto the target. Not context-managed: it must
+# outlive every `with tempfile.TemporaryDirectory() as tmp:` block below,
+# which each stand in for a fresh install target. Cleaned up at the bottom.
+FIXTURES = pathlib.Path(tempfile.mkdtemp(prefix="nivuus-console-install-test-"))
+SOURCE_ISO = FIXTURES / "live-medium.iso"
+SOURCE_ISO.write_bytes(b"NIVUUS-FAKE-WINDOWS-MEDIUM" * 200)  # a few KB, not GB
+
+# Where install.py is expected to place the copy, under an install root:
+# derived from guest_steps' own convention (DEFAULT_GUEST_WORKDIR +
+# windows_media_path), never hardcoded, so a change to either stays caught
+# here rather than silently drifting between the hook and this suite.
+COPY_REL = str(guest_steps.windows_media_path(
+    guest_steps.DEFAULT_GUEST_WORKDIR)).lstrip("/")
+
 CTX = json.dumps({
     "package": {"name": "console", "version": "1.0.0", "root": str(CONSOLE)},
     "hw": {"gpus": [{"slot": "01:00.0", "discrete": True}]},
     "answers": {"dedicated_nvme": "/dev/nvme1n1", "retro": True,
-                "admin_password": "hunter2hunter2"},
+                "admin_password": "hunter2hunter2",
+                "windows_iso": str(SOURCE_ISO)},
 })
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -67,6 +92,17 @@ with tempfile.TemporaryDirectory() as tmp:
         [sys.executable, str(HOOK), "--phase", "install", "--root", str(root)],
         input=CTX, capture_output=True, text=True, cwd=str(CONSOLE))
     check("le hook sort 0", proc.returncode, 0)
+
+    # THE POINT OF THIS TASK: the Windows medium must survive the reboot.
+    # install is the only phase that ever sees both the live medium and the
+    # target - see console/hooks/install.py's own module docstring - so it
+    # is the only place this copy can happen; a copy that never lands here
+    # means activate, after the reboot, looks for a file that no longer
+    # exists anywhere.
+    copy = root / COPY_REL
+    check("le media Windows est copie sous la cible", copy.is_file(), True)
+    check("le contenu copie est identique a la source",
+          copy.read_bytes(), SOURCE_ISO.read_bytes())
 
     partition = root / "etc/libvirt/hooks/vm-cpu-partition.sh"
     check("le script de partitionnement est sous /etc/libvirt/hooks",
@@ -242,6 +278,54 @@ for bad_value in ("false", "true", 1):
               "retro" in proc.stderr, True)
         check(f"retro={bad_value!r} : aucun temoin ecrit",
               (root / "etc/nivuus/retro.json").exists(), False)
+
+# --- le media Windows : refus tot, jamais a moitie fait ------------------ #
+# The wizard's 'windows_iso' answer names a file on the LIVE medium this
+# hook runs from. It must be refused HERE - at install, while the operator
+# is still at the wizard - if it cannot be read, never discovered only
+# after the reboot when activate finds nothing at the copy's path.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    ctx = json.loads(CTX)
+    absent = str(root / "does-not-exist.iso")
+    ctx["answers"]["windows_iso"] = absent
+    proc = subprocess.run(
+        [sys.executable, str(HOOK), "--phase", "install", "--root", str(root)],
+        input=json.dumps(ctx), capture_output=True, text=True, cwd=str(CONSOLE))
+    check("un media Windows absent fait sortir le hook non-zero",
+          proc.returncode != 0, True)
+    check("le refus nomme le media absent", absent in proc.stderr, True)
+    check("le media n est pas copie", (root / COPY_REL).exists(), False)
+    # Fail-fast means fail EARLY: nothing else landed either, so an
+    # operator staring at a refused install sees no half-finished state.
+    check("aucun hook libvirt n est pose quand le media est refuse",
+          (root / "etc/libvirt/hooks/qemu").exists(), False)
+
+# "Not enough free space" is proven at the guest_steps.py unit level (see
+# test_console_guest_steps.py's copy_windows_medium tests), where free_bytes
+# is injectable. copy_windows_medium is the exact same function either way -
+# only the plumbing differs, and reproducing the refusal here would mean
+# actually filling a real filesystem to capacity, which this suite does not
+# do to any real disk.
+
+# An already-complete copy (same size) must NOT be redone. Proven the same
+# way guest_steps.py proves it: pre-place a same-SIZE but WRONG-CONTENT file
+# at the copy's path, run the hook, and check the wrong content survives -
+# a real re-copy would have replaced it with SOURCE_ISO's actual bytes.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    copy = root / COPY_REL
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    stale = b"\x00" * len(SOURCE_ISO.read_bytes())
+    copy.write_bytes(stale)
+    proc = subprocess.run(
+        [sys.executable, str(HOOK), "--phase", "install", "--root", str(root)],
+        input=CTX, capture_output=True, text=True, cwd=str(CONSOLE))
+    check("le hook sort 0 quand la copie est deja complete", proc.returncode, 0)
+    check("une copie deja complete (meme taille) n est pas refaite",
+          copy.read_bytes(), stale)
+
+shutil.rmtree(FIXTURES, ignore_errors=True)
 
 # The byte-for-byte comparison above only protects the TRANSPORT: a regression
 # in the SOURCE reaches the target intact and every assertion still passes.

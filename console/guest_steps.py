@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -309,13 +310,140 @@ def _file_digest(path: Path) -> str:
         return "missing"
 
 
+# console/wizard.yaml's own default for the 'guest_workdir' answer.
+# Copied here for the same reason console/hooks/activate.py copies its own
+# literal of it (see that file's DEFAULT_GUEST_WORKDIR): a plain string from
+# a YAML file the packages engine reads, not something either hook can
+# import. install.py needs this SAME default to know where to place the
+# copy this module then expects to find under it.
+DEFAULT_GUEST_WORKDIR = "/var/lib/nivuus/guest"
+
+# The on-target copy's name, fixed rather than derived from the wizard's
+# answer: one convention both install.py (which creates it) and plan_steps
+# below (which points every step at it) share without exchanging anything
+# beyond the workdir they already agree on.
+WINDOWS_MEDIA_FILENAME = "windows-source.iso"
+
+
+def windows_media_path(workdir: str | Path) -> Path:
+    """Where the copied Windows medium lives, given the guest workdir.
+
+    Same directory as the other guest-build artefacts (secrets/, payload/,
+    the answer-file ISO) - see plan_steps.
+    """
+    return Path(workdir) / WINDOWS_MEDIA_FILENAME
+
+
+def require_windows_iso_answer(answers: Mapping[str, object]) -> str:
+    """The wizard's raw 'windows_iso' answer, non-empty or refused by name.
+
+    Shared between install.py (which needs it to know what to copy) and
+    plan_steps below (which validates the same answer before deriving the
+    on-target copy path with windows_media_path) - one message, one place,
+    rather than two hooks each inventing their own wording for the same
+    refusal.
+    """
+    value = str(answers.get("windows_iso") or "").strip()
+    if not value:
+        raise GuestBuildError(
+            "the answer 'windows_iso' is empty; the Windows LTSC medium is "
+            "what the guest is built from.")
+    return value
+
+
+def copy_windows_medium(source: str, dest: str, *,
+                        free_bytes: Callable[[str], int] | None = None
+                        ) -> None:
+    """Place a full copy of the Windows medium at `dest`. Refuses first.
+
+    console/hooks/install.py is the only phase that ever calls this: it is
+    the only moment the live medium the wizard's 'windows_iso' answer names
+    and the install target coexist (see that file's module docstring - the
+    live medium is unmounted, along with the boot medium it lived on, by
+    the time activate runs after the reboot). Once install has run,
+    everything downstream in this module (source_iso in plan_steps, in
+    particular) reads `dest`, never the raw answer.
+
+    Two refusals, both BEFORE a single byte lands at `dest`, both naming
+    their cause via GuestBuildError: the source cannot be read (missing,
+    a directory, permission denied - anything os.stat or the copy itself
+    raises), or the target filesystem does not have `source`'s size free.
+    A half-copied ~5 GB file is a worse failure than a clean refusal while
+    the operator is still at the wizard, watching.
+
+    Skipped entirely - no read, no write, no free-space check even run -
+    when `dest` already exists with the exact SAME SIZE as `source`. A
+    content hash would be the more careful completeness check, and would
+    catch a same-sized truncation or swap; it is deliberately not used
+    here, for the same reason media_identity() below already made this
+    exact call for this exact medium (see its own docstring): the file is
+    several gigabytes, so hashing it costs real minutes on every install
+    that runs this step more than once (an interrupted engine, a re-run
+    `make test-packages`, a reinstalled console) - and it would be a
+    STRONGER guarantee than the rest of this module ever relies on, since
+    media_identity() itself only ever compares name+size to decide whether
+    a BUILD is stale. A hash here would claim more confidence than the
+    pipeline downstream can act on, for a cost that scales with exactly the
+    case (repeated installer runs) this skip exists to make cheap. The
+    trade-off this leaves, spelled out rather than hidden: an operator who
+    replaces the medium in place with a byte-identical-SIZE but different
+    file must remove the copy (or its stamp - see media_identity) by hand,
+    exactly as media_identity() already documents for the fingerprint.
+    """
+    try:
+        size = os.stat(source).st_size
+    except OSError as exc:
+        raise GuestBuildError(
+            f"the Windows medium {source} is not readable: {exc.strerror}. "
+            "Check the path given to the wizard before retrying the "
+            "install.") from None
+
+    dest_path = Path(dest)
+    try:
+        if dest_path.stat().st_size == size:
+            return  # already copied in full; several GB not worth redoing
+    except OSError:
+        pass  # absent, or otherwise unreadable: (re)copy it below
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    disk_usage = free_bytes or (lambda path: shutil.disk_usage(path).free)
+    free = disk_usage(str(dest_path.parent))
+    if free < size:
+        raise GuestBuildError(
+            f"not enough free space to copy the Windows medium: {source} "
+            f"is {size} bytes, only {free} bytes are free under "
+            f"{dest_path.parent}. Free some space on the target disk and "
+            "retry the install.")
+
+    # A temp name until the copy fully lands: an interrupted install must
+    # never leave a file at `dest` that is anything BUT a complete copy -
+    # the size check above is what a later run trusts to skip this step.
+    tmp_path = dest_path.with_name(dest_path.name + ".partial")
+    try:
+        shutil.copy2(source, tmp_path)
+    except OSError as exc:
+        raise GuestBuildError(
+            f"the Windows medium {source} could not be copied to "
+            f"{dest_path.parent}: {exc.strerror or exc}.") from None
+    os.replace(tmp_path, dest_path)
+
+
 def media_identity(iso_path: str) -> str:
-    """Identity of the source Windows medium: its path and its size.
+    """Identity of the Windows medium AT THIS PATH: its path and its size.
 
     Not a content hash: the medium is several gigabytes and gets read in
     full by the build itself anyway. Two different LTSC media never share a
     size; an operator who replaces one in place with a same-sized variant
     must remove the stamp file.
+
+    `iso_path` is now the ON-TARGET COPY console/hooks/install.py placed
+    under the guest workdir via copy_windows_medium() above - never the
+    wizard's raw 'windows_iso' answer, which may point at live installer
+    media long gone by the time this runs (activate happens after the
+    reboot; install is the only phase that ever sees both roots - see that
+    file's module docstring). A missing file here therefore usually means
+    install never copied it (or the copy was removed by hand); that is
+    what the refusal below says.
     """
     path = Path(iso_path)
     try:
@@ -323,8 +451,9 @@ def media_identity(iso_path: str) -> str:
     except OSError as exc:
         raise GuestBuildError(
             f"the Windows medium {iso_path} is not readable: {exc.strerror}. "
-            "Point the wizard's 'windows_iso' answer at an existing file, or "
-            "place the downloaded medium there.") from None
+            "This should be the copy console install placed under the "
+            "guest workdir - re-run the install phase, or place the "
+            "medium at this exact path by hand.") from None
     return f"{path.name}:{size}"
 
 
@@ -436,11 +565,11 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         raise GuestBuildError(
             "the answer 'dedicated_nvme' is empty; there is no disk to give "
             "the console.")
-    source_iso = str(answers.get("windows_iso") or "").strip()
-    if not source_iso:
-        raise GuestBuildError(
-            "the answer 'windows_iso' is empty; the Windows LTSC medium is "
-            "what the guest is built from.")
+    # Validated for its own sake only - a wizard/standalone-config answer
+    # that was never given at all is a contract error worth naming here.
+    # What actually gets USED from here on is windows_media_path(root)
+    # below, never this raw value: see the comment on source_iso.
+    require_windows_iso_answer(answers)
 
     data_gib = data_partition_gib(_disk_bytes(disk, hw, size_of))
 
@@ -450,6 +579,14 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
     iso_out = root / "nivuus-unattend.iso"
     stamp = build_stamp_path(str(iso_out))
     secret_paths = {key: secret_dir / name for key, name in SECRET_FILES.items()}
+
+    # NOT the raw 'windows_iso' answer validated above: that is the
+    # wizard's LIVE-MEDIUM path, which console/hooks/install.py is the only
+    # phase to ever see alongside the target it copies onto (see that
+    # file's module docstring - by the time this function runs, at
+    # activate, the live medium is long gone). Every step below - build,
+    # define, the fingerprint - reads THIS copy instead.
+    source_iso = str(windows_media_path(root))
 
     inputs_cache: dict[str, Mapping[str, str]] = {}
 
