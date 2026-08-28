@@ -14,6 +14,7 @@ Permission denied" and no DENIED line in dmesg.
 
 Run: python3 scripts/tests/test_console_install.py
 """
+import configparser
 import json
 import os
 import pathlib
@@ -31,6 +32,26 @@ failures = []
 def check(label, got, want):
     if got != want:
         failures.append(f"{label}: got {got!r}, want {want!r}")
+
+
+def load_unit(path):
+    """systemd units are INI. Parsing them - rather than searching the raw
+    text - is what makes an assertion about a DIRECTIVE rather than about a
+    string that may well be commented out.
+
+    strict=False: systemd tolerates a repeated key (later wins), configparser
+    raises on it by default.
+    optionxform=str: configparser lowercases keys, and systemd directives are
+    case-sensitive - StartLimitIntervalSec would silently become
+    startlimitintervalsec.
+
+    Recopied from scripts/tests/test_console_wake_units.py rather than
+    imported: suites in this repo are standalone scripts.
+    """
+    parser = configparser.ConfigParser(strict=False, interpolation=None)
+    parser.optionxform = str
+    parser.read(path, encoding="utf-8")
+    return parser
 
 
 CTX = json.dumps({
@@ -67,6 +88,56 @@ with tempfile.TemporaryDirectory() as tmp:
                 "usr/local/bin/winvm"):
         check(f"{rel} depose", (root / rel).is_file(), True)
         check(f"{rel} executable", os.access(root / rel, os.X_OK), True)
+
+    # The dispatcher is the load-bearing one: without it libvirt runs no
+    # hook at all, so the two CPU wrappers install DOES write are never
+    # executed. It was missing for the whole of phase 2a.
+    executables = [
+        "etc/libvirt/hooks/qemu",
+        "etc/libvirt/hooks/qemu.d/Windows/prepare/begin/bind-vfio-gpu.sh",
+        "etc/libvirt/hooks/qemu.d/Windows/release/end/rebind-host-gpu.sh",
+        "etc/libvirt/hooks/qemu.d/Windows/started/begin/rules.sh",
+        "etc/libvirt/hooks/qemu.d/Windows/stopped/end/rules.sh",
+        "usr/local/sbin/vm-idle-shutdown.sh",
+    ]
+    for rel in executables:
+        check(f"{rel} depose", (root / rel).is_file(), True)
+        check(f"{rel} executable", os.access(root / rel, os.X_OK), True)
+
+    # Units are data, not programs. Mode is not asserted - only presence -
+    # because a unit with the execute bit still works; what must not happen
+    # is a unit missing while the package claims the cycle is deployed.
+    units = [
+        "etc/systemd/system/vm-trigger-47984.socket",
+        "etc/systemd/system/vm-trigger-47984.service",
+        "etc/systemd/system/vm-trigger-47989.socket",
+        "etc/systemd/system/vm-trigger-47989.service",
+        "etc/systemd/system/vm-idle-shutdown.service",
+        "etc/systemd/system/vm-idle-shutdown.timer",
+        "etc/systemd/system/vm-trigger-47984.service.d/no-start-limit.conf",
+        "etc/systemd/system/vm-trigger-47989.service.d/no-start-limit.conf",
+    ]
+    for rel in units:
+        check(f"{rel} depose", (root / rel).is_file(), True)
+
+    # The drop-in must reach BOTH services: systemd reads it from each
+    # unit's own .d/ directory, so one copy enables the limit on the other.
+    # Parsed as INI, not searched as text: a substring check would also pass
+    # on a commented-out line.
+    for port in ("47984", "47989"):
+        dropin = root / ("etc/systemd/system/vm-trigger-"
+                         f"{port}.service.d/no-start-limit.conf")
+        parser = load_unit(dropin)
+        check(f"le drop-in {port} desarme la limite de demarrage",
+              parser["Unit"]["StartLimitIntervalSec"], "0")
+
+    # install WRITES; activate ARMS. A wake socket armed here would listen
+    # on 0.0.0.0 for a VM that does not exist yet - and the stopped/end
+    # rules.sh hook removes the forward-ports precisely then, so the DNAT
+    # that would otherwise shadow it is gone.
+    for wants in ("sockets.target.wants", "timers.target.wants"):
+        check(f"install ne cree aucun lien dans {wants}",
+              (root / "etc/systemd/system" / wants).exists(), False)
 
     marker = json.loads((root / "etc/nivuus/retro.json").read_text())
     check("le temoin retro dit oui", marker["enabled"], True)

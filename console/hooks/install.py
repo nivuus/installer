@@ -40,6 +40,48 @@ RELEASE_WRAPPER = """#!/bin/bash
 exit 0
 """
 
+HOOK_BASE = f"etc/libvirt/hooks/qemu.d/{VM_NAME}"
+
+# (source under console/, destination under the target root).
+# Every entry lands executable; see place()'s default mode.
+HOOK_FILES = [
+    ("host/libvirt/hooks/qemu", "etc/libvirt/hooks/qemu"),
+    # THE APPARMOR TRAP (see module docstring): this one path is not a
+    # matter of taste.
+    ("host/vm-cpu-partition.sh", "etc/libvirt/hooks/vm-cpu-partition.sh"),
+    (f"host/libvirt/hooks/qemu.d/{VM_NAME}/prepare/begin/bind-vfio-gpu.sh",
+     f"{HOOK_BASE}/prepare/begin/bind-vfio-gpu.sh"),
+    (f"host/libvirt/hooks/qemu.d/{VM_NAME}/release/end/rebind-host-gpu.sh",
+     f"{HOOK_BASE}/release/end/rebind-host-gpu.sh"),
+    (f"host/libvirt/hooks/qemu.d/{VM_NAME}/started/begin/rules.sh",
+     f"{HOOK_BASE}/started/begin/rules.sh"),
+    (f"host/libvirt/hooks/qemu.d/{VM_NAME}/stopped/end/rules.sh",
+     f"{HOOK_BASE}/stopped/end/rules.sh"),
+]
+
+HOST_SCRIPTS = [
+    ("host/vm-wake-gate.py", "usr/local/sbin/vm-wake-gate.py"),
+    ("host/handle-vm-start.sh", "usr/local/sbin/handle-vm-start.sh"),
+    ("host/vm-idle-shutdown.sh", "usr/local/sbin/vm-idle-shutdown.sh"),
+    ("host/winvm", "usr/local/bin/winvm"),
+]
+
+# Units are DATA, not programs: mode 0644. A unit file with the execute bit
+# still works, but the difference is how systemd's own packages ship them.
+UNITS = [
+    "vm-trigger-47984.socket", "vm-trigger-47984.service",
+    "vm-trigger-47989.socket", "vm-trigger-47989.service",
+    "vm-idle-shutdown.service", "vm-idle-shutdown.timer",
+]
+
+# The same drop-in serves both wake services; systemd reads it from each
+# unit's own .d/ directory, so it is copied twice under its canonical name.
+DROPIN_SRC = "host/systemd/vm-trigger-no-start-limit.conf"
+DROPIN_TARGETS = [
+    "etc/systemd/system/vm-trigger-47984.service.d/no-start-limit.conf",
+    "etc/systemd/system/vm-trigger-47989.service.d/no-start-limit.conf",
+]
+
 
 def emit(event: dict) -> None:
     print(json.dumps(event), flush=True)
@@ -103,22 +145,26 @@ def main() -> int:
 
     emit({"event": "progress", "pct": 20,
           "msg": "Deploiement des hooks libvirt"})
-
-    # See the module docstring: this path is load-bearing, not stylistic.
-    place(os.path.join(HERE, "host", "vm-cpu-partition.sh"),
-          under("etc/libvirt/hooks/vm-cpu-partition.sh"))
-    base = f"etc/libvirt/hooks/qemu.d/{VM_NAME}"
-    write(under(f"{base}/prepare/begin/10-cpu-confine.sh"),
+    for src, dest in HOOK_FILES:
+        place(os.path.join(HERE, src), under(dest))
+    write(under(f"{HOOK_BASE}/prepare/begin/10-cpu-confine.sh"),
           CONFINE_WRAPPER, mode=0o755)
-    write(under(f"{base}/release/end/10-cpu-release.sh"),
+    write(under(f"{HOOK_BASE}/release/end/10-cpu-release.sh"),
           RELEASE_WRAPPER, mode=0o755)
 
     emit({"event": "progress", "pct": 50, "msg": "Deploiement des scripts hote"})
-    place(os.path.join(HERE, "host", "vm-wake-gate.py"),
-          under("usr/local/sbin/vm-wake-gate.py"))
-    place(os.path.join(HERE, "host", "handle-vm-start.sh"),
-          under("usr/local/sbin/handle-vm-start.sh"))
-    place(os.path.join(HERE, "host", "winvm"), under("usr/local/bin/winvm"))
+    for src, dest in HOST_SCRIPTS:
+        place(os.path.join(HERE, src), under(dest))
+
+    # Placed, deliberately NOT enabled: arming a 0.0.0.0 wake socket for a
+    # VM that does not exist yet would be exposure with no counterpart. The
+    # activate phase arms them, once there is something to wake.
+    emit({"event": "progress", "pct": 65, "msg": "Unites systemd posees"})
+    for unit in UNITS:
+        place(os.path.join(HERE, "host", "systemd", unit),
+              under(f"etc/systemd/system/{unit}"), mode=0o644)
+    for dest in DROPIN_TARGETS:
+        place(os.path.join(HERE, DROPIN_SRC), under(dest), mode=0o644)
 
     # The operator's retrogaming choice, recorded durably on the target.
     # windows-guest/build.py reads it much later - possibly by hand, possibly
