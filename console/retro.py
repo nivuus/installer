@@ -14,7 +14,7 @@ the connection silently: retro checked in the wizard, nothing installed on
 the guest, no test failing to say so. Defining the path here once, and
 having both sides import it, makes that particular failure impossible to
 reintroduce by a one-sided edit - see
-scripts/tests/test_retro_marker_bridge.py, which proves the two callers
+console/tests/test_retro_marker_bridge.py, which proves the two callers
 still agree by driving the real hook and reading the result with build.py's
 own default.
 

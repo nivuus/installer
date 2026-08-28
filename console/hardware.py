@@ -73,10 +73,12 @@ def parse_gpus(raw: str) -> list[dict]:
     `description` does not - `-nn` + _clean_lspci_desc_from_nn drops the
     bracketed [vendor:device] id text that `-nnmm` keeps (e.g. here
     "Intel Corporation AlderLake-S GT1" against the engine's
-    "Intel Corporation [8086] AlderLake-S GT1 [4680]"). Harmless today: no
-    caller of list_gpus() (domain.py, resolve.py, capabilities.py, the
-    wizard, the portal) reads a GPU's `description`. If one starts to, this
-    divergence is exactly what to check first.
+    "Intel Corporation [8086] AlderLake-S GT1 [4680]"). Harmless today:
+    list_gpus() has exactly one caller in this package - guest/domain.py:226,
+    which reads `discrete` and `slot` and never `description`. (hooks/
+    resolve.py reads the GPU out of the `hw` snapshot the engine hands it, so
+    it goes through the engine's copy, not this one.) If a caller starts
+    reading `description`, this divergence is exactly what to check first.
     """
     gpus = []
     for line in raw.splitlines():

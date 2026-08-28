@@ -283,7 +283,7 @@ config — mais `build.py` (devenu `console/guest/build.py`) s'exécute bien
 plus tard que `install`, éventuellement à la main, éventuellement après un
 redémarrage : à ce moment-là la config du wizard n'existe plus. La tâche 3 a
 donc fait de la réponse `retro` un témoin durable sur disque
-(`console/hooks/install.py` l'écrit, `console/guest/retro_sync.py` le lit)
+(`console/hooks/install.py` l'écrit, `console/guest/build.py` le lit)
 plutôt qu'un pont vers une config déjà éteinte. Le pont existe donc toujours,
 plus court, entièrement à l'intérieur de `console/` — et
 `test_retro_marker_bridge.py` avec lui, déplacé dans `console/tests/`,
