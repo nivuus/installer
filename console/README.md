@@ -37,6 +37,7 @@ misleading `bad interpreter: Permission denied` and no DENIED line in dmesg.
 This is parity with the `install.sh` this package replaced, not a regression
 — but it means the console is **not yet functional from an install alone**:
 
+**Files that exist in `console/host/` but are not placed:**
 - **`host/libvirt/hooks/qemu`, the dispatcher.** Without it, libvirt runs no
   hook at all, so the two CPU wrappers that *are* written are never executed.
 - `bind-vfio-gpu.sh` / `rebind-host-gpu.sh` — the GPU handover around VM
@@ -45,13 +46,16 @@ This is parity with the `install.sh` this package replaced, not a regression
   forward-ports for streaming.
 - the hugepage hooks (`00-set-hugepages.sh`, `00-hugepages-fix.sh`,
   `hugepages-reset.sh`).
-- the wake-on-demand units `vm-trigger-47984.socket` /
-  `vm-trigger-47989.socket` and their services. `vm-wake-gate.py` and
-  `handle-vm-start.sh` are placed, but nothing activates them.
 
-All of these ship inside `console/host/`; they are carried onto the target
+These ship inside `console/host/` and are carried onto the target
 with the package directory, simply not placed. Wiring them is phase 2b's
-work, together with `activate`.
+work.
+
+**Files that do not exist yet:**
+- the wake-on-demand units `vm-trigger-47984.socket` and
+  `vm-trigger-47989.socket`, and their corresponding `.service` files.
+  `vm-wake-gate.py` and `handle-vm-start.sh` are placed, but these unit
+  files must be written in phase 2b to activate them.
 
 ## PCI passthrough only
 
