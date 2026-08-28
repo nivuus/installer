@@ -66,6 +66,28 @@ check(
 check("unknown slot yields nothing", hardware.parse_pci_functions(LSPCI, "09:00.0"), [])
 check("empty input yields nothing", hardware.parse_pci_functions("", "01:00.0"), [])
 
+# --- list_gpus/cpu_topology : ce que domain.py appelle apres le reboot ---- #
+# domain.py calls these two directly, and it runs after the reboot on a host
+# where installer/ may never have existed. They are copied, not imported:
+# console/ importing installer/ is what this whole split exists to prevent.
+check("console.hardware expose list_gpus",
+      callable(getattr(hardware, "list_gpus", None)), True)
+check("console.hardware expose cpu_topology",
+      callable(getattr(hardware, "cpu_topology", None)), True)
+
+# Parsing is what can be tested without hardware; detection itself cannot.
+# Feed the parser the same shape `lspci -nn` produces. Captured verbatim from
+# the Nivuus host on 2026-08-27 (`lspci -nn | grep -iE 'vga|3d|display'`) -
+# it has exactly the targeted layout: an Intel iGPU plus a discrete NVIDIA.
+SAMPLE_LSPCI_VGA = """\
+00:02.0 VGA compatible controller [0300]: Intel Corporation AlderLake-S GT1 [8086:4680] (rev 0c)
+01:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD104 [GeForce RTX 4070] [10de:2786] (rev a1)
+"""
+
+gpus = hardware.parse_gpus(SAMPLE_LSPCI_VGA)
+check("un GPU discret est reconnu", [g["slot"] for g in gpus if g["discrete"]], ["01:00.0"])
+check("l iGPU n est pas discret", [g["discrete"] for g in gpus if g["slot"] == "00:02.0"], [False])
+
 # Test the whole-disk name extractor against a fake sysfs tree (same approach
 # as scripts/tests/test_pcie_wifi_link_guard.sh), so this does not depend on
 # what block devices happen to exist on the machine running the test.
