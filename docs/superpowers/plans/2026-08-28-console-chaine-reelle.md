@@ -47,6 +47,33 @@
 
 ---
 
+### Task 1b : le moteur transporte les faits mesurés avant le redémarrage
+
+**Files:** `installer/packages/runner.py`, `installer/install-engine/steps/packages.py`, `installer/packages/activate_cli.py` · Tests : `scripts/tests/test_packages_runner.py`, `test_install_engine_packages.py`
+
+**Cette tâche existe parce que la tâche 1 est juste mais inerte.** `resolve` émet désormais la taille du disque dédié — et **rien ne la transporte jusqu'à `activate`**. Vérifié dans les trois maillons :
+
+* `runner.py::run_resolve()` ne lit de l'événement `platform` que `kernel-cmdline`, `modules` et `hugepages-mib` ; tout le reste est jeté ;
+* `steps/packages.py` ne persiste que `{"version": …, "answers": …}` dans `etc/nivuus/packages.json` ;
+* `activate_cli.py` reconstruit `hw` par **`hardware.detect_all()` après le redémarrage** — quand le disque est déjà lié à `vfio-pci` et invisible.
+
+**C'est un manque du MOTEUR, pas de la console.** N'importe quel package `platform` peut avoir besoin de mesurer une chose qui n'existe plus après le reboot : un disque qui sera détaché, un périphérique qui sera capturé, un état que l'installation elle-même détruit. Conçois donc un canal **générique** — `resolve` retourne des faits, le moteur les persiste, `activate` les retrouve — et non un cas particulier pour la taille d'un NVMe.
+
+**Deux propriétés à ne pas perdre :**
+
+* **`resolve` reste en lecture seule.** Il retourne des faits, il n'écrit rien. C'est le moteur qui persiste.
+* **Le fichier d'état est en 0600 et contient déjà des secrets** (les réponses du wizard, dont deux mots de passe et une clé produit). Les faits le rejoignent ; le mode ne s'élargit pas.
+
+**Attention à la précédence.** Un fait persisté décrit le monde **d'avant** le redémarrage. Quand la détection d'après-reboot et le fait persisté se contredisent, lequel gagne ? Tranche explicitement et écris-le : pour la taille d'un disque devenu invisible, le fait persisté est la seule vérité disponible ; pour autre chose, ce ne serait pas forcément vrai.
+
+- [ ] **Step 1: le test qui échoue** — un `resolve` qui émet un fait le retrouve dans l'état persisté, puis dans le `hw` que reçoit `activate`. Vérifie aussi qu'un package qui n'émet rien continue de fonctionner à l'identique.
+- [ ] **Step 2: implémenter les trois maillons.**
+- [ ] **Step 3: prouver** — couper chacun des trois maillons doit faire échouer le test, **en nommant lequel**. Trois épreuves, pas une : un canal se casse en trois endroits et une épreuve unique n'en couvre qu'un.
+- [ ] **Step 4: vérifier que le mode du fichier d'état est resté 0600** — un test l'exige déjà, ne le contourne pas.
+- [ ] **Step 5: agrégateur, commit.**
+
+---
+
 ### Task 2 : la chaîne produit des artefacts que l'hyperviseur peut ouvrir
 
 **Files:** `console/guest_steps.py` · Test : `console/tests/test_console_guest_steps.py`
