@@ -5,6 +5,7 @@ A unit whose ExecStart names a different port than its filename, or that
 lost its no-start-limit drop-in, fails in a way nothing reports: systemd
 disables the socket after five starts and wake-on-demand simply stops.
 """
+import configparser
 import os
 import sys
 
@@ -20,6 +21,34 @@ def check(label, condition):
         failures.append(label)
 
 
+def load_unit(path):
+    """systemd units are INI. Parsing them - rather than searching the raw
+    text - is what makes an assertion about a DIRECTIVE rather than about a
+    string that may well be commented out.
+
+    strict=False: systemd tolerates a repeated key (later wins), configparser
+    raises on it by default.
+    optionxform=str: configparser lowercases keys, and systemd directives are
+    case-sensitive - ExecStart would silently become execstart.
+    """
+    parser = configparser.ConfigParser(strict=False, interpolation=None)
+    parser.optionxform = str
+    parser.read(path, encoding="utf-8")
+    return parser
+
+
+def get_safely(parser, section, key, label, expected=None):
+    """Read a directive safely, treating absence as a named failure."""
+    try:
+        value = parser[section][key]
+        if expected is not None:
+            check(label, value == expected)
+        return value
+    except KeyError:
+        check(f"{label} (directive exists)", False)
+        return None
+
+
 for port in ("47984", "47989"):
     sock = os.path.join(UNITS, f"vm-trigger-{port}.socket")
     svc = os.path.join(UNITS, f"vm-trigger-{port}.service")
@@ -27,34 +56,47 @@ for port in ("47984", "47989"):
     check(f"vm-trigger-{port}.service exists", os.path.isfile(svc))
     if not (os.path.isfile(sock) and os.path.isfile(svc)):
         continue
-    stext, vtext = open(sock).read(), open(svc).read()
 
-    check(f"{port}: listens on every interface",
-          f"ListenStream=0.0.0.0:{port}" in stext)
-    # Accept=false: ONE service instance handles the listening socket and
-    # reads the first bytes itself. Accept=true would spawn a per-connection
-    # instance and the gate could not refuse before the VM starts.
-    check(f"{port}: Accept=false", "Accept=false" in stext)
-    check(f"{port}: enabled into sockets.target",
-          "WantedBy=sockets.target" in stext)
+    sock_unit = load_unit(sock)
+    svc_unit = load_unit(svc)
 
+    # Socket directives
+    get_safely(sock_unit, "Unit", "Description",
+               f"{port}: socket has description")
+    get_safely(sock_unit, "Socket", "ListenStream",
+               f"{port}: listens on every interface", f"0.0.0.0:{port}")
+    get_safely(sock_unit, "Socket", "Accept",
+               f"{port}: Accept=false", "false")
+    get_safely(sock_unit, "Socket", "TriggerLimitIntervalSec",
+               f"{port}: trigger limit interval", "2")
+    get_safely(sock_unit, "Socket", "TriggerLimitBurst",
+               f"{port}: trigger limit burst", "200")
+    get_safely(sock_unit, "Install", "WantedBy",
+               f"{port}: enabled into sockets.target", "sockets.target")
+
+    # Service directives
+    get_safely(svc_unit, "Unit", "Requires",
+               f"{port}: requires its socket", f"vm-trigger-{port}.socket")
+    get_safely(svc_unit, "Unit", "After",
+               f"{port}: ordered after its socket", f"vm-trigger-{port}.socket")
     # The port in ExecStart is the gate's only argument; a mismatch with the
     # filename makes the 47984 probe log claim to be the 47989 wake path.
-    check(f"{port}: ExecStart carries this very port",
-          f"ExecStart=/usr/local/sbin/vm-wake-gate.py {port}" in vtext)
-    check(f"{port}: ordered after its socket",
-          f"After=vm-trigger-{port}.socket" in vtext)
-    check(f"{port}: oneshot", "Type=oneshot" in vtext)
+    get_safely(svc_unit, "Service", "ExecStart",
+               f"{port}: ExecStart carries this very port",
+               f"/usr/local/sbin/vm-wake-gate.py {port}")
+    get_safely(svc_unit, "Service", "Type",
+               f"{port}: oneshot", "oneshot")
     # The gate waits on the VM's IP for up to 180 s; a shorter deadline kills
     # a wake that was working.
-    check(f"{port}: start deadline leaves room for a VM boot",
-          "TimeoutStartSec=300" in vtext)
+    get_safely(svc_unit, "Service", "TimeoutStartSec",
+               f"{port}: start deadline leaves room for a VM boot", "300")
 
 dropin = os.path.join(UNITS, "vm-trigger-no-start-limit.conf")
 check("the no-start-limit drop-in exists", os.path.isfile(dropin))
 if os.path.isfile(dropin):
-    check("the drop-in disables the start limit",
-          "StartLimitIntervalSec=0" in open(dropin).read())
+    dropin_unit = load_unit(dropin)
+    get_safely(dropin_unit, "Unit", "StartLimitIntervalSec",
+               "the drop-in disables the start limit", "0")
 
 if failures:
     for item in failures:
