@@ -31,6 +31,7 @@ def make_tree(root: pathlib.Path) -> "payload.PayloadSources":
     (root / "provision" / "assets" / "run-agent.ps1").write_text("# run-agent\n")
     (root / "provision" / "assets" / "steam-session.ps1").write_text("# steam-session\n")
     (root / "provision" / "assets" / "steam-launch.ps1").write_text("# steam-launch\n")
+    (root / "provision" / "assets" / "steam-cursor.ps1").write_text("# steam-cursor\n")
     (root / "provision" / "assets" / "apollo-junction.ps1").write_text("# junction\n")
     (root / "provision" / "assets" / "steam-shell.ps1").write_text("# steam-shell\n")
     (root / "provision" / "assets" / "retro-status.ps1").write_text("# retro-status\n")
@@ -199,8 +200,12 @@ with tempfile.TemporaryDirectory() as tmp:
 # retro-status.ps1 et retro-7zr.ps1 : dot-sources par 32-retro.ps1, le premier
 # AVANT meme qu elle lise le basculement - une charge utile sans eux tue une
 # etape qui n avait, peut-etre, rien a faire.
+# steam-cursor.ps1 : dot-source par steam-session.ps1, la commande suivie
+# d Apollo. Absent, le masquage du curseur de Big Picture disparait en silence -
+# exactement la facon dont la dette C4 s etait creee.
 for asset in ["run-agent.ps1", "steam-session.ps1", "steam-launch.ps1",
-              "apollo-junction.ps1", "retro-status.ps1", "retro-7zr.ps1"]:
+              "steam-cursor.ps1", "apollo-junction.ps1", "retro-status.ps1",
+              "retro-7zr.ps1"]:
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
         sources = make_tree(root / "src")
@@ -322,6 +327,7 @@ with tempfile.TemporaryDirectory() as tmp:
     (src / "provision" / "assets" / "run-agent.ps1").write_text("x")
     (src / "provision" / "assets" / "steam-session.ps1").write_text("x")
     (src / "provision" / "assets" / "steam-launch.ps1").write_text("x")
+    (src / "provision" / "assets" / "steam-cursor.ps1").write_text("x")
     (src / "provision" / "assets" / "apollo-junction.ps1").write_text("x")
     (src / "provision" / "assets" / "steam-shell.ps1").write_text("x")
     (src / "provision" / "assets" / "retro-status.ps1").write_text("x")
