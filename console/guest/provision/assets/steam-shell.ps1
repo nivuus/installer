@@ -67,7 +67,12 @@ try {
         $form = New-Object System.Windows.Forms.Form
         $form.FormBorderStyle = 'None'
         $form.WindowState = 'Maximized'
-        $form.BackColor = [System.Drawing.Color]::FromArgb(14, 17, 23)
+        # Noir pur, et PAS un gris-bleu sombre : BackgroundImageLayout = 'Zoom'
+        # plus bas fait apparaitre CETTE couleur en bandes laterales des que le
+        # client n est pas en 16:9 (le telephone en 2410x1080). Le fond d ecran
+        # est en #000 par la charte Nivuus (§ 3, noir et blanc sans exception) ;
+        # toute autre valeur ici dessine une couture autour de l image.
+        $form.BackColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
         $form.BackgroundImage = [System.Drawing.Image]::FromFile($Wallpaper)
         $form.BackgroundImageLayout = 'Zoom'
         $form.ShowInTaskbar = $false
@@ -82,7 +87,9 @@ try {
         $holdLabel.TextAlign = 'MiddleCenter'
         $holdLabel.Font = New-Object System.Drawing.Font('Segoe UI', 14, [System.Drawing.FontStyle]::Bold)
         $holdLabel.ForeColor = [System.Drawing.Color]::White
-        $holdLabel.BackColor = [System.Drawing.Color]::FromArgb(14, 17, 23)
+        # Meme noir que la form, pour la meme raison : cette bande est
+        # opaque et posee SUR le fond d ecran.
+        $holdLabel.BackColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
         $holdLabel.Text = 'Mise a jour de la bibliotheque Steam en cours...'
         $holdLabel.Visible = $false
         $form.Controls.Add($holdLabel)
