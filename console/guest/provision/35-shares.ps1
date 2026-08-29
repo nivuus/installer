@@ -111,6 +111,16 @@ foreach ($s in $Shares) {
 # La regle a retenir pour l une comme pour l autre : SURVEILLER LA LETTRE, PAS
 # LE SERVICE. C est le raisonnement que ce script tient deja a la relecture
 # ci-dessus ; il manque seulement de le tenir APRES le provisionnement.
+#
+# CE N EST PLUS UNE HYPOTHESE : C EST ARRIVE. Le 2026-08-29, les quatre lettres
+# avaient de nouveau disparu, les quatre services se declarant Running. Vu du
+# canape : « ROM introuvable » au lancement de Crash Team Racing, et le dossier
+# de BIOS de DuckStation (G:\retro\bios) invisible — la console inutilisable
+# jusqu au Restart-Service ci-dessus. Le mode d echec a donc sa propre entree
+# de dette, docs/console-dettes.md, C6, ou vivent le releve du jour et ce qui
+# reste a faire. Une nuance y est notee : cette occurrence-la N A PAS ete
+# rattachee a une hibernation — personne n a releve le declencheur au moment du
+# constat. L hibernation est une cause CONNUE, pas la cause UNIQUE.
 Start-Sleep -Seconds 8
 $missing = @()
 foreach ($s in $Shares) {
