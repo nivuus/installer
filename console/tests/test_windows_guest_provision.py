@@ -462,6 +462,85 @@ check("la boucle de maximisation sort des qu elle a trouve la fenetre",
 check("maximize-steam.ps1 ne subsiste pas en doublon",
       (PROVISION / "assets" / "maximize-steam.ps1").exists(), False)
 
+# --- Dette C4 : le curseur de la souris reste pose sur Big Picture ------------
+#
+# L apps.json ecrit a la main du 2026-07-23 faisait porter a l entree "Steam
+# Big Picture" un nomousy en plus de -bigpicture ; le passage au gabarit
+# apps.json.j2 l a laisse tomber sans que rien ne le signale. Le masquage
+# revient ici, et NULLE PART AILLEURS :
+#   - pas dans un prep-cmd : Apollo attend sa fin AVANT de lancer
+#     l application, 182 s mesurees le 2026-08-26 ;
+#   - pas par nomousy : verifie absent de l invite le 2026-08-29 (C:\nivuus,
+#     C:\Program Files\Apollo, C:\Windows, D:\, et Get-Command) - il faudrait
+#     donc l embarquer, l empreindre et le verifier dans une charge utile qui
+#     s installe hors ligne, pour ce que user32.dll fait deja ;
+#   - pas dans sunshine.conf : la table des options d Apollo 0.4.6, lue dans
+#     les chaines de C:\Program Files\Apollo\sunshine.exe le 2026-08-29 (elle
+#     va de "qp" a "locale" et se termine par le message "Warning:
+#     Unrecognized configurable option ["), ne contient AUCUNE cle de curseur.
+#     Les plus proches sont mouse / keyboard / controller, qui activent des
+#     peripheriques d entree. Une cle inventee serait ignoree EN SILENCE.
+# Tout ce qui suit lit le CODE SEUL (code_only) : les en-tetes de ces deux
+# fichiers expliquent deja le pourquoi en toutes lettres, et un controle lu sur
+# le texte brut resterait vert alors que le comportement aurait disparu.
+_sess_body = code_only(_sess)
+_cursor_path = PROVISION / "assets" / "steam-cursor.ps1"
+check("steam-cursor.ps1 existe", _cursor_path.is_file(), True)
+# Il est dot-source par $PSScriptRoot : il doit atterrir dans C:\nivuus\apollo a
+# cote de steam-session.ps1, pas rester sur le media de reponses.
+check("25-apollo.ps1 copie steam-cursor.ps1 a cote de steam-session.ps1",
+      "'steam-session.ps1', 'steam-launch.ps1', 'steam-cursor.ps1'"
+      in apollo_stage, True)
+_cursor = _cursor_path.read_text(encoding="utf-8")
+_cursor_body = code_only(_cursor)
+# L en-tete de steam-cursor.ps1 nomme nomousy pour raconter l historique ; c est
+# le CODE qui ne doit appeler aucun binaire tiers.
+check("le masquage n appelle aucun binaire tiers",
+      "nomousy" in (_sess_body + _cursor_body).lower(), False)
+check("le masquage passe par les curseurs systeme de user32.dll",
+      "CreateCursor" in _cursor_body and "SetSystemCursor" in _cursor_body, True)
+# SetSystemCursor DETRUIT le curseur qu on lui confie : un handle unique
+# reutilise serait mort des le deuxieme identifiant, et seule la fleche
+# disparaitrait - un defaut qui laisse le sablier de chargement a l ecran.
+check("un curseur vide est cree pour CHAQUE identifiant systeme",
+      "$blank = [NivuusWin]::CreateCursor" in _cursor_body
+      and "foreach ($id in $SystemCursorIds)" in _cursor_body, True)
+# CreateCursor exige les dimensions du curseur systeme (mesure sur l invite le
+# 2026-08-29 : 32x32) ; les coder en dur ferait echouer l appel ailleurs.
+check("les dimensions viennent du systeme, pas d une constante",
+      "GetSystemMetrics" in _cursor_body, True)
+# 🔴 Le mode Desktop lance le client Steam NORMAL, qui se pilote a la souris :
+# un masquage pose pour la session entiere le rendrait inutilisable.
+check("seul le mode Big Picture masque le curseur",
+      "$cursorHidden = ($Mode -ne 'BigPicture')" in _sess_body, True)
+# Meme regle que la maximisation : ca se greffe sur la boucle de surveillance,
+# jamais devant elle. La surveillance ne doit JAMAIS attendre derriere autre
+# chose - c est ce qui avait coute 180 s de "quitter Steam ne ferme rien".
+check("le masquage se greffe sur la boucle de surveillance",
+      "$cursorHidden = Set-CursorHidden" in _sess_body, True)
+check("steam-session.ps1 dot-source les fonctions de curseur",
+      "steam-cursor.ps1" in _sess_body, True)
+# Apollo tue le groupe de processus de la commande suivie quand le client se
+# deconnecte : une session Big Picture peut donc mourir sans jamais executer sa
+# propre restauration, et laisser des curseurs vides derriere elle. Le mode
+# Desktop - le seul qui ait besoin de la souris - repart donc TOUJOURS de
+# curseurs relus du registre. C est le filet, et il n est pas facultatif.
+check("le mode Desktop restaure les curseurs avant de surveiller",
+      "if ($Mode -eq 'Desktop') { Restore-SystemCursors }" in _sess_body, True)
+check("la restauration relit les curseurs du registre (SPI_SETCURSORS)",
+      "SPI_SETCURSORS" in _cursor_body and "SPI_SETCURSORS" in _sess_body, True)
+check("une sortie normale de Big Picture rend le curseur",
+      "if ($Mode -eq 'BigPicture') { Restore-SystemCursors }" in _sess_body, True)
+# Windows PowerShell 5.1 relit un .ps1 SANS BOM dans la page de codes ANSI :
+# tout octet non-ASCII y change de sens. Les commentaires francais de ces deux
+# fichiers s ecrivent donc sans accents ni guillemets typographiques.
+for _name in ("steam-session.ps1", "steam-cursor.ps1"):
+    _raw = (PROVISION / "assets" / _name).read_bytes()
+    check(f"{_name} ne porte pas de BOM", _raw.startswith(b"\xef\xbb\xbf"), False)
+    check(f"{_name} est en ASCII pur (fichier sans BOM)",
+          [ln for ln in _raw.decode("utf-8").splitlines()
+           if any(ord(c) > 126 for c in ln)], [])
+
 # steam-launch.ps1 est l entree « detached » : elle demarre Steam, mais SEULEMENT
 # une fois qu Apollo a pose un affichage. Hors session la RTX 4070 ne pilote
 # aucun ecran — mesure du 2026-08-26, le bureau vit sur la VGA emulee en
