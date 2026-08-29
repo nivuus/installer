@@ -188,6 +188,37 @@ _conf = apollo.render_conf()
 check("sunshine.conf nomme l hote pour les clients",
       any(l.strip() == "sunshine_name = Nivuus" for l in _conf.splitlines()), True)
 
+# min_log_level est la SEULE chose qui rende la dette C1 observable. Aucune
+# manette ne vibre nulle part, et le maillon qui appartient a ce depot -
+# Apollo qui renvoie le rumble au client - ne se mesure que dans sunshine.log.
+# Un niveau abaisse a warning ne casserait rien de visible: le flux marcherait
+# toujours, et la seule chose perdue serait la capacite de savoir POURQUOI la
+# manette est muette. C'est exactement le genre de reglage qu'on abaisse « pour
+# alleger le journal » six mois plus tard, sans voir ce qu'on eteint.
+#
+# Le test epingle donc les deux moities: la valeur, et la phrase qui dit
+# pourquoi elle est la. Un gabarit dont chaque autre cle porte son
+# raisonnement, et dont celle-ci n'en portait aucun, se relit comme un
+# reliquat de mise au point.
+_lignes = _conf.splitlines()
+_idx = [i for i, l in enumerate(_lignes) if l.strip().startswith("min_log_level")]
+check("sunshine.conf pose un seul min_log_level", len(_idx), 1)
+if _idx:
+    check("le journal Apollo est au niveau info",
+          _lignes[_idx[0]].strip(), "min_log_level = info")
+    # Le bloc de commentaire qui precede immediatement la cle.
+    _j = _idx[0] - 1
+    _bloc = []
+    while _j >= 0 and (_lignes[_j].startswith("#") or not _lignes[_j].strip()):
+        if not _lignes[_j].strip() and _bloc:
+            break
+        if _lignes[_j].startswith("#"):
+            _bloc.append(_lignes[_j])
+        _j -= 1
+    _bloc = "\n".join(reversed(_bloc)).lower()
+    check("le gabarit dit a quoi ce niveau sert", "rumble" in _bloc, True)
+    check("et renvoie a la dette qui en depend", "c1" in _bloc, True)
+
 # render_retro() must ALWAYS produce a file, in both cases: an absent
 # config/retro.psd1 must never be how "retro is off" is expressed (see
 # apollo.render_retro's docstring and payload.verify_staged's required list).

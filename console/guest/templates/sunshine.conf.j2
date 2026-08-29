@@ -55,6 +55,25 @@ dd_config_revert_delay = 3000
 # device » dans sunshine.log — si l'encodeur LOGICIEL echoue lui aussi, il
 # manque un ecran, pas un GPU.
 
+# Le niveau de journal, et pourquoi il ne descend pas.
+#
+# Aucune manette ne vibre nulle part — ni dans les jeux Steam, ni dans les
+# emulateurs, ni depuis le client Moonlight (dette C1, docs/console-dettes.md).
+# Le maillon qui appartient a ce depot est le retour Apollo -> client: le
+# rumble voyage a CONTRESENS du reste du flux, et c'est le seul chemin de la
+# chaine qui remonte. Il ne se mesure nulle part ailleurs que dans
+# sunshine.log — ni ViGEmBus ni le client n'en disent rien.
+#
+# « info » est donc le niveau dont depend l'etape 2 de C1. L'abaisser
+# n'afficherait aucun symptome: le flux marcherait toujours, et la seule chose
+# perdue serait la capacite de savoir POURQUOI la manette est muette.
+#
+# NON MESURE, et a ne pas supposer: que l'evenement de rumble soit journalise
+# a « info » plutot qu'a « debug ». Personne ne l'a lu dans sunshine.log. Si
+# l'etape 2 de C1 ne trouve rien a ce niveau, l'absence de ligne ne prouve PAS
+# qu'Apollo n'emet rien — elle peut ne prouver que la verbosite. Passer a
+# « debug » le temps d'une session tranche, et c'est le premier geste a faire
+# avant de conclure quoi que ce soit sur ce maillon.
 min_log_level = info
 
 # Le nom que les clients Moonlight affichent. Sans lui, Apollo annonce le nom
