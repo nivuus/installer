@@ -20,11 +20,11 @@ help:
 # console/ imports it; the single pydantic-dependent suite (test_webapp_models)
 # stayed in installer/Makefile with the portal.
 #
-# 22 suites run here (2026-08-28): the 8 test_console_* suites (the 8th,
+# 23 suites run here (2026-08-29): the 8 test_console_* suites (the 8th,
 # test_console_guest_ready, guards the four-way installing/failed/ready
 # classification that makes activate's Windows build observable after it
 # hands back control), test_retro_marker_bridge and test_vm_wake_gate (the
-# wake-on-demand gate and the units that arm it), the 11 test_windows_guest_*
+# wake-on-demand gate and the units that arm it), the 12 test_windows_guest_*
 # suites, and the shell suite test_handle_vm_start. All moved here from
 # scripts/tests/ so the package carries its own tests ahead of the git
 # filter-repo --path console split (see installer/Makefile's test-packages
@@ -49,7 +49,7 @@ test:
 	          test_windows_guest_fetch_payload test_windows_guest_iso \
 	          test_windows_guest_media test_windows_guest_payload \
 	          test_windows_guest_production_domain test_windows_guest_provision \
-	          test_windows_guest_retro_sync; do \
+	          test_windows_guest_retro_sync test_windows_guest_winrm_exec; do \
 	    echo "--- $$t"; \
 	    $(PYTHON) $(CONSOLE_DIR)/tests/$$t.py || exit 1; \
 	done
