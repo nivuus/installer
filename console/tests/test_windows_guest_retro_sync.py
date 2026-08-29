@@ -483,6 +483,7 @@ class Cfg:
     steam_root_windows = retro_sync.STEAM_ROOT
     roms = retro_sync.ROMS_ROOT
     user_manifest = retro_sync.USER_MANIFEST
+    user_profiles = retro_sync.USER_PROFILES
     inventory = retro_sync.INVENTORY
     retro_exe = retro_sync.RETRO_EXE
     steamgriddb_key = None
@@ -1161,6 +1162,27 @@ check("... la seconde sonde etant sous le finally qui rend la sentinelle",
       bool(_try) and any(c.lineno > _try.lineno for c in _sessions), True)
 
 shutil.rmtree(_tmp, ignore_errors=True)
+
+# --- Le scan recoit les DEUX sources du proprietaire --------------------- #
+#
+# Le manifeste dit quels emulateurs existent ; les profils disent quels
+# DOSSIERS leur appartiennent. Avec le seul manifeste, un systeme du
+# proprietaire devient INCONNU, et la synchronisation retire de Steam les jeux
+# qu il servait -- en silence, en purgeant leur artwork. Mesure du 2026-08-29 :
+# six jeux Switch perdus ainsi, parce que ryujinx.toml vit dans G:\retro\
+# profiles et que scan ne le recevait pas.
+_gp = invite("ok")
+lancer(_gp, Cfg())
+_scan_args = _gp.args_vus.get("scan", [])
+check("le scan est lance une fois",
+      len([a for a in actions(_gp, "retro") if a[1] == "scan"]), 1)
+check("... avec le manifeste du proprietaire",
+      "--user-manifest" in _scan_args, True)
+check("... ET avec ses profils, sans quoi ses systemes sont inconnus",
+      "--user-profiles" in _scan_args, True)
+check("... et le dossier de profils est celui du partage",
+      _scan_args[_scan_args.index("--user-profiles") + 1]
+      if "--user-profiles" in _scan_args else None, retro_sync.USER_PROFILES)
 
 if failures:
     print(f"FAIL ({len(failures)})")

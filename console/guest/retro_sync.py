@@ -131,8 +131,26 @@ STEAM_EXE = r"D:\Steam\steam.exe"
 # fait le seul marqueur fiable depuis l'hôte — Apollo, lui, tourne en service
 # et serait présent session ou pas.
 SESSION_SCRIPT = "steam-session.ps1"
-ROMS_ROOT = r"G:\ROMs"
+# MESURÉ le 2026-08-29, en jouant la tâche 6 du plan D6 : la bibliothèque
+# vit dans G:\Games (Atari\, Nintendo\, Sony\), et G:\ROMs N'EXISTE PAS.
+# `retro scan` échouait donc sur « racine des ROMs introuvable » à chaque
+# passage aux valeurs par défaut — depuis que cette constante existe, un seul
+# commit l'ayant jamais touchée. Le partage G: est /media/data/Console côté
+# hôte, ce que la copie des roues de --reinstaller-le-paquet a confirmé au
+# même passage. Le plan de D8 dit la même chose de son côté : il range les
+# jeux PS4 dans G:\Games\Sony\PS4 « pour que ce qui s'y installera tombe là
+# où retro scan regarde ».
+ROMS_ROOT = r"G:\Games"
 USER_MANIFEST = r"G:\retro\emulators.toml"
+# MESURÉ le 2026-08-29 : `scan` recevait le manifeste du propriétaire mais PAS
+# ses profils. Or déclarer un émulateur au manifeste ne suffit pas à s'en
+# servir — il lui faut un profil, qui dit quels dossiers lui appartiennent.
+# Sans ce dossier, « Nintendo\Switch » est un système INCONNU, et la
+# synchronisation a retiré de Steam les six jeux qu'il servait, en silence et
+# en purgeant leur artwork. L'asymétrie est exactement celle que le plan du
+# sous-projet D de `retro` annonce. L'absence du dossier est normale et n'est
+# jamais une erreur : il vit sur un partage qui peut ne pas être monté.
+USER_PROFILES = r"G:\retro\profiles"
 INVENTORY = r"C:\nivuus\state\retro-inventory.json"
 
 # --- L'identité du paquet retro. ------------------------------------------
@@ -905,7 +923,8 @@ def synchronise(guest, cfg) -> int:
         ["scan", "--roms", cfg.roms, "--roms-windows", cfg.roms,
          "--emulation-root", cfg.emulation_root,
          "--emulation-root-local", cfg.emulation_root,
-         "--user-manifest", cfg.user_manifest, "--output", cfg.inventory])
+         "--user-manifest", cfg.user_manifest,
+         "--user-profiles", cfg.user_profiles, "--output", cfg.inventory])
     print(rapport.rstrip())
     if code != 0:
         print("error: le scan des ROMs a échoué, rien n'a été synchronisé "
@@ -977,6 +996,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "--steam-root-windows")
     ap.add_argument("--steam-root-windows", default=STEAM_ROOT)
     ap.add_argument("--roms", default=ROMS_ROOT)
+    ap.add_argument("--user-profiles", default=USER_PROFILES)
     ap.add_argument("--user-manifest", default=USER_MANIFEST,
                     help="manifeste du propriétaire, sur le partage ; son "
                          "absence est normale, jamais une erreur")
