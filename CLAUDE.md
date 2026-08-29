@@ -430,7 +430,10 @@ wizard is deliberately deferred, not forgotten.
 
 Tests: `cd installer && make test-packages` (needs a Python with `pydantic`
 and `jinja2` — not the Debian base — via `PYTHON=/path/to/venv/bin/python`).
-**33 suites, measured 2026-08-28 (after phase 2d), exit 0**: 11 run directly by
+**35 suites, measured 2026-08-29 (after the `requires.packages` guards were
+wired into the aggregator): 34 exit 0, and `test_webapp_models` could not be
+run on a python3.13-only base, where the installed `pydantic` belongs to a
+python3.11 that no longer has a binary.** 13 run directly by
 `installer/Makefile` (the engine/webapp/packages suites that stay outside
 `console/`), and 22 delegated to `console/Makefile`'s own `test` target —
 the 8 `test_console_*` suites (`test_console_guest_steps` and

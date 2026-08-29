@@ -53,7 +53,7 @@ test-vm:
 
 # Run the package-engine test suite (no root, no chroot, no ISO).
 #
-# PYTHON is overridable because two of the 11 suites below need a dependency
+# PYTHON is overridable because two of the 13 suites below need a dependency
 # that is NOT in the Debian base: test_webapp_models needs pydantic v2
 # (bookworm ships v1) and test_install_engine_features needs jinja2. Measured
 # suite by suite, 2026-08-28. `make test-packages PYTHON=/path/to/venv/bin/python3`.
