@@ -103,50 +103,114 @@ recouvre l'équivalent de 192 px de l'image 4K.
 
 ---
 
-## C4 — Le curseur de la souris reste posé sur Big Picture
+## C4 — Le curseur de la souris reste posé sur Big Picture — RÉGLÉ le 2026-08-29
 
-**Constaté le 2026-08-28.** En mode `Steam Big Picture`, le pointeur de souris
-reste visible par-dessus l'interface. Big Picture se pilote entièrement à la
-manette : ce curseur ne sert à rien, il ne bouge pas, et il traîne au milieu de
-l'écran de la TV pendant toute la partie.
+**Ce que c'était.** En mode `Steam Big Picture`, le pointeur restait visible
+par-dessus l'interface, au milieu de l'écran de la TV, pendant toute la partie.
+Big Picture se pilote entièrement à la manette : ce curseur ne servait à rien et
+ne bougeait pas. Le défaut n'était pas neuf — l'`apps.json` écrit à la main du
+2026-07-23 faisait porter à l'entrée `Steam Big Picture` un `nomousy` en plus de
+`-bigpicture`, et le passage au gabarit `apps.json.j2` l'a laissé tomber sans
+que rien ne le signale.
 
-**Ce que le dépôt dit déjà de ce défaut, et qui date d'avant le
-provisionnement :** l'`apps.json` écrit à la main de 2026-07-23 faisait porter à
-l'entrée `Steam Big Picture` un `nomousy` en plus de `-bigpicture` (CLAUDE.md,
-§ *"Desktop" app auto-maximizes the Steam window*). Ce fichier a été remplacé
-par le gabarit `console/guest/templates/apps.json.j2`, qui n'en porte **aucune
-trace** — c'est la seule occurrence de `nomousy` dans tout le dépôt. La dette
-n'est donc pas neuve : c'est un comportement qui existait, et que la
-généralisation en gabarit a laissé tomber sans que rien ne le signale.
+**Ce qui a été fait.** Le masquage est revenu **dans la boucle de surveillance**
+de `console/guest/provision/assets/steam-session.ps1`, jamais devant elle, sur
+le patron que la maximisation suivait déjà (`$maximized` / `Set-SteamMaximized`
+→ `$cursorHidden` / `Set-CursorHidden`). Les deux fonctions vivent dans un
+fichier voisin, `console/guest/provision/assets/steam-cursor.ps1`, qui porte
+l'en-tête complet ; le découpage n'a pas d'autre motif que la limite de 200
+lignes par fichier, la même qui avait sorti `apollo-drivers.ps1` de
+`25-apollo.ps1`. `25-apollo.ps1` le copie désormais à côté de
+`steam-session.ps1` (il est dot-sourcé par `$PSScriptRoot`) et
+`payload.verify_staged` l'exige au staging — sans quoi il aurait pu disparaître
+exactement comme le `nomousy` de 2026-07-23.
 
-**Où ça se joue, et par quel chemin c'est interdit :** pas par un `prep-cmd`.
-L'en-tête d'`apps.json.j2` en fait une règle, et la raison est mesurée — Apollo
-attend la fin d'un `prep-cmd` avant de lancer l'application, ce qui avait coûté
-182 s par session. Tout masquage doit donc se greffer sur la boucle de
-surveillance de `console/guest/provision/assets/steam-session.ps1`, jamais
-devant elle : c'est exactement la règle que la maximisation a déjà suivie
-(`$maximized` / `Set-SteamMaximized`).
+Le mécanisme : `CreateCursor` fabrique un curseur **entièrement transparent**
+(plan AND à 1, plan XOR à 0), que `SetSystemCursor` pose sur les treize
+identifiants `OCR_*` de `winuser.h` — tous, pas seulement la flèche, Big Picture
+affichant un sablier pendant ses chargements. Aucun fichier `.cur`, aucun
+binaire : `user32.dll` est déjà là.
 
-**La contrainte qui interdit de le faire globalement :** le mode `Desktop` lance
-le client Steam normal, qui se pilote à la souris. Un masquage posé pour la
-session entière rendrait ce mode-là inutilisable. `steam-session.ps1` reçoit
-déjà `-Mode` et distingue déjà les deux cas — le masquage suit ce paramètre, ou
-il casse l'autre application.
+**Le masquage suit `-Mode`, et il est réversible dans les deux sens.** Le mode
+`Desktop` lance le client Steam normal, qui se pilote à la souris : il ne masque
+rien, **et il restaure les curseurs à chaque démarrage**. Ce filet n'est pas
+décoratif — Apollo tue le groupe de processus de la commande suivie quand le
+client se déconnecte, donc une session Big Picture peut mourir sans jamais
+atteindre sa propre restauration (`SPI_SETCURSORS`, en bas du script). Le mode
+qui a besoin de la souris repart donc toujours de curseurs relus du registre.
 
-**Ce qu'il reste à mesurer, avant d'écrire une ligne :** ce que fait exactement
-le levier retenu. Un utilitaire tiers (`nomousy`) est un binaire de plus à
-embarquer dans le payload et à empreindre ; côté Apollo, une clé de capture du
-curseur — si elle existe dans la version installée — se poserait dans
-`sunshine.conf.j2`, sous la règle de son en-tête : **vérifiée présente dans
-Apollo 0.4.6**, jamais recopiée d'une recette. Les deux ne portent d'ailleurs
-pas sur la même chose : cacher le curseur *dans l'invité* n'est pas cesser de
-le *capturer* dans le flux, et seule la seconde laisse l'invité utilisable en
-VNC.
+**Les deux autres leviers ont été écartés sur mesure, pas par principe :**
 
-**Ce que ça coûte :** rien ne bloque une partie. Mais c'est le dernier élément
-d'interface Windows visible sur une machine dont on a retiré `explorer.exe` et
-caché les quatre fenêtres PowerShell précisément pour qu'il ne reste rien à
-l'écran.
+- **`nomousy`** : cherché sur l'invité le 2026-08-29 (`C:\nivuus`, `C:\Program
+  Files\Apollo`, `C:\Windows`, `D:\`, et `Get-Command`) — **absent**. Il aurait
+  donc fallu l'embarquer, l'empreindre et le vérifier dans une charge utile qui
+  s'installe hors ligne, pour ce que trois appels `user32` font déjà. **Et
+  l'arbitrage ne bascule pas si cette lecture était fausse** : même présent
+  quelque part sur l'invité, il resterait un exécutable tiers non versionné,
+  qu'aucune étape de provisionnement ne pose ni ne vérifie — donc à ajouter au
+  payload de toute façon pour qu'une reconstruction le retrouve.
+- **Une clé Apollo de capture du curseur : elle n'existe pas dans 0.4.6.** La
+  table des options que le binaire lit a été extraite des chaînes de
+  `C:\Program Files\Apollo\sunshine.exe` (version relevée : 0.4.6) — elle va de
+  `qp` à `locale`, se termine sur le message `Warning: Unrecognized configurable
+  option [`, et **ne contient aucune clé de curseur**. Les plus proches sont
+  `mouse`, `keyboard`, `controller`, qui activent des périphériques d'entrée.
+  Rien non plus côté IHM web (`assets/web/.../config-*.js` et `locale/en.json`
+  n'ont pas une occurrence de `cursor`). `sunshine.conf.j2` n'a donc **pas** été
+  touché : une clé inventée y serait ignorée en silence, ce que son en-tête
+  interdit.
+
+**Ce que ça ne fait pas, et qu'il faut savoir avant de s'en étonner.** La dette
+posait la distinction : *cacher le curseur dans l'invité n'est pas cesser de le
+capturer dans le flux*. Elle est tranchée par le point précédent — la seconde
+voie n'existe pas dans Apollo 0.4.6. Le prix du levier retenu est donc réel :
+pendant une session Big Picture, une prise de main par le bureau distant (agent
+Guacamole) voit un pointeur **invisible, qui pointe quand même**. Il redevient
+visible dès la fin de la session Big Picture, ou dès le lancement suivant de
+l'application `Desktop`. La voie Apollo reste ouverte pour la version qui
+introduirait la clé.
+
+**Ce qui a été vérifié sur l'invité, et ce qui ne l'a pas été.** Vérifié le
+2026-08-29 par WinRM, dans la **session 0** (jamais la session interactive, qui
+appartient au streaming) : le `Add-Type` compile, `GetSystemMetrics` rend
+32 × 32, `Set-CursorHidden` rend `True` — les treize `SetSystemCursor` passent —
+et `Restore-SystemCursors` s'exécute sans erreur ; les deux `.ps1` finaux ont
+été transmis octet pour octet (9423 et 5314) et analysés par le parseur
+PowerShell de l'invité, **zéro erreur de syntaxe**.
+
+**Le défaut est confirmé sur la machine réelle, pas seulement dans le dépôt.**
+L'`apps.json` que l'invité exécute aujourd'hui est bien celui rendu depuis le
+gabarit — deux entrées, `-Mode Desktop` et `-Mode BigPicture`, et **aucune trace
+de `nomousy`**. C'est exactement la régression décrite plus haut, lue sur le
+fichier déployé.
+
+**Ce qui n'est pas vérifié, et ne peut pas l'être d'ici :** le rendu réel dans
+un flux Big Picture, faute de session Moonlight ouverte. Et le correctif **n'est
+pas encore sur l'invité** : `C:\nivuus\state\PROVISION.done` dit
+`provision_version=B1` (achevé le 2026-08-26) quand le payload courant est `B3`,
+le `steam-session.ps1` déployé date du 2026-08-27 et ne connaît pas
+`SetSystemCursor`, et `steam-cursor.ps1` n'est pas encore à côté de lui. Il y
+arrivera au prochain provisionnement — la vérification ci-dessus porte sur les
+API et la syntaxe, jamais sur un déploiement.
+
+**Provenance des mesures, et comment les refaire.** Tout ce qui est chiffré
+ci-dessus a été lu sur l'invité par WinRM le 2026-08-29, en lecture seule, et
+**re-confirmé après une coupure d'accès** — donc deux fois, à deux moments. La
+commande est reproductible telle quelle :
+
+    python3 console/guest/winrm_exec.py ps '<commande PowerShell>'
+
+La seule écriture de toute l'opération a été un fichier temporaire
+`C:\Windows\Temp\nivuus-c4.b64` (transfert des deux `.ps1` pour les faire
+analyser par le parseur PowerShell de l'invité), supprimé dans la foulée et son
+absence vérifiée. Aucun service, aucune VM, aucun fichier de l'invité n'a été
+touché.
+
+**Au passage :** `steam-session.ps1` et `25-apollo.ps1` sont désormais en ASCII
+pur. Ni l'un ni l'autre ne porte de BOM, et un `.ps1` sans BOM est relu par
+Windows PowerShell 5.1 dans la page de codes ANSI — les guillemets
+typographiques et les tirets cadratins de leurs commentaires y changeaient de
+sens. Le contrôle est passé dans les tests, pour ces deux fichiers.
 
 ---
 
