@@ -14,7 +14,7 @@ TARGET_IMG    ?= /tmp/nivuus-target.img
 TARGET_SIZE   ?= 16G
 OVMF          ?= /usr/share/OVMF/OVMF_CODE.fd
 
-.PHONY: build-iso test-engine test-portal test-vm windows-unattend test-packages clean help
+.PHONY: build-iso test-engine test-portal test-vm windows-unattend test-packages test-scripts clean help
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*' $(MAKEFILE_LIST) | sed 's/:.*//' | sort
@@ -53,16 +53,18 @@ test-vm:
 
 # Run the package-engine test suite (no root, no chroot, no ISO).
 #
-# PYTHON is overridable because two of the 13 suites below need a dependency
-# that is NOT in the Debian base: test_webapp_models needs pydantic v2
-# (bookworm ships v1) and test_install_engine_features needs jinja2. Measured
+# PYTHON is overridable because two of the 13 Python suites in the loop below
+# need a dependency that is NOT in the Debian base: test_webapp_models needs
+# pydantic v2 (bookworm ships v1) and test_install_engine_features needs
+# jinja2 (the 3 shell suites of test-scripts need neither). Measured
 # suite by suite, 2026-08-28. `make test-packages PYTHON=/path/to/venv/bin/python3`.
 # The CI runs no Python tests at all (ci.yml sets test-paths: ""), so this target
 # is the only aggregator there is - and an aggregator that fails for a missing
 # dependency reads as "the engine is broken", which is the wrong thing to learn.
 #
-# 35 suites (2026-08-29, measured): 13 run directly below (the engine/webapp/
-# packages suites that stay outside console/), and 22 are delegated to
+# 38 suites (2026-08-29, measured): 13 run directly below (the engine/webapp/
+# packages suites that stay outside console/), 3 shell suites are delegated to
+# the `test-scripts` prerequisite below, and 22 are delegated to
 # `console/Makefile`'s own `test` target - every suite testing code that lives
 # under console/ moved to console/tests/ so that a later `git filter-repo
 # --path console` is mechanical (everything the package owns is already under
@@ -75,7 +77,7 @@ test-vm:
 # REPAIRED", for how that suite closed the gap.
 PYTHON ?= python3
 
-test-packages:
+test-packages: test-scripts
 	@for t in test_packages_manifest test_packages_capabilities \
 	          test_packages_discovery test_packages_conflicts \
 	          test_packages_dependencies \
@@ -89,6 +91,29 @@ test-packages:
 	    $(PYTHON) $(dir $(INSTALLER_DIR))scripts/tests/$$t.py || exit 1; \
 	done
 	@$(MAKE) -C $(dir $(INSTALLER_DIR))console test PYTHON=$(PYTHON)
+
+# Run the host-maintenance script suites (no root, no hardware, no Python).
+#
+# hw-blackbox.py, net-rps-ecores.sh and pcie-wifi-link-guard.sh are not the
+# package engine, so they do not belong in the test-packages loop - but until
+# 2026-08-29 they were in NO make target at all, named only in CLAUDE.md as
+# commands to type by hand. That is the blind spot the dependency guards were
+# in: a suite no target runs is a suite the CI cannot run either, and this
+# repo's CI runs no Python tests at all (ci.yml sets test-paths: "").
+#
+# They guard hardware-facing scripts but need no hardware: all three build a
+# fake tree under mktemp. Measured 2026-08-29 on a machine with none of the
+# devices they describe - 26 + 20 + 16 assertions, exit 0 each.
+#
+# They are a PREREQUISITE of test-packages rather than a trailing call, so that
+# a base without pydantic - which stops the Python loop at test_webapp_models -
+# cannot mask them. They need nothing, so they run first and always.
+# Shell, so their own loop, as console/Makefile does for test_handle_vm_start.
+test-scripts:
+	@for t in test_hw_blackbox test_net_rps_ecores test_pcie_wifi_link_guard; do \
+	    echo "--- $$t"; \
+	    bash $(dir $(INSTALLER_DIR))scripts/tests/$$t.sh || exit 1; \
+	done
 
 # Build the secondary ISO that unattends the Windows guest install (root:
 # inspecting the LTSC medium needs a loop mount).
