@@ -61,7 +61,7 @@ test-vm:
 # is the only aggregator there is - and an aggregator that fails for a missing
 # dependency reads as "the engine is broken", which is the wrong thing to learn.
 #
-# 33 suites (2026-08-28, measured): 11 run directly below (the engine/webapp/
+# 35 suites (2026-08-29, measured): 13 run directly below (the engine/webapp/
 # packages suites that stay outside console/), and 22 are delegated to
 # `console/Makefile`'s own `test` target - every suite testing code that lives
 # under console/ moved to console/tests/ so that a later `git filter-repo
@@ -78,8 +78,10 @@ PYTHON ?= python3
 test-packages:
 	@for t in test_packages_manifest test_packages_capabilities \
 	          test_packages_discovery test_packages_conflicts \
+	          test_packages_dependencies \
 	          test_packages_wizard test_packages_runner \
 	          test_install_engine_bootloader test_install_engine_packages \
+	          test_packages_plan_order \
 	          test_webapp_models \
 	          test_common_hardware \
 	          test_install_engine_features; do \
