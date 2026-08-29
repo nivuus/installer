@@ -62,9 +62,9 @@ test-vm:
 # is the only aggregator there is - and an aggregator that fails for a missing
 # dependency reads as "the engine is broken", which is the wrong thing to learn.
 #
-# 38 suites (2026-08-29, measured): 13 run directly below (the engine/webapp/
+# 39 suites (2026-08-29, measured): 13 run directly below (the engine/webapp/
 # packages suites that stay outside console/), 3 shell suites are delegated to
-# the `test-scripts` prerequisite below, and 22 are delegated to
+# the `test-scripts` prerequisite below, and 23 are delegated to
 # `console/Makefile`'s own `test` target - every suite testing code that lives
 # under console/ moved to console/tests/ so that a later `git filter-repo
 # --path console` is mechanical (everything the package owns is already under

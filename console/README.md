@@ -294,7 +294,7 @@ Beyond `hooks/` and `host/`, the package also carries:
 | Directory | What it holds |
 |---|---|
 | `guest/` | The unattended LTSC build, the libvirt domain generator (`domain.py`), the retrogaming sync, and the provisioning scripts — moved here from `installer/windows-guest/` so the package is self-contained. `activate` now drives `fetch_payload.py`, `build.py` and `domain.py` through `guest_steps.py` (see above). Includes `guest/payload/agent/agent.exe`, the one offline payload binary vendored in the repository instead of fetched or built (see "`agent.exe` ships inside this package" above). |
-| `tests/` | The package's own test suites — 22 files (21 Python plus the shell suite `test_handle_vm_start.sh`), all run by `console/Makefile`'s `test` target, which `installer/Makefile`'s `test-packages` delegates to. |
+| `tests/` | The package's own test suites — 23 files (22 Python plus the shell suite `test_handle_vm_start.sh`), all run by `console/Makefile`'s `test` target, which `installer/Makefile`'s `test-packages` delegates to. |
 
 No file under `console/` **source** imports from `installer/common` or
 anywhere else in `installer/` — the package is self-contained, which is what

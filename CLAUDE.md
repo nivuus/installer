@@ -430,8 +430,9 @@ wizard is deliberately deferred, not forgotten.
 
 Tests: `cd installer && make test-packages` (needs a Python with `pydantic`
 and `jinja2` — not the Debian base — via `PYTHON=/path/to/venv/bin/python`).
-**38 suites, measured 2026-08-29 (after the `requires.packages` guards and the
-three host-script suites were wired into the aggregator): 37 exit 0, and
+**39 suites, measured 2026-08-29 (after the `requires.packages` guards, the
+three host-script suites and `test_windows_guest_winrm_exec` were wired into
+the aggregator): 38 exit 0, and
 `test_webapp_models` could not be run on a python3.13-only base, where the
 installed `pydantic` belongs to a python3.11 that no longer has a binary.**
 13 run directly by `installer/Makefile` (the engine/webapp/packages suites that
@@ -440,10 +441,10 @@ prerequisite (`test_hw_blackbox`, `test_net_rps_ecores`,
 `test_pcie_wifi_link_guard` — they guard hardware-facing scripts but build fake
 trees under `mktemp`, so they need no hardware and no Python; they are a
 prerequisite rather than a trailing call so a base without `pydantic` cannot
-mask them), and 22 delegated to `console/Makefile`'s own `test` target —
+mask them), and 23 delegated to `console/Makefile`'s own `test` target —
 the 8 `test_console_*` suites (`test_console_guest_steps` and
 `test_console_guest_ready` are phase 2d's own), `test_vm_wake_gate`,
-`test_retro_marker_bridge`, the 11 `test_windows_guest_*` suites and the
+`test_retro_marker_bridge`, the 12 `test_windows_guest_*` suites and the
 shell suite `test_handle_vm_start.sh`, all of them living under
 `console/tests/`. That last one was wired up on 2026-08-28 (it has its own
 loop in `console/Makefile`, since the Python loop only runs `.py` files): it
