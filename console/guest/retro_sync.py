@@ -155,6 +155,12 @@ USER_PROFILES = r"G:\retro\profiles"
 # télécharge. Sur le partage, comme le manifeste : il survit à une
 # reconstruction de la machine virtuelle, ce que D:\Emulation ne fait pas.
 BIOS_ROOT = r"G:\retro\bios"
+# Les bases de données que RetroArch livre DANS son archive. Elles donnent à
+# chaque jeu son vrai titre — « mslug2 » devient « Metal Slug 2 », que
+# SteamGridDB sait illustrer, alors qu'un nom de romset ne trouve rien. Le
+# chemin suit l'installation de RetroArch : « retro install » l'efface à
+# chaque montée de version et la réextrait, bases comprises.
+DATABASES = r"D:\Emulation\RetroArch\RetroArch-Win64\database\rdb"
 INVENTORY = r"C:\nivuus\state\retro-inventory.json"
 
 # --- L'identité du paquet retro. ------------------------------------------
@@ -952,7 +958,8 @@ def synchronise(guest, cfg) -> int:
          "--emulation-root", cfg.emulation_root,
          "--emulation-root-local", cfg.emulation_root,
          "--user-manifest", cfg.user_manifest,
-         "--user-profiles", cfg.user_profiles, "--output", cfg.inventory])
+         "--user-profiles", cfg.user_profiles, "--databases", cfg.databases,
+         "--output", cfg.inventory])
     print(rapport.rstrip())
     if code != 0:
         print("error: le scan des ROMs a échoué, rien n'a été synchronisé "
@@ -1025,6 +1032,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--steam-root-windows", default=STEAM_ROOT)
     ap.add_argument("--roms", default=ROMS_ROOT)
     ap.add_argument("--user-profiles", default=USER_PROFILES)
+    ap.add_argument("--databases", default=DATABASES,
+                    help="bases de données de RetroArch, d'où chaque jeu tire "
+                         "son vrai titre ; sans elles les jeux gardent leur "
+                         "nom de fichier")
     ap.add_argument("--bios", default=BIOS_ROOT,
                     help="dossier des BIOS sur la console ; « retro bios » y "
                          "télécharge ce qui manque, depuis la source que le "

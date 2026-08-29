@@ -485,6 +485,7 @@ class Cfg:
     user_manifest = retro_sync.USER_MANIFEST
     user_profiles = retro_sync.USER_PROFILES
     bios = retro_sync.BIOS_ROOT
+    databases = retro_sync.DATABASES
     inventory = retro_sync.INVENTORY
     retro_exe = retro_sync.RETRO_EXE
     steamgriddb_key = None
@@ -608,6 +609,17 @@ if "--emulation-root-local" in _args_bios:
           retro_sync.EMULATION_ROOT)
 check("les BIOS sont cherches dans le dossier du proprietaire, sur le partage",
       _args_bios[_args_bios.index("--bios") + 1], retro_sync.BIOS_ROOT)
+
+# SANS --databases, chaque jeu garde son nom de fichier : « mslug2 » au lieu
+# de « Metal Slug 2 », et SteamGridDB ne trouve aucune jaquette pour un nom de
+# romset. Retirer ce parametre rendrait la reconnaissance inerte EN SILENCE.
+_args_scan_bases = g.args_vus["scan"]
+check("le scan recoit les bases de titres",
+      "--databases" in _args_scan_bases, True)
+if "--databases" in _args_scan_bases:
+    check("... celles que RetroArch livre dans son installation",
+          _args_scan_bases[_args_scan_bases.index("--databases") + 1],
+          retro_sync.DATABASES)
 
 _args_scan = g.args_vus["scan"]
 check("le scan verifie les executables sur le disque local",
