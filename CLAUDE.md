@@ -493,6 +493,26 @@ python3 console/guest/retro_sync.py   # retrogaming (OPTIONAL): replay
 # refuses (exit 7) while a streaming session is live - stopping Steam would cut
 # the game being played, and nothing restarts it before the next Moonlight
 # connection; --force overrides, loudly.
+#
+# It ALSO refuses (exit 8) when the console is not running the wheel this host
+# built. Why that guard exists (retro's debt D6, fixed 2026-08-29): both wheels
+# carried `0.1.0`, so `pip install --no-index --upgrade retro` answered
+# "Requirement already satisfied" and installed NOTHING - a fix committed in
+# nivuus/retro could stay inert on the console while the error it produced
+# still described the original symptom. The wheel now carries a version that
+# MOVES (`0.1.0+<timestamp>.<digest>[.g<sha>]`, burned in by an in-tree PEP 517
+# backend), `retro identite` prints it, and the durable witness gained a
+# `package=` key between `emulation_root=` and `report:`. That key is written by
+# BOTH writers - Write-RetroStatus (retro-status.ps1) and format_witness
+# (retro_sync.py) - and test_windows_guest_retro_sync.py compares the two key
+# lists, so renaming it on one side alone fails a test. The host reference is
+# read from the wheel's METADATA (never its filename: pip escapes the `+` to
+# `_`) at /var/lib/nivuus/guest/payload/retro/wheels/. No reference wheel is NOT
+# a mismatch - it warns and lets through. The remedy is `--reinstaller-le-paquet`
+# (copies the wheelhouse to /media/data/Console/retro/wheels, which the guest
+# reads as G:\retro\wheels, re-runs pip, re-reads the identity, still exits 8 if
+# the gap persists) - a refusal without a remedy would leave a couch console
+# unsyncable. NOT measured against the real console yet (task 6 of the plan).
 
 # ── Host scripts ───────────────────────────────────────────────────────────
 # The three below also run as `cd installer && make test-scripts`, and as a

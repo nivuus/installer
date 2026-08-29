@@ -56,6 +56,18 @@ synchronisation ; « disabled » dit qu'il n'y a pas de rétrogaming sur cette
 console, ce qui n'est pas une panne. Ce script le lit AVANT de synchroniser, et
 refuse en nommant ce qu'il dit.
 
+IL REFUSE ENFIN UNE CONSOLE QUI N'EXÉCUTE PAS LE PAQUET LIVRÉ ICI. Deux roues
+peuvent porter le même « 0.1.0 » sans contenir le même code, et `pip install
+--upgrade` ne réinstalle alors RIEN : un correctif écrit, testé et commité dans
+`packages/retro` pouvait rester sans le moindre effet sur la machine, et
+l'erreur obtenue décrivait le symptôme d'origine — exactement comme si le
+correctif était faux (dette D6). La roue porte désormais une version qui bouge ;
+ce script l'oppose à ce que `retro identite` répond là-bas, AVANT le premier
+téléchargement, et REFUSE l'écart. Refuser plutôt que signaler, parce que D6
+existe précisément parce que rien n'a arrêté personne. Le remède tient en une
+option : `--reinstaller-le-paquet`. Ne trouver aucune roue de référence n'est
+PAS un écart : c'est dit, et ça laisse passer.
+
 LE RETROGAMING EST OPTIONNEL. Sur une console où il n'a pas été demandé, ce
 script le DIT et sort en succès, au lieu d'échouer sur une commande
 introuvable.
@@ -68,11 +80,13 @@ seul. `--force` passe outre, en le disant.
 
 Usage :
     python3 retro_sync.py [--guest-ip 192.168.3.2] [--steamgriddb-key CLE]
+    python3 retro_sync.py --reinstaller-le-paquet   # quand le refus 8 tombe
 
 Codes de sortie : 0 succès (ou fonctionnalité non activée), 2 invité
 injoignable, 3 rétrogaming introuvable ou témoin absent, 4 le témoin refuse la
 synchronisation, 5 le scan a échoué, 6 la synchronisation a échoué, 7 une
-session de streaming est en cours.
+session de streaming est en cours, 8 la console exécute une autre construction
+du paquet retro que celle livrée par cet hôte.
 """
 from __future__ import annotations
 
@@ -80,9 +94,11 @@ import argparse
 import base64
 import datetime
 import os
+import shutil
 import subprocess
 import sys
 import threading
+import zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -118,6 +134,31 @@ SESSION_SCRIPT = "steam-session.ps1"
 ROMS_ROOT = r"G:\ROMs"
 USER_MANIFEST = r"G:\retro\emulators.toml"
 INVENTORY = r"C:\nivuus\state\retro-inventory.json"
+
+# --- L'identité du paquet retro. ------------------------------------------
+#
+# Deux roues peuvent porter le même « 0.1.0 » sans contenir le même code, et
+# `pip install --no-index --find-links ... --upgrade retro` ne réinstalle alors
+# RIEN (mesure du 2026-08-29 : « Requirement already satisfied »). Un correctif
+# écrit, testé et commité dans `packages/retro` pouvait donc rester sans le
+# moindre effet sur la console, et l'erreur obtenue décrivait le symptôme
+# d'origine — exactement comme si le correctif était faux. Le paquet porte
+# désormais une version qui BOUGE, gravée à la construction ; ce qui suit est
+# ce qui la CONSTATE, côté hôte.
+#
+# console/guest_steps.py::DEFAULT_GUEST_WORKDIR + fetch_payload.py :
+# drivers_dir = <workdir>/payload, puis retro/wheels.
+WHEELHOUSE = Path("/var/lib/nivuus/guest/payload/retro/wheels")
+# Le partage « Console » (domain.py::SHARES), que 35-shares.ps1 monte en G:.
+# C'est le SEUL canal capable de porter une roue : Guest.write_text encode tout
+# en base64 DANS une ligne de commande bornée à 32 767 caractères.
+HOST_WHEELS_SHARE = Path("/media/data/Console/retro/wheels")
+GUEST_WHEELS = r"G:\retro\wheels"
+# 32-retro.ps1 ($PythonRoot) : c'est ce python-là qui porte le paquet.
+PYTHON_EXE = r"C:\Python\python.exe"
+# retro-status.ps1 / 32-retro.ps1 ($RetroPackage) : ce que le témoin porte
+# quand personne n'a su dire quelle construction tourne.
+PACKAGE_UNKNOWN = "inconnue"
 
 STATUS_OK = "ok"
 STATUS_DISABLED = "disabled"
@@ -234,19 +275,21 @@ class Guest:
             raise GuestError(f"suppression de {path} impossible dans "
                              f"l'invité : {(err or out).strip()}")
 
-    def retro(self, args):
-        """`retro <args>` dans l'invité : (code de sortie, rapport).
+    def execute(self, commande: str, quoi: str):
+        """(code de sortie, sortie) d'une commande de l'invité, sans mojibake.
 
         PYTHONUTF8/PYTHONIOENCODING et OutputEncoding sont posés ENSEMBLE :
         le premier décide de ce que Python écrit, le second de ce que
         PowerShell croit lire. Un seul des deux laisse le rapport accentué
         illisible dans le témoin.
+
+        `quoi` ne sert qu'aux messages d'erreur : ils sont lus depuis un
+        canapé, et « la commande n'a jamais démarré » doit nommer LAQUELLE.
         """
-        quoted = " ".join(_ps_quote(a) for a in args)
         rc, out, err = self.ps(
             "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
             "$env:PYTHONUTF8 = '1'; $env:PYTHONIOENCODING = 'utf-8'; "
-            f"$sortie = & {_ps_quote(self.retro_exe)} {quoted} 2>&1 | Out-String; "
+            f"$sortie = & {commande} 2>&1 | Out-String; "
             "$code = $LASTEXITCODE; "
             "[Console]::Out.Write(\"EXIT=$code`n\"); "
             "[Console]::Out.Write([Convert]::ToBase64String("
@@ -254,9 +297,8 @@ class Guest:
         tete, _, corps = out.partition("\n")
         if not tete.startswith("EXIT="):
             raise GuestError(
-                "l'invité n'a pas rendu le code de sortie de `retro "
-                f"{' '.join(args)}` (WinRM a rendu {rc}) : "
-                f"{(err or out).strip()[:400]}")
+                f"l'invité n'a pas rendu le code de sortie de `{quoi}` "
+                f"(WinRM a rendu {rc}) : {(err or out).strip()[:400]}")
         rapport = base64.b64decode("".join(corps.split())).decode("utf-8", "replace")
         brut = tete[len("EXIT="):].strip()
         try:
@@ -266,9 +308,15 @@ class Guest:
             # « EXIT= » : une trace Python ici serait illisible depuis un
             # canapé, alors que la cause tient en une phrase.
             raise GuestError(
-                f"`retro {' '.join(args)}` n'a pas rendu de code de sortie "
-                f"exploitable ({brut!r}) : la commande n'a probablement jamais "
-                f"démarré dans l'invité. {rapport.strip()[:400]}") from None
+                f"`{quoi}` n'a pas rendu de code de sortie exploitable "
+                f"({brut!r}) : la commande n'a probablement jamais démarré "
+                f"dans l'invité. {rapport.strip()[:400]}") from None
+
+    def retro(self, args):
+        """`retro <args>` dans l'invité : (code de sortie, rapport)."""
+        quoted = " ".join(_ps_quote(a) for a in args)
+        return self.execute(f"{_ps_quote(self.retro_exe)} {quoted}",
+                            f"retro {' '.join(args)}")
 
 
 # --------------------------------------------------------------------------
@@ -373,6 +421,73 @@ def sync_refusal(status: str | None, run: str | None, run_courant: str) -> str |
             f"de {STATUS_FILE}, et seul « ok » autorise la synchronisation.")
 
 
+def identite_roue(wheelhouse: Path) -> str | None:
+    """La version de la roue que l'hôte a livrée, ou None s'il n'en a aucune.
+
+    Lue dans la METADATA de la roue, pas dans son nom de fichier : le nom
+    échappe le « + » du segment local en « _ », et reconstituer une version à
+    l'envers est le genre de devinette qui se trompe en silence.
+    """
+    try:
+        roues = sorted(Path(wheelhouse).glob("retro-*.whl"))
+    except OSError:
+        return None
+    if len(roues) != 1:
+        return None          # zéro : pas de référence. Plusieurs : ambiguïté.
+    with zipfile.ZipFile(roues[0]) as z:
+        nom = next((n for n in z.namelist()
+                    if n.endswith(".dist-info/METADATA")), None)
+        if nom is None:
+            return None
+        for ligne in z.read(nom).decode("utf-8", "replace").splitlines():
+            if ligne.startswith("Version: "):
+                return ligne.split(": ", 1)[1].strip()
+    return None
+
+
+def identite_invitee(guest) -> str | None:
+    """Ce que la console dit exécuter, ou None si elle ne sait pas le dire.
+
+    Un code non nul n'est PAS une panne à remonter : sur un paquet antérieur à
+    D6 la sous-commande n'existe pas, argparse rend 2, et c'est justement le
+    constat qu'on cherche.
+    """
+    code, rapport = guest.retro(["identite"])
+    if code != 0:
+        return None
+    lignes = [l.strip() for l in rapport.splitlines() if l.strip()]
+    return lignes[0] if lignes else None
+
+
+def ecart_identite(invitee: str | None, attendue: str | None) -> str | None:
+    """Le motif de refus, ou None quand il n'y a rien à reprocher.
+
+    Même forme que sync_refusal, et pour la même raison : la décision est une
+    fonction PURE, donc vérifiable sans Windows, et c'est là que vit le
+    contrat. Elle REFUSE au lieu de signaler — D6 existe précisément parce que
+    rien n'a arrêté personne, et un message ignorable reproduirait le défaut
+    d'un cran. Le remède tient en une option (--reinstaller-le-paquet), ce qui
+    est la condition pour que refuser reste tenable.
+    """
+    if attendue is None:
+        return None          # pas de référence : ce n'est pas un écart.
+    if invitee is None:
+        return ("la console ne sait pas dire quelle construction du paquet "
+                "elle exécute (« retro identite » n'y existe pas) : son paquet "
+                f"est ANTÉRIEUR à celui que cet hôte a livré ({attendue}). "
+                "Tout ce qu'un correctif récent a changé y est absent, et le "
+                "scan produirait un inventaire par du code périmé. Réinstaller "
+                "le paquet : relancer ce script avec --reinstaller-le-paquet.")
+    if invitee != attendue:
+        return (f"la console exécute le paquet {invitee} alors que cet hôte a "
+                f"livré {attendue} : ce n'est pas le même code. Un inventaire "
+                "produit là-bas ne décrit pas ce que ce dépôt contient, et "
+                "l'écart ne se verrait nulle part ailleurs — les deux roues "
+                "peuvent porter le même 0.1.0. Réinstaller le paquet : "
+                "relancer ce script avec --reinstaller-le-paquet.")
+    return None
+
+
 # Une seule ligne d'en-tête ajoutée par l'hôte, parce que le contrat que le
 # témoin porte dit « écrit par 32-retro.ps1 » et que ce n'est plus vrai après
 # ce passage. Elle est ajoutée une fois, jamais empilée à chaque exécution.
@@ -382,11 +497,16 @@ HOST_NOTE = ("# Ce temoin a ete RAFRAICHI depuis l hote par retro_sync.py, "
 
 
 def format_witness(header, run: str, status: str, emulation_root: str,
-                   rapport, when: str | None = None) -> str:
+                   rapport, when: str | None = None,
+                   package: str = PACKAGE_UNKNOWN) -> str:
     """Le témoin, dans la forme EXACTE que Write-RetroStatus produit.
 
     Même ordre de clés, mêmes fins de ligne, même absence de BOM : le fichier
     doit rester lisible par quiconque connaît l'un des deux écrivains.
+
+    `package` replie sur « inconnue », comme Write-RetroStatus : c'est ce que
+    porte un témoin écrit avant que la console ait su répondre, et le prétendre
+    autrement serait un mensonge daté.
     """
     if when is None:
         when = datetime.datetime.now().astimezone().isoformat()
@@ -394,7 +514,8 @@ def format_witness(header, run: str, status: str, emulation_root: str,
     if HOST_NOTE not in lignes:
         lignes.append(HOST_NOTE)
     lignes += [f"run={run}", f"status={status}", f"when={when}",
-               f"emulation_root={emulation_root}", "report:"]
+               f"emulation_root={emulation_root}", f"package={package}",
+               "report:"]
     lignes += list(rapport)
     return "\r\n".join(lignes) + "\r\n"
 
@@ -419,6 +540,59 @@ def cap_report(text: str):
 # --------------------------------------------------------------------------
 # Les gestes de la séquence.
 # --------------------------------------------------------------------------
+
+def copier_roues(wheelhouse: Path, partage: Path) -> list[str]:
+    """Repose le wheelhouse de l'hôte sur le partage que la console lit.
+
+    TOUTES les roues, pas seulement celle de `retro` : `pip install
+    --no-index` exige la fermeture complète des dépendances sur place, et le
+    provisionnement ne doit pas dépendre de PyPI.
+
+    C'est le partage, jamais WinRM : `Guest.write_text` encode tout en base64
+    DANS une ligne de commande bornée à 32 767 caractères, et une roue pèse
+    cent fois cela.
+    """
+    roues = sorted(Path(wheelhouse).glob("*.whl"))
+    if not roues:
+        raise GuestError(
+            f"aucune roue dans {wheelhouse} : il n'y a rien à réinstaller. "
+            "Reconstruire la charge utile (fetch_payload.py --retro), ou "
+            "nommer le bon dossier avec --wheelhouse.")
+    partage = Path(partage)
+    partage.mkdir(parents=True, exist_ok=True)
+    for roue in roues:
+        shutil.copy2(roue, partage / roue.name)
+    return [roue.name for roue in roues]
+
+
+def reinstaller_paquet(guest, wheelhouse, partage,
+                       python_exe: str = PYTHON_EXE,
+                       wheels_invite: str = GUEST_WHEELS) -> None:
+    """Repose le paquet retro sur la console, hors ligne, par le partage.
+
+    Sans ce remède, refuser serait cruel : la console deviendrait non
+    synchronisable sans geste de sortie, et la seule façon de remettre le
+    paquet à jour serait de reconstruire la charge utile, l'ISO de réponses,
+    et de reprovisionner — pour remplacer cent kilo-octets de Python.
+
+    Ce qui rend ce remède possible et ne l'était pas : une version qui BOUGE.
+    Avec deux roues numérotées 0.1.0, le `pip install --upgrade` ci-dessous
+    est un no-op mesuré (« Requirement already satisfied »).
+    """
+    noms = copier_roues(Path(wheelhouse), Path(partage))
+    print(f"{len(noms)} roue(s) copiée(s) de {wheelhouse} vers {partage}, "
+          f"que la console lit en {wheels_invite}")
+    code, rapport = guest.execute(
+        f"{_ps_quote(python_exe)} -m pip install --no-index --find-links "
+        f"{_ps_quote(wheels_invite)} --upgrade retro",
+        "pip install retro")
+    print(rapport.rstrip())
+    if code != 0:
+        raise GuestError(
+            f"`pip install` a rendu {code} dans l'invité : le paquet n'a pas "
+            "été remplacé (le rapport ci-dessus dit pourquoi). Rien d'autre "
+            "n'a été fait.")
+
 
 def streaming_session(guest) -> str | None:
     """Ce qui identifie la session de streaming en cours, ou None.
@@ -591,9 +765,14 @@ def stop_steam(guest) -> str:
 
 
 def refresh_witness(guest, ancien: str | None, run: str, status: str,
-                    rapport: str, emulation_root: str) -> None:
+                    rapport: str, emulation_root: str,
+                    package: str = PACKAGE_UNKNOWN) -> None:
     """Réécrit le témoin avec le résultat du `retro install` qu'on vient de
-    rejouer. Sans ça, un « partial » survivrait à sa propre réparation."""
+    rejouer. Sans ça, un « partial » survivrait à sa propre réparation.
+
+    `package` est ce que la console a répondu à `retro identite` sur CE
+    passage : le témoin doit dire quelle construction du paquet a produit le
+    status qu'il porte, sinon il décrit un résultat sans dire par quel code."""
     header, _, _ = parse_witness(ancien) if ancien else ([], {}, [])
     if not header:
         header = ["# Temoin de l etape 32 (retrogaming). Le contrat complet "
@@ -601,7 +780,8 @@ def refresh_witness(guest, ancien: str | None, run: str, status: str,
                   "dans provision/assets/retro-status.ps1, qui l inscrit "
                   "normalement ici meme."]
     guest.write_text(STATUS_FILE, format_witness(
-        header, run, status, emulation_root, cap_report(rapport)))
+        header, run, status, emulation_root, cap_report(rapport),
+        package=package))
 
 
 # --------------------------------------------------------------------------
@@ -656,6 +836,44 @@ def synchronise(guest, cfg) -> int:
         return 7
     warn_session(session, cfg.force)
 
+    # QUELLE construction du paquet la console exécute-t-elle ? On le constate
+    # ici, juste après avoir su que retro.exe est là et AVANT le premier
+    # téléchargement, pour la raison que la garde de session dit quelques
+    # lignes plus haut : un refus qui arrive après dix minutes d'installation
+    # est un refus qui arrive trop tard.
+    #
+    # La décision, elle, est une fonction PURE (ecart_identite) : c'est ce qui
+    # la rend vérifiable sans Windows, et c'est là que vit le contrat.
+    attendue = identite_roue(Path(cfg.wheelhouse))
+    if attendue is None:
+        # Absence de référence n'est PAS un écart : refuser ici punirait une
+        # console dont le wheelhouse a simplement été nettoyé. Mais se taire
+        # ferait croire à une vérification qui n'a pas eu lieu.
+        print(f"avertissement : aucune roue de référence dans {cfg.wheelhouse} "
+              "(--wheelhouse) : aucun écart d'identité ne peut être constaté "
+              "sur ce passage, et la console peut donc exécuter un paquet "
+              "périmé sans que rien ne le dise.", file=sys.stderr)
+    invitee = identite_invitee(guest)
+    if cfg.reinstaller_le_paquet:
+        reinstaller_paquet(guest, cfg.wheelhouse, cfg.partage_roues)
+        avant, invitee = invitee, identite_invitee(guest)
+        # RELUE, jamais supposée : une réinstallation qu'on croit faite est
+        # exactement le défaut d'origine de cette dette.
+        print(f"paquet réinstallé : {avant or PACKAGE_UNKNOWN} → "
+              f"{invitee or PACKAGE_UNKNOWN}")
+    refus = ecart_identite(invitee, attendue)
+    if refus is not None:
+        if cfg.reinstaller_le_paquet:
+            print("error: la réinstallation vient d'être faite et l'écart "
+                  "PERSISTE : `pip install --upgrade` n'a pas remplacé le "
+                  "paquet sur la console. Chercher pourquoi avant de "
+                  "réessayer ; une réinstallation qu'on croit faite est "
+                  "exactement le défaut que cette garde existe pour attraper.",
+                  file=sys.stderr)
+        print(f"error: synchronisation REFUSÉE — {refus}", file=sys.stderr)
+        return 8
+    print(f"paquet retro sur {cfg.guest_label} : {invitee or PACKAGE_UNKNOWN}")
+
     # 1. L'installation, rejouée AVEC le manifeste du propriétaire : il vit
     # sur le partage, que l'étape 32 ne pouvait pas encore lire.
     print(f"« retro install » sur {cfg.guest_label}...")
@@ -667,7 +885,7 @@ def synchronise(guest, cfg) -> int:
 
     # 2. Le témoin, rafraîchi : il décrit désormais CE passage.
     refresh_witness(guest, temoin, run_courant, status, rapport,
-                    cfg.emulation_root)
+                    cfg.emulation_root, package=invitee or PACKAGE_UNKNOWN)
     print(f"témoin rafraîchi : {STATUS_FILE} → status={status}")
 
     # 3. La garde. Elle lit ce qui vient d'être écrit, jamais ce qu'on croit
@@ -764,6 +982,21 @@ def build_parser() -> argparse.ArgumentParser:
                          "absence est normale, jamais une erreur")
     ap.add_argument("--inventory", default=INVENTORY)
     ap.add_argument("--retro-exe", default=RETRO_EXE)
+    ap.add_argument("--wheelhouse", default=str(WHEELHOUSE),
+                    help="la roue que cet hôte a construite et livrée "
+                         "(fetch_payload.py --retro) ; c'est la RÉFÉRENCE à "
+                         "laquelle la console est opposée. Son absence n'est "
+                         "pas un écart : elle est dite, et laisse passer")
+    ap.add_argument("--partage-roues", default=str(HOST_WHEELS_SHARE),
+                    help="où déposer les roues pour que la console les lise "
+                         f"en {GUEST_WHEELS} ; utilisé par "
+                         "--reinstaller-le-paquet seulement")
+    ap.add_argument("--reinstaller-le-paquet", action="store_true",
+                    help="reposer le paquet retro sur la console AVANT tout "
+                         "le reste, quand son identité est en écart. Jamais "
+                         "automatique : remplacer le paquet est un geste, et "
+                         "le faire en passant mettrait une console de salon à "
+                         "la merci de l'état de l'arbre de cet hôte")
     ap.add_argument("--force", action="store_true",
                     help="synchroniser MÊME si une session de streaming est "
                          "en cours ; Steam sera arrêté et la partie perdue")

@@ -21,7 +21,8 @@
     l ouvre a la liste des status sous les yeux sans avoir a retrouver ce
     script-ci.
 
-    Dot-source this file, then call: Write-RetroStatus <status> [<lignes>]
+    Dot-source this file, then call:
+    Write-RetroStatus <status> [<lignes>] [<identite du paquet>]
     (il lit $EmulationRoot dans la portee de son appelant, 32-retro.ps1).
 #>
 
@@ -65,10 +66,16 @@ $RetroStatusHeader = @(
     '# C:\nivuus\state\provision.started, que run-all.ps1 horodate a chaque',
     '# lancement. Un run different de celui du passage courant signale un',
     '# temoin d une installation ANTERIEURE, conserve par le volume : son',
-    '# status ne dit alors rien de ce qui vient de se passer.'
+    '# status ne dit alors rien de ce qui vient de se passer.',
+    '#',
+    '# package= identifie la CONSTRUCTION du paquet retro installee sur cette',
+    '# console. Deux roues peuvent porter le meme 0.1.0 et ne pas contenir le',
+    '# meme code : seule cette valeur les distingue. "inconnue" veut dire que',
+    '# le paquet installe est anterieur a la sous-commande "retro identite".'
 )
 
-function Write-RetroStatus([string]$State, [string[]]$Report) {
+function Write-RetroStatus([string]$State, [string[]]$Report,
+                           [string]$Package = 'inconnue') {
     # Le dernier status ecrit, pour que le rattrapage de 32-retro.ps1 sache
     # s il a quelque chose a dire : un status precis deja pose (par exemple
     # « manifest-unreadable », qui leve ensuite) ne doit pas etre remplace par
@@ -76,7 +83,8 @@ function Write-RetroStatus([string]$State, [string[]]$Report) {
     $script:RetroStatusLast = $State
     $lines = $RetroStatusHeader + @(
         "run=$RetroRunId", "status=$State", "when=$(Get-Date -Format o)",
-        "emulation_root=$EmulationRoot", 'report:') + $Report
+        "emulation_root=$EmulationRoot", "package=$Package",
+        'report:') + $Report
     # UTF-8 (le rapport est accentue), et SANS le BOM que Set-Content poserait.
     [System.IO.File]::WriteAllLines($RetroStatusFile, [string[]]$lines)
 }

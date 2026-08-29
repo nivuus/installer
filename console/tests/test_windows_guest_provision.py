@@ -923,6 +923,33 @@ check("le paquet retro s installe sans index, depuis les roues embarquees",
 check("Python vient de la charge utile, jamais du reseau",
       "python-*-amd64.exe" in _retro_code, True)
 
+# 6 bis. L IDENTITE de la construction installee. Deux roues peuvent porter le
+# meme 0.1.0 sans contenir le meme code : « pip install --upgrade » ne
+# reinstalle alors RIEN (mesure du 2026-08-29, « Requirement already
+# satisfied »), et un correctif ecrit dans le paquet peut rester sans le
+# moindre effet sur la console sans que rien ne le dise. Le temoin doit donc
+# porter QUELLE construction tourne, pour que l hote puisse le constater.
+check("l etape part d une identite inconnue, jamais d une supposition",
+      "$RetroPackage = 'inconnue'" in _retro_code, True)
+check("l etape releve l identite du paquet qu elle vient d installer",
+      "& $retroExe identite" in _retro_code, True)
+_idx_pip = _first_line_with("-m pip install")
+_idx_identite = _first_line_with("& $retroExe identite")
+# Avant le pip install, le releve decrirait le paquet PRECEDENT - le mensonge
+# meme que cette cle existe pour empecher.
+check("... APRES le pip install, jamais avant",
+      _idx_pip >= 0 and _idx_identite > _idx_pip, True)
+# Un paquet anterieur a cette sous-commande fait rendre 2 a argparse. Ce n est
+# pas une panne : c est le constat que l hote cherche. L etape doit alors
+# laisser « inconnue » plutot que d ecrire la premiere ligne d un usage.
+check("un « retro identite » en echec laisse l identite inconnue",
+      "if ($LASTEXITCODE -eq 0 -and $identite.Count -gt 0)" in _retro_code, True)
+check("le temoin porte l identite relevee, sur chacune de ses issues",
+      len(re.findall(r"Write-RetroStatus '[\w-]+' [^\n]*\$RetroPackage",
+                     _retro_code)),
+      len(re.findall(r"Write-RetroStatus '[\w-]+'", _retro_code)))
+check("Write-RetroStatus ecrit cette identite dans le temoin",
+      '"package=$Package"' in _status_code, True)
 # 7. « retro install », et surtout PAS « retro sync » : les partages ne sont
 # montes qu a l etape 35, donc G:\ROMs n existe pas encore et un scan
 # produirait une bibliotheque vide. Le controle porte sur les invocations
@@ -1012,6 +1039,13 @@ check("le temoin dit lui-meme lequel autorise la synchronisation",
       'Seul "ok" autorise la synchronisation' in _header, True)
 check("le temoin explique lui-meme a quoi sert run=",
       "run= identifie le passage" in _header, True)
+# Meme regle pour package= : qui ouvre le temoin doit y lire ce que la cle veut
+# dire, et ce que vaut « inconnue », sans avoir a retrouver le script qui
+# l ecrit.
+check("le temoin explique lui-meme a quoi sert package=",
+      "package= identifie" in _header, True)
+check("... y compris ce que veut dire une identite inconnue",
+      '"inconnue" veut dire' in _header, True)
 # Le rapport doit voyager jusqu au temoin : un temoin qui ne porte que
 # « status=partial » ne dit pas QUEL emulateur manque.
 check("le temoin d un echec partiel embarque le rapport de l installation",

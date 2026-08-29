@@ -33,6 +33,10 @@ $RetroBinDir = 'D:\Emulation\bin'
 # motif ci-dessous, et un chemin qui l annoncerait mentirait au premier bump.
 $PythonRoot = 'C:\Python'
 $PayloadRetro = Join-Path $PayloadRoot 'drivers\retro'
+# QUELLE construction du paquet tourne ici : deux roues portent le meme 0.1.0
+# sans contenir le meme code, et sans cette valeur dans le temoin l hote ne
+# peut pas le constater. 'inconnue' tant que le paquet n a pas repondu.
+$RetroPackage = 'inconnue'
 
 # Le temoin durable de cette etape : ce qu il est, ou il va, pourquoi la, et
 # le contrat qu il offre a l hote sont dans l asset - qui l ecrit dans le
@@ -56,7 +60,7 @@ if (-not $retro.Enabled) {
     # Meme raison, pour l hote : sans temoin il confondrait « pas voulu » et
     # « jamais arrive jusqu ici ». D: peut ne pas etre monte ici (verifie plus
     # bas) : l option est off, il n y a rien a proteger, donc pas un echec.
-    if (Test-Path 'D:\state') { Write-RetroStatus 'disabled' @() }
+    if (Test-Path 'D:\state') { Write-RetroStatus 'disabled' @() $RetroPackage }
     return
 }
 Write-Host 'retrogaming demande (config\retro.psd1 : Enabled = $true)'
@@ -76,7 +80,7 @@ if (-not (Test-Path 'D:\state\NIVUUS-DATA.id')) {
 # entre ici et l installation ne laisserait rien, et le « status=ok » d un
 # provisionnement anterieur - que D: conserve - continuerait d affirmer que
 # tout va bien pour le passage courant.
-Write-RetroStatus 'started' @()
+Write-RetroStatus 'started' @() $RetroPackage
 
 # Tout ce qui suit est sous garde : une levee quelconque (espace temporaire,
 # installateur Python, 7zr, pip) doit laisser un temoin qui le DIT, avec sa
@@ -148,6 +152,13 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "pip install retro a rendu $LASTEXITCODE" }
     $retroExe = Join-Path $PythonRoot 'Scripts\retro.exe'
     if (-not (Test-Path $retroExe)) { throw "pas de $retroExe apres l installation du paquet" }
+    # Quelle construction vient d etre posee. APRES le pip install, sans quoi
+    # elle decrirait le paquet PRECEDENT - le mensonge meme que cette cle
+    # existe pour empecher. Un echec ne leve pas : argparse rend 2 sur un
+    # paquet anterieur a cette sous-commande, et c est le constat cherche.
+    $identite = @(& $retroExe identite 2>&1 | ForEach-Object { "$_" })
+    if ($LASTEXITCODE -eq 0 -and $identite.Count -gt 0) { $RetroPackage = $identite[0].Trim() }
+    Write-Host "paquet retro installe : $RetroPackage"
 
     # --- Les emulateurs du manifeste noyau : telecharges, verifies par empreinte,
     # installes sous D:\Emulation. Idempotent (.retro-version par emulateur).
@@ -158,7 +169,7 @@ try {
     $installExit = $LASTEXITCODE
     $installOutput | ForEach-Object { Write-Host $_ }
     if ($installExit -eq 0) {
-        Write-RetroStatus 'ok' $installOutput
+        Write-RetroStatus 'ok' $installOutput $RetroPackage
         Write-Host "emulateurs installes dans $EmulationRoot"
     }
     elseif ($installExit -eq 1) {
@@ -167,11 +178,11 @@ try {
         # dont le streaming fonctionne : l operateur reste joignable et rejoue
         # « retro install » depuis l hote. Meme arbitrage que ViGEmBus (25) et que
         # les partages non montes (35) - mais le temoin, lui, doit survivre.
-        Write-RetroStatus 'partial' $installOutput
+        Write-RetroStatus 'partial' $installOutput $RetroPackage
         Write-Host "warning: au moins un emulateur ne s est pas installe (rapport ci-dessus) ; rejouer 'retro install' depuis l hote une fois la cause levee. $RetroStatusFile le dit a l hote, qui doit refuser de synchroniser une bibliotheque partielle."
     }
     else {
-        Write-RetroStatus 'manifest-unreadable' $installOutput
+        Write-RetroStatus 'manifest-unreadable' $installOutput $RetroPackage
         throw "retro install a rendu $installExit : le manifeste n a pas pu etre lu, aucun emulateur n a ete installe"
     }
 
@@ -183,7 +194,7 @@ catch {
     # que ce soit, et error= porte la cause. La levee repart ensuite : c est
     # run-all.ps1 qui decide de l issue du provisionnement, pas cette etape.
     if ($RetroStatusLast -eq 'started') {
-        Write-RetroStatus 'interrupted' @("error=$($_.Exception.Message)")
+        Write-RetroStatus 'interrupted' @("error=$($_.Exception.Message)") $RetroPackage
     }
     throw
 }

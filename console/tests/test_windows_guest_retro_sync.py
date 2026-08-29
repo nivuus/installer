@@ -29,8 +29,11 @@ import contextlib
 import io
 import pathlib
 import re
+import shutil
 import sys
+import tempfile
 import threading
+import zipfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 GUEST = REPO / "console" / "guest"
@@ -183,6 +186,64 @@ check("l hote ecrit lui aussi la ligne « report: »",
 check("les lignes du temoin restent terminees comme celles de l invite",
       _produit.endswith("\r\n") and "\r\n" in _produit, True)
 
+# La cle package= : l identite de la CONSTRUCTION du paquet installee sur la
+# console. Deux roues peuvent porter le meme « 0.1.0 » sans contenir le meme
+# code, et c est la SEULE valeur qui les distingue. Les DEUX ecrivains doivent
+# l ecrire : la comparaison de cles ci-dessus attrape un renommage d un seul
+# cote, mais elle resterait verte si la cle disparaissait des deux — d ou les
+# deux controles qui suivent, un par ecrivain.
+check("Write-RetroStatus ecrit l identite du paquet", "package" in _cles_ps, True)
+check("l hote l ecrit lui aussi", "package" in _cles_hote, True)
+check("... entre emulation_root= et report:, des deux cotes",
+      _cles_ps[_cles_ps.index("emulation_root") + 1:], ["package"])
+check("le repli « identite inconnue » est nomme pareil des deux cotes",
+      retro_sync.PACKAGE_UNKNOWN, _litteral(_retro_code, "RetroPackage"))
+# Le contrat vit dans le fichier PRODUIT, jamais dans une prose ailleurs : qui
+# ouvre le temoin doit y lire ce que package= veut dire sans avoir a retrouver
+# le script qui l ecrit.
+check("le temoin explique lui-meme a quoi sert package=",
+      "package= identifie" in _status_ps1, True)
+check("l hote ecrit vraiment la valeur qu on lui donne",
+      retro_sync.parse_witness(retro_sync.format_witness(
+          ["# en-tete"], "R1", "ok", "D:\\Emulation", [], when="W",
+          package="0.1.0+20260829143512.a1b2c3d4"))[1]["package"],
+      "0.1.0+20260829143512.a1b2c3d4")
+check("... et replie sur « inconnue » quand personne n a su dire",
+      retro_sync.parse_witness(_produit)[1]["package"],
+      retro_sync.PACKAGE_UNKNOWN)
+
+# Le partage par lequel la roue peut voyager. Rien d autre ne le peut :
+# Guest.write_text encode tout en base64 DANS une ligne de commande bornee a
+# 32 767 caracteres, et une roue pese cent fois cela. Les deux bouts sont
+# ecrits ailleurs — la source cote hote dans domain.py, la lettre cote invite
+# dans 35-shares.ps1 — donc on les relit LA-BAS.
+_domain = (GUEST / "domain.py").read_text(encoding="utf-8")
+_source_console = re.search(
+    r'\{"source": "([^"]+)", "tag": "Console"', _domain).group(1)
+_shares_code = code_only(
+    (PROVISION / "35-shares.ps1").read_text(encoding="utf-8"))
+_lettre_console = re.search(
+    r"Tag = 'Console';\s*Letter = '(\w)'", _shares_code).group(1)
+check("l hote depose les roues DANS le partage Console qu il exporte",
+      str(retro_sync.HOST_WHEELS_SHARE).startswith(_source_console + "/"), True)
+check("... et la console les lit par la lettre que 35-shares.ps1 lui donne",
+      retro_sync.GUEST_WHEELS.split("\\")[0], _lettre_console + ":")
+check("les deux bouts designent le meme sous-dossier du partage",
+      str(retro_sync.HOST_WHEELS_SHARE)[len(_source_console) + 1:],
+      retro_sync.GUEST_WHEELS.split("\\", 1)[1].replace("\\", "/"))
+# Le manifeste du proprietaire vit deja sur ce partage-la : si les deux
+# divergeaient, l un des deux ne serait plus monte du tout.
+check("les roues voyagent par le partage qui porte deja le manifeste",
+      retro_sync.GUEST_WHEELS.rsplit("\\", 1)[0],
+      retro_sync.USER_MANIFEST.rsplit("\\", 1)[0])
+# pip est lance par le python que l etape 32 installe, pas par « le python du
+# PATH » : le declenchement vient de l hote, dans une autre session WinRM.
+check("pip est lance par le python que l etape 32 installe",
+      retro_sync.PYTHON_EXE,
+      _litteral(_retro_code, "PythonRoot") + "\\python.exe")
+check("... et l etape 32 compose bien ce chemin-la",
+      "Join-Path $PythonRoot 'python.exe'" in _retro_code, True)
+
 # --- 2. install_status : la meme lecture des codes de sortie que l etape 32 - #
 
 _apres = _retro_code[_retro_code.find("$installExit = $LASTEXITCODE"):]
@@ -254,6 +315,92 @@ check("un rapport peu de lignes mais tres gros est borne aussi",
       sum(len(ln) + 2 for ln in _borne[1:]) <= retro_sync.MAX_REPORT_CHARS, True)
 check("... en gardant encore la fin", _borne[-1], "x" * 200)
 
+# --- 4 bis. L identite du paquet : la reference, et la decision ---------- #
+# Deux roues peuvent porter le meme « 0.1.0 » sans contenir le meme code. Tant
+# que rien ne les distingue, « pip install --upgrade » ne reinstalle RIEN
+# (mesure du 2026-08-29 : « Requirement already satisfied »), et un correctif
+# ecrit, teste et commite ici peut rester sans le moindre effet sur la console
+# — l erreur obtenue decrivant alors le symptome d origine, exactement comme si
+# le correctif etait faux. C est la dette D6. Ce qui suit est ce qui la
+# CONSTATE : une roue de reference sur le disque de l hote, ce que la console
+# dit executer, et la decision qui les oppose.
+
+_tmp = pathlib.Path(tempfile.mkdtemp(prefix="nivuus-retro-identite-"))
+
+
+def _roue(dossier, version):
+    """Une roue factice : la seule entree qui compte, sa METADATA.
+
+    Le nom de fichier echappe le « + » du segment local PEP 440 en « _ » ;
+    c est precisement pour ca que la version doit etre lue DANS la roue.
+    """
+    dossier.mkdir(parents=True, exist_ok=True)
+    chemin = dossier / f"retro-{version.replace('+', '_')}-py3-none-any.whl"
+    with zipfile.ZipFile(chemin, "w") as z:
+        z.writestr(f"retro-{version}.dist-info/METADATA",
+                   f"Metadata-Version: 2.1\nName: retro\nVersion: {version}\n")
+    return chemin
+
+
+_VERSION_HOTE = "0.1.0+20260829143512.a1b2c3d4.g9f8e7d6"
+_VERSION_CONSOLE = "0.1.0+20260101000000.cccc3333"
+
+_vide = _tmp / "vide"
+_vide.mkdir()
+_ref = _tmp / "reference"
+_roue(_ref, _VERSION_HOTE)
+
+check("un wheelhouse sans roue n offre aucune reference",
+      retro_sync.identite_roue(_vide), None)
+check("un wheelhouse qui n existe pas non plus",
+      retro_sync.identite_roue(_tmp / "nulle-part"), None)
+check("la version de reference est lue dans la METADATA de la roue",
+      retro_sync.identite_roue(_ref), _VERSION_HOTE)
+# Le controle ci-dessus se satisferait d une lecture du nom de fichier si le
+# nom portait la version telle quelle. Il ne la porte pas : pip echappe le
+# « + ». Reconstituer la version a l envers est la devinette qui se trompe en
+# silence, et ce controle-ci l interdit.
+check("... et pas dans son nom de fichier, qui a echappe le « + »",
+      "+" in sorted(_ref.glob("retro-*.whl"))[0].name, False)
+_deux = _tmp / "deux"
+_roue(_deux, "0.1.0+20260829143512.aaaaaaaa")
+_roue(_deux, "0.1.0+20260830143512.bbbbbbbb")
+check("deux roues cote a cote sont une ambiguite, pas une reference",
+      retro_sync.identite_roue(_deux), None)
+
+# La decision. FONCTION PURE, sur le modele de sync_refusal : elle rend le
+# motif de refus, ou None quand c est autorise. C est ce qui la rend
+# verifiable sans Windows, et c est la que vit le contrat.
+check("la meme construction des deux cotes autorise",
+      retro_sync.ecart_identite(_VERSION_HOTE, _VERSION_HOTE), None)
+# Absence de reference n est PAS un ecart : refuser la punirait une console
+# dont le wheelhouse a simplement ete nettoye.
+check("sans roue de reference, il n y a rien a reprocher a la console",
+      retro_sync.ecart_identite(_VERSION_CONSOLE, None), None)
+check("... meme quand la console ne sait pas repondre non plus",
+      retro_sync.ecart_identite(None, None), None)
+
+_motif = retro_sync.ecart_identite(None, _VERSION_HOTE)
+check("une console qui ne sait pas dire ce qu elle execute est REFUSEE",
+      _motif is not None, True)
+check("... et le refus dit que son paquet est anterieur",
+      "ANT" in (_motif or ""), True)
+check("... en nommant la construction que l hote a livree",
+      _VERSION_HOTE in (_motif or ""), True)
+check("... et en donnant le remede, sans quoi refuser serait cruel",
+      "--reinstaller-le-paquet" in (_motif or ""), True)
+
+_motif = retro_sync.ecart_identite(_VERSION_CONSOLE, _VERSION_HOTE)
+check("deux constructions differentes sont REFUSEES", _motif is not None, True)
+# Un refus qui ne dit pas ce qu il a lu envoie chercher dans la VM ce que
+# l hote avait sous les yeux — meme regle que les refus de temoin.
+check("... et le refus nomme les DEUX constructions",
+      _VERSION_CONSOLE in (_motif or "") and _VERSION_HOTE in (_motif or ""),
+      True)
+check("... et donne le remede lui aussi",
+      "--reinstaller-le-paquet" in (_motif or ""), True)
+
+
 # --- 5. La sequence, contre un faux invite ------------------------------- #
 
 
@@ -262,9 +409,13 @@ class FakeGuest:
 
     def __init__(self, fichiers=None, codes=None, leve=None,
                  retro_exe=retro_sync.RETRO_EXE, session=None,
-                 steam="steam=propre exe=present"):
+                 steam="steam=propre exe=present", rapports=None):
         self.fichiers = dict(fichiers or {})
         self.codes = dict(codes or {})
+        # Ce que chaque sous-commande REPOND. « retro identite » rend une
+        # version, pas un « rapport identite » : la garde d identite se juge
+        # sur ce que la console dit, donc le faux invite doit pouvoir le dire.
+        self.rapports = dict(rapports or {})
         self.leve = leve or {}
         self.retro_exe = retro_exe
         self.session = session
@@ -307,12 +458,21 @@ class FakeGuest:
         self.journal.append(("ps", script))
         return 0, self.steam, ""
 
+    def execute(self, commande, quoi):
+        """Le canal des commandes brutes du vrai invite (Guest.execute), par
+        lequel passe la reinstallation du paquet. La surface doit etre la
+        meme : un faux plus etroit prouverait le comportement d une API qui
+        n existe pas."""
+        self.journal.append(("execute", commande))
+        return 0, ""
+
     def retro(self, args):
         self.journal.append(("retro", args[0]))
         self.args_vus[args[0]] = list(args)
         if args[0] in self.leve:
             raise self.leve[args[0]]
-        return self.codes.get(args[0], 0), f"rapport {args[0]}"
+        return (self.codes.get(args[0], 0),
+                self.rapports.get(args[0], f"rapport {args[0]}"))
 
 
 class Cfg:
@@ -326,6 +486,11 @@ class Cfg:
     inventory = retro_sync.INVENTORY
     retro_exe = retro_sync.RETRO_EXE
     steamgriddb_key = None
+    # Un wheelhouse VIDE par defaut : les scenarios ci-dessous portent sur la
+    # sequence, pas sur l identite, et l absence de reference laisse passer.
+    wheelhouse = str(_vide)
+    partage_roues = str(_tmp / "partage-inutilise")
+    reinstaller_le_paquet = False
 
 
 # Le faux invite doit offrir la MEME surface que le vrai, sinon ces scenarios
@@ -334,6 +499,27 @@ _publiques = {n for n in dir(retro_sync.Guest)
               if not n.startswith("_") and callable(getattr(retro_sync.Guest, n))}
 check("le faux invite couvre toute la surface du vrai",
       sorted(_publiques - set(dir(FakeGuest))), [])
+
+
+# Ce que la console repond, lu par la fonction qui l interroge.
+_g = FakeGuest(rapports={"identite": _VERSION_CONSOLE + "\n"})
+check("l identite de la console est la premiere ligne de « retro identite »",
+      retro_sync.identite_invitee(_g), _VERSION_CONSOLE)
+# La sous-commande interrogee ici doit etre celle que l etape 32 appelle
+# la-bas : un renommage cote paquet doit casser ICI, pas six mois plus tard
+# sur une console qui refuserait de se synchroniser sans qu on sache pourquoi.
+check("... relevee par la sous-commande que l etape 32 appelle elle aussi",
+      f"& $retroExe {_g.args_vus['identite'][0]}" in _retro_code, True)
+# Un code non nul n est PAS une panne a remonter : sur un paquet anterieur a
+# D6 la sous-commande n existe pas, argparse rend 2, et c est le constat qu on
+# cherche.
+check("une console qui ne connait pas la sous-commande rend None, sans lever",
+      retro_sync.identite_invitee(
+          FakeGuest(codes={"identite": 2},
+                    rapports={"identite": "usage: retro [-h] ..."})), None)
+check("un rapport vide ne se fait pas passer pour une identite",
+      retro_sync.identite_invitee(FakeGuest(rapports={"identite": "\n  \n"})),
+      None)
 
 
 def temoin(status, run="R1"):
@@ -373,7 +559,12 @@ def lancer(g, cfg=None):
 # a) l installation reussit : le temoin est rafraichi, puis tout s enchaine.
 g = invite("partial")
 check("une installation reparee synchronise", lancer(g)[0], 0)
-_appels = [a for a in g.journal if a[0] in ("retro", "write", "remove", "ps")]
+# « retro identite » est ecarte de l ordre comme l est la relecture du temoin
+# plus bas : c est une LECTURE, elle ne touche a rien, et la garde d identite
+# qui la fait a sa propre place epinglee (section 5 ter et section 7).
+_appels = [a for a in g.journal
+           if a[0] in ("retro", "write", "remove", "ps")
+           and a != ("retro", "identite")]
 check("l installation est rejouee avant tout le reste",
       _appels[0], ("retro", "install"))
 check("le temoin est rafraichi juste apres l installation",
@@ -548,7 +739,8 @@ g = invite("ok", session="PID 42 depuis 2026-08-26")
 _code, _dit, _signale = lancer(g)
 check("une session en cours arrete tout avant le premier telechargement",
       _code, 7)
-check("... sans rejouer l installation", actions(g, "retro"), [])
+check("... sans rejouer l installation",
+      [a for a in actions(g, "retro") if a[1] != "identite"], [])
 check("... sans toucher au temoin ni a la sentinelle", actions(g, "write"), [])
 check("... et en disant QUOI est en cours", "PID 42" in _signale, True)
 
@@ -588,6 +780,167 @@ check("... et l hote dit que seule la force a agi",
 g = invite("ok", steam="rien du tout")
 check("un invite muet sur le sort de Steam leve plutot que de continuer",
       isinstance(_essai_erreur(lambda: lancer(g)), retro_sync.GuestError), True)
+
+# --- 5 ter. L identite du paquet, dans la sequence ----------------------- #
+# La garde arrive AVANT le premier telechargement, pour la raison que la garde
+# de session ci-dessus donne deja : un refus qui arrive apres dix minutes
+# d installation est un refus qui arrive trop tard.
+
+
+class CfgIdentite(Cfg):
+    wheelhouse = str(_ref)
+    partage_roues = str(_tmp / "partage")
+
+
+class CfgRemede(CfgIdentite):
+    reinstaller_le_paquet = True
+
+
+class GuestPip(FakeGuest):
+    """Un invite dont « pip install » remplace REELLEMENT le paquet.
+
+    `apres` est ce que « retro identite » repondra une fois pip passe : c est
+    la seule facon de distinguer une reinstallation faite d une
+    reinstallation crue faite, qui est le defaut d origine de D6.
+    """
+
+    def __init__(self, apres, **kw):
+        super().__init__(**kw)
+        self.apres = apres
+        self.pip = []
+
+    def execute(self, commande, quoi):
+        self.pip.append(commande)
+        self.journal.append(("pip", None))
+        self.rapports["identite"] = self.apres
+        return 0, f"Successfully installed retro-{self.apres}"
+
+
+# a) l ecart REFUSE, et absolument rien d autre n a lieu.
+g = invite("ok", rapports={"identite": _VERSION_CONSOLE})
+_code, _dit, _signale = lancer(g, CfgIdentite())
+check("un paquet en ecart refuse la synchronisation", _code, 8)
+check("... et le refus est SIGNALE, pas glisse dans la sortie normale",
+      "REFUS" in _signale.upper(), True)
+# Un refus qui ne dit pas ce qu il a lu envoie chercher dans la VM ce que
+# l hote avait sous les yeux — les deux roues portent le meme « 0.1.0 ».
+check("... en nommant les DEUX constructions",
+      _VERSION_CONSOLE in _signale and _VERSION_HOTE in _signale, True)
+check("... et le remede, sans quoi la console devient non synchronisable",
+      "--reinstaller-le-paquet" in _signale, True)
+check("un refus d identite n installe rien",
+      [a for a in actions(g, "retro") if a[1] != "identite"], [])
+check("... n ecrit rien : ni temoin, ni sentinelle", actions(g, "write"), [])
+# La session est sondee avant, et c est une LECTURE : elle ne derange rien.
+# Ce qui compte est qu aucun arret de Steam n ait eu lieu.
+check("... et ne derange meme pas Steam",
+      [a for a in actions(g, "ps") if a[1] != "session"], [])
+
+# b) une console anterieure a « retro identite » : meme refus, autre message.
+g = invite("ok", codes={"identite": 2},
+           rapports={"identite": "usage: retro [-h] ..."})
+_code, _dit, _signale = lancer(g, CfgIdentite())
+check("une console qui ne sait pas dire ce qu elle execute est refusee",
+      _code, 8)
+check("... et le refus dit que son paquet est ANTERIEUR", "ANT" in _signale, True)
+check("... sans rien installer",
+      [a for a in actions(g, "retro") if a[1] != "identite"], [])
+
+# c) la meme construction des deux cotes : tout se deroule, et le temoin porte
+# desormais QUELLE construction tourne la-bas.
+g = invite("ok", rapports={"identite": _VERSION_HOTE + "\n"})
+_code, _dit, _signale = lancer(g, CfgIdentite())
+check("la meme construction des deux cotes laisse tout se derouler", _code, 0)
+check("... et le temoin porte l identite relevee sur la console",
+      retro_sync.parse_witness(
+          g.fichiers[retro_sync.STATUS_FILE])[1]["package"], _VERSION_HOTE)
+
+# d) aucune roue de reference : ce n est PAS un ecart. Refuser la punirait une
+# console dont le wheelhouse a simplement ete nettoye. Mais se taire ferait
+# croire a une verification qui n a pas eu lieu.
+g = invite("ok", rapports={"identite": _VERSION_CONSOLE})
+_code, _dit, _signale = lancer(g)
+check("sans roue de reference, l hote laisse passer", _code, 0)
+check("... en avertissant qu aucun ecart ne peut etre constate",
+      "wheelhouse" in _signale, True)
+check("... et le temoin porte quand meme ce que la console a dit",
+      retro_sync.parse_witness(
+          g.fichiers[retro_sync.STATUS_FILE])[1]["package"], _VERSION_CONSOLE)
+# Une console muette, sans reference non plus : le temoin le DIT plutot que
+# d inventer une version.
+g = invite("ok", codes={"identite": 2})
+check("une console muette et aucune reference : rien a reprocher", lancer(g)[0], 0)
+check("... et le temoin dit « inconnue » plutot que d inventer",
+      retro_sync.parse_witness(
+          g.fichiers[retro_sync.STATUS_FILE])[1]["package"],
+      retro_sync.PACKAGE_UNKNOWN)
+
+# e) LE REMEDE. Sans lui, refuser serait cruel : la console deviendrait non
+# synchronisable sans geste de sortie, et la seule facon de remettre le paquet
+# a jour serait de reconstruire la charge utile, l ISO, et de reprovisionner.
+_partage = pathlib.Path(CfgRemede.partage_roues)
+g = GuestPip(_VERSION_HOTE,
+             fichiers={retro_sync.RUN_FILE: "R1\r\n",
+                       retro_sync.STATUS_FILE: temoin("ok"),
+                       retro_sync.RETRO_EXE: ""},
+             rapports={"identite": _VERSION_CONSOLE})
+_code, _dit, _signale = lancer(g, CfgRemede())
+check("le remede remet la console a niveau et la synchronisation reprend",
+      _code, 0)
+# La roue voyage par le PARTAGE, jamais par WinRM : Guest.write_text encode
+# tout en base64 dans une ligne de commande bornee a 32 767 caracteres.
+check("la roue de l hote est copiee sur le partage que la console lit",
+      sorted(p.name for p in _partage.glob("*.whl")),
+      sorted(p.name for p in _ref.glob("*.whl")))
+check("pip est relance hors ligne, depuis ce partage vu par la console",
+      bool(g.pip) and all(x in g.pip[0] for x in (
+          "--no-index", retro_sync.GUEST_WHEELS, "--upgrade", "retro")), True)
+check("... par le python que l etape 32 installe, pas « celui du PATH »",
+      bool(g.pip) and retro_sync.PYTHON_EXE in g.pip[0], True)
+# Une reinstallation qu on CROIT faite est exactement le defaut d origine :
+# l identite doit etre RELUE, jamais supposee.
+check("l identite est relue apres la reinstallation, jamais supposee",
+      len([a for a in g.journal if a == ("retro", "identite")]), 2)
+check("... et le temoin porte l identite d APRES la reinstallation",
+      retro_sync.parse_witness(
+          g.fichiers[retro_sync.STATUS_FILE])[1]["package"], _VERSION_HOTE)
+
+# f) le remede qui ne prend pas : on refuse quand meme, et on le dit.
+g = GuestPip(_VERSION_CONSOLE,
+             fichiers={retro_sync.RUN_FILE: "R1\r\n",
+                       retro_sync.STATUS_FILE: temoin("ok"),
+                       retro_sync.RETRO_EXE: ""},
+             rapports={"identite": _VERSION_CONSOLE})
+_code, _dit, _signale = lancer(g, CfgRemede())
+check("une reinstallation qui n a rien change refuse quand meme", _code, 8)
+check("... en disant que l ecart PERSISTE apres le remede",
+      "PERSISTE" in _signale, True)
+check("... et rien n est synchronise", ("retro", "sync") in g.journal, False)
+check("... ni ecrit", actions(g, "write"), [])
+
+# g) le remede n est JAMAIS automatique : remplacer le paquet est un geste, et
+# le faire en passant mettrait une console de salon a la merci de l etat de
+# l arbre de l hote.
+g = invite("ok", rapports={"identite": _VERSION_CONSOLE})
+lancer(g, CfgIdentite())
+check("sans l option, rien n est jamais reinstalle", actions(g, "pip"), [])
+
+# h) les options, et leurs defauts.
+_cfg = retro_sync.build_parser().parse_args([])
+check("--wheelhouse a pour defaut la roue que fetch_payload.py depose",
+      _cfg.wheelhouse, str(retro_sync.WHEELHOUSE))
+check("--partage-roues a pour defaut le partage Console de l hote",
+      _cfg.partage_roues, str(retro_sync.HOST_WHEELS_SHARE))
+check("la reinstallation est fermee par defaut", _cfg.reinstaller_le_paquet, False)
+check("--reinstaller-le-paquet l ouvre a la demande",
+      retro_sync.build_parser().parse_args(
+          ["--reinstaller-le-paquet"]).reinstaller_le_paquet, True)
+# Le code de sortie du refus : 7 est pris par la session de streaming, 3 par le
+# paquet absent. La docstring du module porte la liste, et un lecteur qui la
+# consulte doit y trouver le 8.
+check("la docstring du module annonce le code 8",
+      "8" in retro_sync.__doc__.split("Codes de sortie")[1], True)
+
 
 # --- 6. La sentinelle rajeunie pendant une longue synchronisation -------- #
 
@@ -666,7 +1019,8 @@ check("l en-tete reel du temoin a bien ete retrouve", len(_header_reel) > 10, Tr
 _pire = retro_sync.format_witness(
     _header_reel, "2026-08-26T12:00:00.0000000+02:00", "partial",
     retro_sync.EMULATION_ROOT,
-    retro_sync.cap_report("\n".join("x" * 120 for _ in range(500))))
+    retro_sync.cap_report("\n".join("x" * 120 for _ in range(500))),
+    package=_VERSION_HOTE)
 _journal.clear()
 _vrai.write_text(retro_sync.STATUS_FILE, _pire)
 _ligne = "powershell -encodedcommand " + base64.b64encode(
@@ -768,8 +1122,45 @@ check("la garde precede la pose de la sentinelle",
 _sessions = _appels(_fn, "streaming_session")
 check("la session est sondee deux fois : tot, puis juste avant d arreter Steam",
       len(_sessions), 2)
+# La garde d identite : APRES le retro.exe absent (sinon une console sans
+# retrogaming se ferait refuser au lieu d etre dite non concernee), APRES la
+# sonde de session, et avant tout le reste. Le comportement est deja epingle
+# plus haut ; ceci epingle sa PLACE, qu un refus correct mais tardif
+# satisferait sans le dire.
+#
+# L ordre session-puis-identite n est pas cosmetique. --reinstaller-le-paquet
+# lance un « pip install » DANS l invite : c est une mutation, et la garde de
+# session existe pour qu aucune mutation n ait lieu pendant qu on joue. Place
+# avant elle, le remede s executait puis le script refusait en code 7 — un
+# refus qui arrive apres coup, alors qu un refus doit vouloir dire que rien
+# ne s est produit.
+_ecart = _appels(_fn, "ecart_identite")
+check("la garde d identite est appelee dans la sequence", len(_ecart), 1)
+_exists = [n for n in ast.walk(_fn) if isinstance(n, ast.Call)
+           and isinstance(n.func, ast.Attribute) and n.func.attr == "exists"]
+check("... apres la garde qui verifie que retro.exe est la",
+      bool(_ecart) and bool(_exists) and _ecart[0].lineno > _exists[0].lineno,
+      True)
+check("... APRES la sonde de session, qui garde la reinstallation",
+      bool(_ecart) and _ecart[0].lineno > _sessions[0].lineno, True)
+# La propriete qui compte vraiment : la seule MUTATION de ce bloc est sous la
+# garde de session. Un refus code 7 doit signifier que rien n a ete fait.
+_reinst = _appels(_fn, "reinstaller_paquet")
+check("la reinstallation du paquet est appelee dans la sequence",
+      len(_reinst), 1)
+check("... et APRES la sonde de session : on ne modifie pas l invite "
+      "pendant qu on joue",
+      bool(_reinst) and _reinst[0].lineno > _sessions[0].lineno, True)
+check("... et avant tout telechargement, la sonde de session l etant aussi",
+      bool(_reinst) and bool(_refresh) and _reinst[0].lineno < _refresh[0].lineno,
+      True)
+check("... et avant le rafraichissement du temoin",
+      bool(_ecart) and bool(_refresh) and _ecart[0].lineno < _refresh[0].lineno,
+      True)
 check("... la seconde sonde etant sous le finally qui rend la sentinelle",
       bool(_try) and any(c.lineno > _try.lineno for c in _sessions), True)
+
+shutil.rmtree(_tmp, ignore_errors=True)
 
 if failures:
     print(f"FAIL ({len(failures)})")
