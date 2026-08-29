@@ -484,6 +484,7 @@ class Cfg:
     roms = retro_sync.ROMS_ROOT
     user_manifest = retro_sync.USER_MANIFEST
     user_profiles = retro_sync.USER_PROFILES
+    bios = retro_sync.BIOS_ROOT
     inventory = retro_sync.INVENTORY
     retro_exe = retro_sync.RETRO_EXE
     steamgriddb_key = None
@@ -577,7 +578,14 @@ check("... et porte le passage COURANT, pas celui du temoin d avant",
       retro_sync.parse_witness(g.fichiers[retro_sync.STATUS_FILE])[1]["run"],
       "R1")
 _reste = [a for a in _appels[2:] if a != ("read", retro_sync.STATUS_FILE)]
-check("le scan precede la sentinelle", _reste[0], ("retro", "scan"))
+# LES BIOS SONT PORTES APRES L INSTALLATION ET AVANT LE SCAN, et cette place
+# est le contrat. Apres, parce que « retro install » efface le dossier de
+# chaque emulateur a chaque montee de version : les BIOS qui y avaient ete
+# portes disparaissent avec lui, et un jeu qui demarrait cesse de demarrer
+# sans que rien ne change du cote de la bibliotheque. Avant le scan, pour que
+# le rapport decrive une console ou ils sont deja en place.
+check("les BIOS sont mis en place avant le scan", _reste[0], ("retro", "bios"))
+check("le scan precede la sentinelle", _reste[1], ("retro", "scan"))
 # Sans --emulation-root-local, `retro scan` fabrique les chemins d executables
 # depuis le manifeste SANS verifier qu ils existent : une installation
 # partielle peuplerait Steam d entrees qui ne demarrent pas (voir la
@@ -585,6 +593,22 @@ check("le scan precede la sentinelle", _reste[0], ("retro", "scan"))
 # « cette machine » et « la console », du point de vue de cette commande-la,
 # designent le MEME disque : la valeur locale doit etre celle de
 # --emulation-root, pas un chemin cote hote.
+# SANS --emulation-root-local, « retro bios » telecharge dans le dossier du
+# proprietaire et NE PORTE RIEN chez les emulateurs. Le rapport serait alors
+# VERT — « present, empreinte verifiee » — sur des BIOS qu aucun emulateur ne
+# voit, ce qui est pire qu un rapport rouge. Retirer ce parametre rendrait
+# l etape inerte en silence : c est pourquoi il est epingle ici.
+_args_bios = g.args_vus["bios"]
+check("les BIOS sont portes chez les emulateurs, pas seulement telecharges",
+      "--emulation-root-local" in _args_bios, True)
+if "--emulation-root-local" in _args_bios:
+    check("... avec la racine que la commande, qui tourne dans l invite, "
+          "atteint reellement",
+          _args_bios[_args_bios.index("--emulation-root-local") + 1],
+          retro_sync.EMULATION_ROOT)
+check("les BIOS sont cherches dans le dossier du proprietaire, sur le partage",
+      _args_bios[_args_bios.index("--bios") + 1], retro_sync.BIOS_ROOT)
+
 _args_scan = g.args_vus["scan"]
 check("le scan verifie les executables sur le disque local",
       "--emulation-root-local" in _args_scan, True)
@@ -594,12 +618,12 @@ if "--emulation-root-local" in _args_scan:
           _args_scan[_args_scan.index("--emulation-root-local") + 1],
           retro_sync.EMULATION_ROOT)
 check("la sentinelle est posee AVANT l arret de Steam",
-      _reste[1], ("write", retro_sync.HOLD_FILE))
-check("Steam est arrete avant la synchronisation", _reste[2][0], "ps")
-check("... et c est bien un arret de Steam", "steam" in _reste[2][1], True)
-check("la synchronisation vient ensuite", _reste[3], ("retro", "sync"))
+      _reste[2], ("write", retro_sync.HOLD_FILE))
+check("Steam est arrete avant la synchronisation", _reste[3][0], "ps")
+check("... et c est bien un arret de Steam", "steam" in _reste[3][1], True)
+check("la synchronisation vient ensuite", _reste[4], ("retro", "sync"))
 check("la sentinelle est retiree apres",
-      _reste[4], ("remove", retro_sync.HOLD_FILE))
+      _reste[5], ("remove", retro_sync.HOLD_FILE))
 check("la sentinelle ne survit pas a la synchronisation",
       retro_sync.HOLD_FILE in g.fichiers, False)
 

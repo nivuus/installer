@@ -151,6 +151,10 @@ USER_MANIFEST = r"G:\retro\emulators.toml"
 # sous-projet D de `retro` annonce. L'absence du dossier est normale et n'est
 # jamais une erreur : il vit sur un partage qui peut ne pas être monté.
 USER_PROFILES = r"G:\retro\profiles"
+# Le dossier où le propriétaire dépose ses BIOS, et où « retro bios » les
+# télécharge. Sur le partage, comme le manifeste : il survit à une
+# reconstruction de la machine virtuelle, ce que D:\Emulation ne fait pas.
+BIOS_ROOT = r"G:\retro\bios"
 INVENTORY = r"C:\nivuus\state\retro-inventory.json"
 
 # --- L'identité du paquet retro. ------------------------------------------
@@ -916,6 +920,30 @@ def synchronise(guest, cfg) -> int:
         print(f"error: synchronisation REFUSÉE — {refus}", file=sys.stderr)
         return 4
 
+    # 3 bis. LES BIOS, et cette place-ci exactement. APRÈS l'installation,
+    # parce que « retro install » efface le dossier de chaque émulateur à
+    # chaque montée de version — les BIOS qui y avaient été portés
+    # disparaissent avec lui, et un jeu qui démarrait cesse de démarrer sans
+    # que rien ne change du côté de la bibliothèque. AVANT le scan, pour que
+    # le rapport décrive une console où ils sont déjà en place.
+    #
+    # UN ÉCHEC N'ARRÊTE RIEN, et c'est délibéré : un BIOS manquant est un jeu
+    # qui ne démarre pas, pas une bibliothèque cassée. Refuser ici retirerait
+    # de Steam les vingt jeux qui n'en ont pas besoin. On avertit, et « retro
+    # status » nomme ce qui manque.
+    print("« retro bios »...")
+    code, rapport = guest.retro(
+        ["bios", "--bios", cfg.bios,
+         "--emulation-root-local", cfg.emulation_root,
+         "--user-manifest", cfg.user_manifest,
+         "--user-profiles", cfg.user_profiles])
+    print(rapport.rstrip())
+    if code != 0:
+        print("avertissement : tous les BIOS ne sont pas en place (voir "
+              "ci-dessus). La synchronisation continue — les jeux qui n'en "
+              "ont pas besoin n'ont pas à disparaître de Steam pour autant.",
+              file=sys.stderr)
+
     # 4. L'inventaire. Hors sentinelle : il ne touche pas à Steam, et la
     # fenêtre de retenue doit rester aussi courte que possible.
     print("« retro scan »...")
@@ -997,6 +1025,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--steam-root-windows", default=STEAM_ROOT)
     ap.add_argument("--roms", default=ROMS_ROOT)
     ap.add_argument("--user-profiles", default=USER_PROFILES)
+    ap.add_argument("--bios", default=BIOS_ROOT,
+                    help="dossier des BIOS sur la console ; « retro bios » y "
+                         "télécharge ce qui manque, depuis la source que le "
+                         "manifeste du propriétaire déclare")
     ap.add_argument("--user-manifest", default=USER_MANIFEST,
                     help="manifeste du propriétaire, sur le partage ; son "
                          "absence est normale, jamais une erreur")
