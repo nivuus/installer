@@ -430,9 +430,17 @@ wizard is deliberately deferred, not forgotten.
 
 Tests: `cd installer && make test-packages` (needs a Python with `pydantic`
 and `jinja2` — not the Debian base — via `PYTHON=/path/to/venv/bin/python`).
-**33 suites, measured 2026-08-28 (after phase 2d), exit 0**: 11 run directly by
-`installer/Makefile` (the engine/webapp/packages suites that stay outside
-`console/`), and 22 delegated to `console/Makefile`'s own `test` target —
+**38 suites, measured 2026-08-29 (after the `requires.packages` guards and the
+three host-script suites were wired into the aggregator): 37 exit 0, and
+`test_webapp_models` could not be run on a python3.13-only base, where the
+installed `pydantic` belongs to a python3.11 that no longer has a binary.**
+13 run directly by `installer/Makefile` (the engine/webapp/packages suites that
+stay outside `console/`), 3 shell suites delegated to its `test-scripts`
+prerequisite (`test_hw_blackbox`, `test_net_rps_ecores`,
+`test_pcie_wifi_link_guard` — they guard hardware-facing scripts but build fake
+trees under `mktemp`, so they need no hardware and no Python; they are a
+prerequisite rather than a trailing call so a base without `pydantic` cannot
+mask them), and 22 delegated to `console/Makefile`'s own `test` target —
 the 8 `test_console_*` suites (`test_console_guest_steps` and
 `test_console_guest_ready` are phase 2d's own), `test_vm_wake_gate`,
 `test_retro_marker_bridge`, the 11 `test_windows_guest_*` suites and the
@@ -486,8 +494,11 @@ python3 console/guest/retro_sync.py   # retrogaming (OPTIONAL): replay
 # connection; --force overrides, loudly.
 
 # ── Host scripts ───────────────────────────────────────────────────────────
+# The three below also run as `cd installer && make test-scripts`, and as a
+# prerequisite of `make test-packages` - they were hand-run only until 2026-08-29.
 scripts/tests/test_pcie_wifi_link_guard.sh  # 16 assertions on a fake sysfs tree
-scripts/tests/test_hw_blackbox.sh           # 26 assertions
+scripts/tests/test_hw_blackbox.sh           # 26 assertions on a fake hwmon tree
+scripts/tests/test_net_rps_ecores.sh        # 20 assertions on a fake hybrid CPU
 console/tests/test_vm_wake_gate.py
 console/tests/test_handle_vm_start.sh       # 10 assertions on a fake virsh
 scripts/disk-maintenance.sh --dry-run       # ALWAYS this first when / fills up
