@@ -243,6 +243,10 @@ def verify_staged(dest_root: Path) -> None:
         "provision/assets/run-agent.ps1",
         "provision/assets/steam-session.ps1",
         "provision/assets/steam-launch.ps1",
+        # Dot-source par steam-session.ps1 : absent, le masquage du curseur de
+        # Big Picture disparait sans un mot - la facon meme dont la dette C4
+        # s'etait creee lors du passage a apps.json.j2.
+        "provision/assets/steam-cursor.ps1",
         "provision/assets/apollo-junction.ps1",
         "provision/assets/steam-shell.ps1",
         # Dot-sources par 32-retro.ps1 AVANT qu'elle lise le basculement, donc
