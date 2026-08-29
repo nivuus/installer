@@ -99,10 +99,27 @@ C'est le seul des trois qui se teste **sans rien modifier sur le serveur**.
 client, lancer le titre de référence et jouer jusqu'à un moment qui **doit**
 faire vibrer. Puis lire le journal d'Apollo sur l'invité.
 
-- Le dossier de configuration d'Apollo est une jonction vers `D:\state\apollo`
-  (`console/guest/provision/assets/apollo-junction.ps1`) : `sunshine.conf` y
-  est, et c'est là qu'il faut chercher `sunshine.log` en premier. Son chemin
-  exact **n'a pas été vérifié sur l'invité**.
+- ⚠️ **RECTIFIÉ le 2026-08-29 — cette étape envoyait vers un fichier VIDE.**
+  Elle disait de chercher `sunshine.log` dans le dossier de configuration
+  d'Apollo, jonction vers `D:\state\apollo`
+  (`console/guest/provision/assets/apollo-junction.ps1`), en précisant que le
+  chemin n'avait pas été vérifié. Il l'est maintenant, et il était faux :
+
+  | Chemin | Ce qui y est |
+  |---|---|
+  | `C:\Windows\Temp\sunshine.log` | **le vrai journal** — 12 Ko, vivant |
+  | `D:\state\apollo\sunshine.log` | **0 octet** |
+
+  Le second existe, ce qui est le piège : une lecture y trouve un fichier, pas
+  une erreur. Zéro occurrence de rumble dans un fichier de zéro octet ne prouve
+  rien du tout, et se lirait pourtant comme la réponse à l'étape 2. **Lire
+  `C:\Windows\Temp\sunshine.log`.**
+
+  Ce qui n'est PAS su : pourquoi Apollo écrit là plutôt que dans son dossier de
+  configuration, si c'est un défaut de compilation ou une conséquence du
+  service, et si `D:\state\apollo\sunshine.log` se remplit dans d'autres
+  conditions. Le chemin est **relevé**, pas expliqué — à re-mesurer avant de le
+  figer dans un gabarit.
 - Vérifier d'abord, dans ce `sunshine.conf`-là — celui de la machine, pas celui
   du dépôt — que `min_log_level` vaut bien `info`.
 - **Compter les occurrences sur le fichier COMPLET, jamais sur ses premières
@@ -151,6 +168,31 @@ pour un X360 redevient muette **partout**, sans un message.
 D3 de `nivuus/retro` : DuckStation reste muet), ensuite le type de pad, ensuite
 le mouvement. Cette bascule est un point de synchronisation entre les deux
 dépôts, pas un réglage local.
+
+### C2 EST DÉBLOQUÉE — 2026-08-29
+
+**D3 est close côté `nivuus/retro` : la manette répond dans DuckStation.**
+Crash Team Racing, confirmé par le propriétaire. La première marche de l'ordre
+imposé ci-dessus est franchie, et C2 n'attend donc plus une autre dette : elle
+est la prochaine.
+
+Il a fallu deux choses, et pas une, ce qui vaut d'être su ici parce que ça dit
+à quoi ressemble le prochain débogage : les vingt-sept liaisons relevées, **et**
+`[Pad1] ForceAnalogOnReset = false`. Les liaisons étaient justes pendant que le
+jeu restait muet. **Une manette muette n'a jamais une seule cause possible.**
+
+**Ce que la clôture NE change PAS, et qui reste le coût de C2 :** basculer
+Apollo en DualShock change le VID/PID, donc le GUID SDL, donc les identifiants
+des configurations d'entrée des émulateurs. Une seule nuance, mesurée le
+2026-08-29 : les liaisons de DuckStation ne portent qu'un **index** (`SDL-0`),
+jamais un GUID — elles ne se cassent donc pas mécaniquement au changement de
+type de pad. Ce qui les casse, c'est un pad **de plus** énuméré avant celui
+d'Apollo. Les huit autres émulateurs n'ont aucun relevé et restent entiers.
+
+**Ce qui n'est toujours pas vérifiable dans les conditions réelles :** aucune
+session Moonlight ne s'ouvre — `403 Permission denied` au `/launch`, le client
+appairé portant `perm=0x3000000` là où les clients fonctionnels portent
+`0x7131f00`. Toute mesure de C2 au flux passe d'abord par ce `perm`.
 
 ---
 
@@ -273,13 +315,51 @@ de `nomousy`**. C'est exactement la régression décrite plus haut, lue sur le
 fichier déployé.
 
 **Ce qui n'est pas vérifié, et ne peut pas l'être d'ici :** le rendu réel dans
-un flux Big Picture, faute de session Moonlight ouverte. Et le correctif **n'est
-pas encore sur l'invité** : `C:\nivuus\state\PROVISION.done` dit
-`provision_version=B1` (achevé le 2026-08-26) quand le payload courant est `B3`,
-le `steam-session.ps1` déployé date du 2026-08-27 et ne connaît pas
-`SetSystemCursor`, et `steam-cursor.ps1` n'est pas encore à côté de lui. Il y
-arrivera au prochain provisionnement — la vérification ci-dessus porte sur les
-API et la syntaxe, jamais sur un déploiement.
+un flux Big Picture, faute de session Moonlight ouverte.
+
+### ⚠️ Le correctif a été DÉPLOYÉ À LA MAIN, et l'invité diverge de son payload
+
+**2026-08-29.** L'entrée disait plus haut que le correctif « n'est pas encore
+sur l'invité » et qu'il y arriverait au prochain provisionnement. Ce n'est plus
+vrai : il y a été **posé à la main**, le même jour.
+
+Ce qui a été fait sur l'invité :
+
+- `steam-cursor.ps1` **ajouté** à côté de `steam-session.ps1` ;
+- `steam-session.ps1` et `steam-shell.ps1` **remplacés** ;
+- **empreintes vérifiées** après transfert.
+
+**L'INVITÉ DIVERGE DONC DE SON `provision_version=B1`.**
+`C:\nivuus\state\PROVISION.done` dit toujours `B1` (achevé le 2026-08-26), et
+trois fichiers du disque ne sont plus ceux de ce payload. C'est écrit ici parce
+que le témoin de version ne le dira pas : **quelqu'un qui compare la machine au
+payload B1 trouvera trois différences, et elles sont légitimes.**
+
+Le prochain provisionnement remettra les fichiers **du dépôt**, ce qui est
+cohérent — ce sont les mêmes, à la version du dépôt près. La divergence est
+donc temporaire et se referme toute seule ; elle n'a pas à être « corrigée » à
+la main dans l'autre sens.
+
+### ⚠️ Le fond d'écran n'a PAS été déployé, et il ne peut pas l'être à chaud
+
+Le remplacement de `wallpaper.png` a **échoué**, mesuré le 2026-08-29
+(`MethodInvocationException`). La cause est dans `steam-shell.ps1` lui-même :
+il fait `Image::FromFile` sur ce fichier et **garde le handle ouvert tant que
+la session Windows dure**.
+
+**Se déconnecter de Moonlight ne suffit pas.** La session Windows survit à la
+déconnexion du client ; le fichier reste verrouillé. Il faut un **redémarrage
+de l'invité**.
+
+**L'ancien fond d'écran est donc toujours en place.** C3 se lit plus haut comme
+réglée — elle l'est **dans le dépôt** (la source SVG, le rendu, le chemin de
+destination, les deux `#000` de `steam-shell.ps1`), et elle ne l'est **pas sur
+la machine**. Les deux moitiés ne se referment pas au même moment, et la
+seconde attend un redémarrage.
+
+Ce qui n'est PAS su : si un provisionnement complet contourne le verrou (il
+tourne avant qu'une session Big Picture ait ouvert l'image) ou s'il échoue de
+la même façon. Personne n'a mesuré.
 
 **Provenance des mesures, et comment les refaire.** Tout ce qui est chiffré
 ci-dessus a été lu sur l'invité par WinRM le 2026-08-29, en lecture seule, et
@@ -342,3 +422,76 @@ qu'Apollo.
 **Ce que ça coûte :** l'application `Desktop` existe pour les cas où la manette
 ne suffit pas — et c'est précisément là que le seul client disponible ne sait
 pas pointer correctement.
+
+---
+
+## C6 — Les partages virtiofs disparaissent en silence, et la console devient inutilisable
+
+**Constaté le 2026-08-29, et pas pour la première fois.** Les quatre partages
+virtiofs — `E:` Téléchargements, `F:` Jeux, **`G:` Console**, `H:` Sauvegardes —
+**avaient disparu de l'invité**. Les quatre services `NivuusShare_*` se
+déclaraient `Running`, et **aucune des quatre lettres n'existait**.
+
+**Ce que ça a coûté, vécu le jour même :** « ROM introuvable » au lancement de
+Crash Team Racing, et le dossier de BIOS de DuckStation (`G:\retro\bios`)
+invisible. La console était inutilisable, sans qu'aucun message ne dise
+pourquoi.
+
+### Pourquoi ça ne se voit pas
+
+**Côté hôte, tout était sain** : les quatre `<filesystem>` déclarés dans le
+domaine, et un `virtiofsd` en marche pour chacun. Rien à réparer de ce côté.
+
+**Côté invité, le service ment.** `virtiofs.exe` ne meurt pas et ne sort pas en
+erreur : il reste vivant au-dessus d'un tuyau mort. Le gestionnaire de services
+voit quatre services `Running` parfaitement sains, les volumes WinFsp sont
+démontés, et `Test-Path G:\` rend `False`. **La panne est totalement
+silencieuse** — aucun événement Service Control Manager, aucun événement
+WinFsp.
+
+C'est pour cela que le filet posé au provisionnement ne joue pas :
+`failureflag= 1` étend la reprise aux sorties **en erreur**, et ici il n'y a
+pas de sortie du tout.
+
+### Le remède, appliqué et efficace
+
+    Get-Service NivuusShare_* | Restart-Service -Force
+
+Les quatre lettres sont revenues. Les `virtiofsd` de l'hôte attendaient déjà,
+connectés, et les lettres étaient libres.
+
+### Pourquoi cette entrée existe, alors que le script le dit déjà
+
+`console/guest/provision/35-shares.ps1` **décrit déjà ce mode de panne** — la
+mesure du 2026-08-28 après une hibernation de la VM, sa règle **« SURVEILLER LA
+LETTRE, PAS LE SERVICE »**, et deux pistes de correctif durable :
+
+1. une tâche planifiée sur événement **Kernel-Power 107** (« The system has
+   resumed from sleep ») qui rejoue `Restart-Service` sur les quatre ;
+2. une sonde côté hôte dans `vm-idle-shutdown.sh`, qui porte déjà trois blocs
+   « Self-heal » : si `Test-Path` échoue alors que la VM tourne, redémarrer les
+   services et le journaliser.
+
+Le script dit lui-même que le correctif « reste À FAIRE », et qu'il n'a pas sa
+place dans un fichier qui ne tourne qu'au provisionnement. **Il a raison sur les
+deux points, et c'est exactement pourquoi ça devient une dette à part entière :
+ce n'est plus une hypothèse écrite dans un commentaire, c'est arrivé, et ça a
+rendu la console inutilisable jusqu'au remède.**
+
+Une observation de méthode, pour qui reprendra le sujet : la panne du 2026-08-28
+a été rattachée à l'hibernation de la VM, journaux à l'appui. **Celle du
+2026-08-29 n'a pas été rattachée à un déclencheur** — personne n'a relevé, au
+moment du constat, s'il y avait eu hibernation, reprise, ou autre chose.
+L'hibernation est donc une cause **connue**, pas la cause **unique** ; le
+supposer réduirait le correctif à un seul déclencheur.
+
+### Ce qui reste à faire
+
+**Le correctif durable, et il n'a pas bougé.** Les deux pistes ci-dessus sont
+toujours les bonnes, et la règle qui les gouverne est écrite : surveiller la
+lettre, jamais l'état du service. Ce qui manque, c'est que quelque chose la
+tienne **APRÈS** le provisionnement.
+
+**Ce que ça coûte aujourd'hui :** la bibliothèque de jeux disparaît sans
+préavis et sans message. Vu du canapé, les jeux ne se lancent plus ; il n'y a
+rien à lire, et le seul geste qui répare demande une console PowerShell.
