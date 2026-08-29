@@ -72,12 +72,12 @@ Write-Host "config junctioned to $ApolloState"
 function Backup-IfChanged {
     param([Parameter(Mandatory = $true)][string]$Source,
           [Parameter(Mandatory = $true)][string]$Destination)
-    # $stamp distingue « Apollo vient d ecrire ses defauts » de « le
-    # proprietaire a modifie sa config ». Sans lui l avertissement se declenche
+    # $stamp distingue "Apollo vient d ecrire ses defauts" de "le
+    # proprietaire a modifie sa config". Sans lui l avertissement se declenche
     # a la PREMIERE installation, ou personne n a rien pu modifier : le service
     # Apollo demarre avant cette copie et depose ses propres sunshine.conf et
     # apps.json dans le repertoire jonctionne. Un avertissement qui crie a
-    # chaque installation neuve apprend a l operateur a l ignorer — et il
+    # chaque installation neuve apprend a l operateur a l ignorer - et il
     # comptera, lui, a la reconstruction.
     $stamp = Join-Path (Split-Path -Parent $Destination) '.nivuus-config-written'
     if ((Test-Path $stamp) -and (Test-Path $Destination) -and
@@ -89,7 +89,7 @@ function Backup-IfChanged {
     Copy-Item -Path $Source -Destination $Destination -Force
     # Le media de reponses est un CD-ROM : Copy-Item en reporte l attribut
     # ReadOnly sur la copie. Or ces deux fichiers sont exactement ceux que l IHM
-    # web d Apollo reecrit — ReadOnly les gele, et toute sauvegarde depuis l IHM
+    # web d Apollo reecrit - ReadOnly les gele, et toute sauvegarde depuis l IHM
     # echoue. Mesure sur l invite le 2026-08-25 : un WriteAllBytes sur
     # apps.json levait UnauthorizedAccessException.
     Set-ItemProperty -Path $Destination -Name Attributes -Value 'Archive'
@@ -105,13 +105,13 @@ Set-Content -Path (Join-Path $ApolloState '.nivuus-config-written') `
 #
 # Apollo capture par Desktop Duplication, et l'encodeur doit vivre sur
 # l'adaptateur qui possede la sortie capturee. Quand AUCUN ecran physique n'est
-# branche sur le GPU — le cas de cette appliance, dont le bouchon HDMI est
-# retire — Apollo retient l'adaptateur par defaut, qui est le « Microsoft Basic
-# Render Driver » (WARP, vendor 0x1414). NVENC est alors essaye SUR WARP,
+# branche sur le GPU - le cas de cette appliance, dont le bouchon HDMI est
+# retire - Apollo retient l'adaptateur par defaut, qui est le "Microsoft Basic
+# Render Driver" (WARP, vendor 0x1414). NVENC est alors essaye SUR WARP,
 # echoue, et la sonde retombe sur libx264. Le flux se negocie en 1280x800 a
 # 1 Hz et tout client abandonne avant d'emettre le moindre paquet UDP :
-# CLIENT CONNECTED puis DISCONNECTED 150 ms plus tard, « Initial Ping Timeout »
-# cote hote et « error -5 » cote Moonlight. Mesure sur l'invite le 2026-08-25 ;
+# CLIENT CONNECTED puis DISCONNECTED 150 ms plus tard, "Initial Ping Timeout"
+# cote hote et "error -5" cote Moonlight. Mesure sur l'invite le 2026-08-25 ;
 # epingler l'adaptateur a fait apparaitre h264_nvenc, hevc_nvenc ET av1_nvenc.
 #
 # Le nom est DETECTE ici plutot qu'ecrit dans le gabarit : l'hote de
@@ -129,7 +129,9 @@ Write-Host "capture adapter pinned to $gpuName"
 New-Item -ItemType Directory -Force -Path 'C:\nivuus\apollo' | Out-Null
 # Les deux moities de chaque application d'apps.json ; elles remplacent le
 # prep-cmd maximize-steam.ps1. Le pourquoi est dans leurs propres en-tetes.
-'steam-session.ps1', 'steam-launch.ps1' | ForEach-Object {
+# steam-cursor.ps1 est dot-source par steam-session.ps1 via $PSScriptRoot : il
+# doit atterrir dans le meme dossier, sans quoi le curseur reste sur Big Picture.
+'steam-session.ps1', 'steam-launch.ps1', 'steam-cursor.ps1' | ForEach-Object {
     Copy-Item (Join-Path $PayloadRoot "provision\assets\$_") "C:\nivuus\apollo\$_" -Force }
 Remove-Item 'C:\nivuus\apollo\maximize-steam.ps1' -Force -EA SilentlyContinue
 
