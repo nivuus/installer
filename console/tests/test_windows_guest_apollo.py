@@ -241,3 +241,21 @@ if failures:
         print("  -", f)
     sys.exit(1)
 print("OK")
+
+# LE TYPE DE MANETTE VIRTUELLE. Sans cette cle, Apollo vaut « auto » et
+# choisit le type A CHAQUE CONNEXION (alloc_gamepad, src/platform/windows/
+# input.cpp v0.4.6) : quatre manettes differentes branchees ensemble donnent
+# quatre peripheriques de types melanges, et aucun emulateur ne peut nommer
+# ses quatre ports de facon stable la-dessus. Mesure du 2026-08-30 : le type
+# avait deja bascule tout seul de Xbox 360 a DualShock 4 entre deux sessions,
+# sans un mot.
+#
+# Le test epingle la VALEUR et le fait qu'elle soit unique. « auto » est le
+# defaut d'Apollo : une cle retiree ne laisserait aucun symptome visible tant
+# qu'un seul joueur joue avec toujours la meme manette, et les quatre ports
+# deviendraient imprevisibles le jour ou quelqu'un en branche une seconde.
+_idx = [i for i, l in enumerate(_lignes) if l.strip().startswith("gamepad =")]
+check("sunshine.conf pose un seul type de manette", len(_idx), 1)
+if _idx:
+    check("le type de manette virtuelle est epingle a x360",
+          _lignes[_idx[0]].strip(), "gamepad = x360")

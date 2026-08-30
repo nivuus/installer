@@ -82,3 +82,53 @@ min_log_level = info
 # sunshine_name ne renomme PAS l'ordinateur Windows — c'est deliberement plus
 # cible, le nom reseau reste celui que l'unattend a fixe.
 sunshine_name = Nivuus
+
+# LE TYPE DE MANETTE VIRTUELLE, EPINGLE — et c'est ce qui rend l'assignation
+# des manettes automatique, pour quatre pads a la fois qui ne se ressemblent
+# pas.
+#
+# Ce que la console voit n'est JAMAIS la manette du joueur. Moonlight envoie
+# des etats abstraits, et Apollo recree un peripherique par ViGEmBus. Sans
+# cette cle, « gamepad » vaut « auto », et alloc_gamepad (src/platform/windows/
+# input.cpp, v0.4.6, lignes 1183-1205) choisit le type A CHAQUE CONNEXION, par
+# cinq branches dans cet ordre :
+#   1. le client annonce PlayStation      -> DualShock 4
+#   2. le client annonce Xbox             -> Xbox 360
+#   3. motion_as_ds4 et le pad a un gyro  -> DualShock 4
+#   4. touchpad_as_ds4 et un pave tactile -> DualShock 4
+#   5. sinon                              -> Xbox 360
+# Quatre manettes differentes branchees ensemble donnent donc quatre
+# peripheriques de types MELANGES, dans un ordre qui depend de qui se connecte.
+# Aucun emulateur ne peut nommer ses quatre ports de facon stable la-dessus :
+# Dolphin identifie un peripherique par (source, index, NOM), et l'index se
+# compte PAR NOM — deux types melanges donnent deux « index 0 ».
+#
+# Mesure du 2026-08-30 dans sunshine.log : « Gamepad 0 will be DualShock 4
+# controller (auto-selected by motion sensor presence) », alors que le releve
+# du 2026-08-29 avait ete fait sous « Xbox 360 controller (default) ». Le type
+# avait donc deja change tout seul, sans un mot, entre deux sessions.
+#
+# « x360 » fige la branche 1 de alloc_gamepad pour tout le monde : quatre
+# manettes Xbox 360 filaires identiques, indexees 0 a 3 par XInput, quelle que
+# soit la manette que le joueur tient. C'est le seul des trois choix qu'XInput
+# enumere — les emulateurs de cette console sont tous configures en XInput —
+# et l'index XInput EST le numero de port, ce qui rend l'ordre deterministe.
+#
+# CE QUE CA COUTE, dit par Apollo lui-meme (memes lignes, 1207-1218) : sur un
+# Xbox 360 emule, le gyroscope, le pave tactile et la LED du pad client
+# deviennent inutilisables — dans les jeux Steam comme dans les emulateurs.
+# Reculer tient en une ligne : « gamepad = ds4 » garde le mouvement et le
+# pave, au prix de l'enumeration XInput, qu'un peripherique DualShock 4 ViGEm
+# n'a pas. Les trois seules valeurs acceptees sont « auto », « x360 » et
+# « ds4 » (supported_gamepads, meme fichier, lignes 1728-1747).
+gamepad = x360
+
+# LE TACTILE NATIF, et il etait pose A LA MAIN sur la console — donc perdu au
+# prochain rebuild, sans qu'aucun test ne le dise.
+#
+# « disabled » fait traduire les evenements tactiles du client en evenements
+# de SOURIS. Steam s'en accommode ; l'ecran tactile de l'emulateur DS, non :
+# melonDS attend de vrais evenements de pointeur (WM_POINTER, que le pilote
+# dinput de RetroArch traite). Mesure du 2026-08-29 : le tactile de la DS ne
+# repondait pas, et le propriétaire a confirme qu'il repond avec « enabled ».
+native_pen_touch = enabled
