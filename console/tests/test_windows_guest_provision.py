@@ -194,6 +194,28 @@ check("xbox-stack.ps1 met les services Xbox en demarrage automatique",
 # ferait echouer l etape pour un service qui, lui, repond.
 check("... et traite ClipSVC a part, sans tenter de le reconfigurer",
       "ClipSVC" in _xbox_code and "Set-Service -Name 'ClipSVC'" not in _xbox_code, True)
+# XblGameSave EST TRAITE COMME ClipSVC : demarre, jamais reconfigure. Mesure du
+# 2026-09-04 sur l invite, quatre passages : Set-Service NE LEVE PAS et le
+# demarrage repart a 'Manual' (registre Start = 3) trois fois sur quatre. Ce
+# n est pas une panne - `sc qtriggerinfo XblGameSave` montre un declencheur
+# NETWORK EVENT / RPC INTERFACE EVENT, donc Windows regere ce service, et le
+# forcer revient a se battre contre le systeme pour obtenir un temoin
+# DEFINITIVEMENT rouge. Or un temoin toujours rouge cesse d etre lu, et c est le
+# prochain VRAI defaut qui passerait inapercu. 'Manual' + declencheur est donc
+# l etat ATTENDU ; ce qui compte est qu il soit Running.
+check("XblGameSave n est plus force en Automatic",
+      "'XblGameSave'" in _xbox_code
+      and "$XboxServices = @('wlidsvc', 'XblAuthManager', 'XboxNetApiSvc', 'LicenseManager')"
+      in _xbox_code, True)
+check("... il est demarre sans etre reconfigure, comme ClipSVC",
+      "$XboxServicesDemarresSeulement" in _xbox_code, True)
+check("... et ces deux-la sont verifies Running, pas seulement demarres",
+      "'Running'" in _xbox_code, True)
+# La ligne de succes ne doit plus dire << en Automatic >> de SIX services quand
+# deux ne le sont pas et ne doivent pas l etre : c est le meme faux oracle, en
+# plus discret, que la constante qu elle remplace.
+check("... et la ligne de succes ne dit plus Automatic de tout le monde",
+      "en Automatic et demarres (relu)" in _xbox_code, False)
 
 # RELIRE PLUTOT QUE CROIRE, jusque sur les services. MESURE le 2026-09-04 sur
 # l invite de production : le journal a ecrit « services Xbox en Automatic et

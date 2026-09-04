@@ -21,12 +21,32 @@ $Packages = @(
     @{ Id = '9MV0B5HZVK9Z'; Name = 'Microsoft.GamingApp';            Label = 'Application Xbox' },
     @{ Id = '9WZDNCRFJBMP'; Name = 'Microsoft.WindowsStore';         Label = 'Microsoft Store' }
 )
-# Les services de la chaine d authentification. TOUS livres en 'Manual' par
-# LTSC, et leurs declencheurs de demarrage a la demande ne se declenchent pas
-# sur cette edition : mesure du 2026-08-30, ils etaient tous 'Stopped' apres
+# Les services de la chaine d authentification qu on RECONFIGURE. Livres en
+# 'Manual' par LTSC, et leurs declencheurs de demarrage a la demande ne partent
+# pas sur cette edition : mesure du 2026-08-30, ils etaient tous 'Stopped' apres
 # chaque redemarrage et l ouverture de session Xbox echouait tant qu ils
-# l etaient. D ou 'Automatic', qui est le geste durable.
-$XboxServices = @('wlidsvc', 'XblAuthManager', 'XboxNetApiSvc', 'XblGameSave', 'LicenseManager')
+# l etaient. D ou 'Automatic', qui est le geste durable - et il TIENT sur ces
+# quatre-la (registre Start = 2, relu le 2026-09-04).
+$XboxServices = @('wlidsvc', 'XblAuthManager', 'XboxNetApiSvc', 'LicenseManager')
+
+# Ceux qu on DEMARRE sans jamais les reconfigurer, et c est deliberé pour deux
+# raisons differentes :
+#
+#   ClipSVC      service PROTEGE. On le demarre, on ne le reconfigure pas.
+#
+#   XblGameSave  service a DECLENCHEUR. `sc qtriggerinfo XblGameSave` rend un
+#                NETWORK EVENT / RPC INTERFACE EVENT : Windows regere son type
+#                de demarrage, et il repart a 'Manual' tout seul. Mesure du
+#                2026-09-04, quatre passages : Set-Service NE LEVE PAS et la
+#                valeur revient a 3 trois fois sur quatre.
+#
+# NE REMETS PAS XblGameSave DANS LA LISTE DU DESSUS. Le forcer, c est se battre
+# contre le systeme d exploitation pour obtenir un temoin DEFINITIVEMENT rouge
+# sur D:\state\gaming-services.txt - et un temoin toujours rouge cesse d etre
+# lu, si bien que le prochain VRAI defaut de la chaine passerait inapercu.
+# 'Manual' + declencheur est l etat ATTENDU de ces deux services ; ce qui
+# compte, et ce qui est verifie plus bas, est qu ils soient Running.
+$XboxServicesDemarresSeulement = @('ClipSVC', 'XblGameSave')
 
 function Install-StorePackage {
     <#
@@ -59,12 +79,13 @@ function Install-StorePackage {
 
 function Set-XboxServicesAutomatic {
     <#
-        Les services de la chaine Xbox, en demarrage automatique ET demarres.
+        La chaine Xbox : quatre services en demarrage automatique ET demarres,
+        deux autres seulement demarres (voir $XboxServicesDemarresSeulement au
+        haut du fichier - un service protege, un service a declencheur).
 
-        ClipSVC est traite A PART et volontairement : c est un service PROTEGE,
-        Set-Service y rend "Access is denied" meme en administrateur. Il se
-        DEMARRE tres bien, il ne se reconfigure pas - le refuser en bloc ferait
-        echouer une etape pour un service qui, lui, repond.
+        Rend $true quand tout est dans l etat ATTENDU, ce qui n est pas
+        "tout en Automatic" : pour les deux derniers, Running suffit et
+        'Manual' est normal.
     #>
     $failed = @()
     $done = @()
@@ -90,15 +111,26 @@ function Set-XboxServicesAutomatic {
         }
         $done += $name
     }
-    # ClipSVC est PROTEGE : on le demarre, on ne le reconfigure pas, donc rien
-    # a relire de son type de demarrage - il restera 'Manual' et c est normal.
-    try { Start-Service -Name 'ClipSVC' -ErrorAction Stop ; $done += 'ClipSVC' }
-    catch { $failed += "ClipSVC ($($_.Exception.Message))" }
+    # Les deux qu on ne reconfigure pas. On ne relit donc PAS leur type de
+    # demarrage - il restera 'Manual', et c est l etat attendu, pas un echec.
+    # Ce qu on relit, c est qu ils tournent : Start-Service peut rendre la main
+    # sur un service qui retombe, et c est Running que la chaine Xbox exige.
+    foreach ($name in $XboxServicesDemarresSeulement) {
+        try { Start-Service -Name $name -ErrorAction Stop }
+        catch { $failed += "$name ($($_.Exception.Message))" ; continue }
+        $now = Get-Service -Name $name -ErrorAction SilentlyContinue
+        if (-not $now -or $now.Status -ne 'Running') {
+            $vu = if ($now) { $now.Status } else { 'absent' }
+            $failed += "$name (demarre sans erreur, mais le statut est $vu)"
+            continue
+        }
+        $done += "$name (demarre, type de demarrage laisse tel quel)"
+    }
 
     if ($failed.Count -gt 0) {
         Write-GamingLog "services Xbox incomplets : $($failed -join ' ; ')"
         return $false
     }
-    Write-GamingLog "services Xbox en Automatic et demarres (relu) : $($done -join ', ')"
+    Write-GamingLog "chaine de services Xbox dans l etat attendu (relu) : $($done -join ', ')"
     return $true
 }

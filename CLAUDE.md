@@ -257,14 +257,22 @@ things about it are easy to break:
      reproduced** — it simply was not reconfigured, and no error was seen; the
      handling is still right (protected service, and it does not need
      `Automatic`), but the reason written here was not the measured one.
-     (b) **`XblGameSave` does not stay `Automatic`**: `Set-Service` does not
+     (b) **`XblGameSave` is no longer forced to `Automatic` at all** — it is
+     started and left alone, exactly like `ClipSVC`. `Set-Service` does not
      throw and the start type goes back to `Manual` (registry `Start` = 3),
-     seen on two of three runs — the service carries a `NETWORK EVENT / RPC
-     INTERFACE EVENT` trigger and Windows re-manages it. So
-     `Set-XboxServicesAutomatic` now **re-reads each service** after setting it
-     and names the ones that did not take: before that, a setting that stuck
-     and one that did not wrote the exact same log line, because the line was
-     the *intended* list. And the 20 h throttle no longer covers the services
+     seen on three of four runs; `sc qtriggerinfo XblGameSave` shows a
+     `NETWORK EVENT / RPC INTERFACE EVENT`, so **Windows re-manages this
+     service and that is it working as designed, not a fault**. Forcing it
+     meant fighting the OS for a witness that would read `chaine-incomplete`
+     **permanently** — and a witness that is always red stops being read, so
+     the next real defect in the chain would go unnoticed. `Manual` +
+     trigger-start is now recorded in the code as the **expected** state for
+     those two; what is verified is that they are `Running`. Measured after the
+     change, with `XblGameSave` forced back to `Manual` first: witness
+     `status=ok`, `Start=3`, `Status=Running`. The four services that *do* hold
+     `Automatic` are still set and **re-read** — before that, a setting that
+     stuck and one that did not wrote the exact same log line, because the line
+     was the *intended* list, which is the textbook false oracle. And the 20 h throttle no longer covers the services
      at all — only the Store: `Set-Service` is local and free, and the stamp
      being written only on complete success meant one service refusing to hold
      blocked it **forever**, so the four winget calls ran at every logon and

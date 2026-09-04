@@ -143,13 +143,49 @@ que cette dette existe pour éviter.
 
 ---
 
-## C2 — Apollo annonce un Xbox 360 : ni gyroscope, ni tactile
+## C2 — Apollo jette le gyroscope que la manette du salon lui envoie
 
-**Constaté le 2026-08-28.** `sunshine.log` dit `Gamepad 0 will be Xbox 360
-controller (default)` à chaque session. Un pad X360 **n'a pas de capteur de
-mouvement**, pas de pavé tactile, pas de retour haptique fin. Les jeux et les
-émulateurs qui en dépendent — PPSSPP, PCSX2, RPCS3, et un futur émulateur
-PS Vita — ne recevront jamais rien, quoi qu'on règle de leur côté.
+> 🚪 **PORTE : C2 EST BLOQUÉE DERRIÈRE C7. Ne bascule pas le type de manette
+> tant que la console n'a pas été reconstruite en B4.** Arbitré le 2026-09-05,
+> et ce n'est pas une précaution de principe : le filet censé rattraper la
+> bascule — garde anti-GUID, `pad_releve`, `lire_pads`, `pads.txt` écrit par
+> `joyGetDevCapsW` — est livré sur `main` de `nivuus/retro`, **dans le dépôt**,
+> et le dépôt n'est pas sur la console (C7 : elle tourne encore sur
+> `PROVISION_VERSION=B1`, du 2026-08-26). Retirer l'épingle `x360` maintenant,
+> ce serait le faire sur une machine **dépourvue du filet**, avec une
+> configuration RPCS3 posée à la main qui ne vit dans aucun fichier versionné —
+> elle mourrait en silence. Et ce dépôt sait où ça mène : *une manette muette
+> n'a jamais une seule cause possible* (leçon de D3, payée deux fois).
+>
+> **L'ordre imposé est donc :**
+> 1. **C7** — reconstruire l'invité jusqu'à B4 ;
+> 2. **prouver le filet de `nivuus/retro` VIVANT sur la console**, pas
+>    seulement présent dans son dépôt ;
+> 3. **puis** basculer, en suivant le runbook du § C2.6 ci-dessous — qui est la
+>    procédure de la **troisième** marche, jamais de la première.
+
+**Constaté le 2026-08-28, et le titre a été corrigé le 2026-09-05 :** il
+promettait « ni gyroscope, ni tactile », c'est-à-dire une moitié que C2 ne peut
+pas livrer. `sunshine.log` disait `Gamepad 0 will be Xbox 360 controller
+(default)` à chaque session. Un pad X360 émulé **n'a pas de capteur de
+mouvement**, pas de pavé tactile, pas de retour haptique fin — et les émulateurs
+qui en dépendent (PPSSPP, RPCS3, Vita3K) ne recevront jamais rien, quoi qu'on
+règle de leur côté.
+
+**Ce que C2 peut livrer, et c'est mesuré :** le **gyroscope**. La manette du
+salon envoie déjà ses capteurs — Apollo le dit dans ses propres mots, voir le
+dossier au § C2.3 — et c'est l'épinglage `x360` qui les jette.
+
+**Ce que C2 ne peut PAS livrer, et ce n'est pas son ressort :** le **pavé
+tactile**. Aucun avertissement `has a touchpad, but it is not usable` n'apparaît
+dans le journal, alors qu'Apollo en émet un quand le cas se présente : **ce pad
+n'a pas de pavé tactile**. C'est du matériel de salon, pas un réglage de
+l'invité. Aucune bascule de C2 ne le fera apparaître, et une dette qui promet
+l'impossible ne se clôt jamais.
+
+**PCSX2 sort aussi de cette liste, corrigé le 2026-08-29 côté `nivuus/retro` :**
+la PS2 n'avait aucun capteur de mouvement, `pcsx2/SIO/Pad/` ne contient aucun
+périphérique de capteur. Il n'y a rien à y régler, et ce n'est pas un manque.
 
 **Où ça se joue :** `console/guest/templates/sunshine.conf.j2` ne pose **aucune**
 clé de type de manette ; Apollo retombe donc sur son défaut. La clé existe dans
@@ -296,11 +332,16 @@ filet posé après la casse ne sert qu'à la constater. » Elles **le sont**, su
 
 **Le filet est donc dans le dépôt. Il n'est pas prouvé sur la console** — le
 lanceur installé sur l'invité n'a pas été relevé, et D5 a déjà montré une fois
-que la console faisait tourner un `retro` périmé.
+que la console faisait tourner un `retro` périmé. **C'est exactement ce constat
+qui a fait poser la porte C7 en tête de cette dette** : un filet qui n'est pas
+sur la machine ne rattrape rien de ce qui y tombe.
 
-#### 6. SI la bascule est décidée — ce que `nivuus/retro` doit faire, et dans quel ordre
+#### 6. Le runbook de la bascule — TROISIÈME marche, jamais la première
 
-À ne PAS jouer depuis ce dépôt. Écrit ici pour le chantier `retro` qui suit.
+⚠️ **Ne rien jouer de ce qui suit tant que la porte du haut de § C2 n'est pas
+franchie** : C7 d'abord (l'invité reconstruit en B4), puis le filet de
+`nivuus/retro` prouvé vivant *sur la console*. Ce runbook suppose ces deux
+marches faites. À ne PAS jouer depuis ce dépôt : écrit pour le chantier `retro`.
 
 1. **Avant tout, et une seule fois : D1 mesure la vibration sous le pad
    ACTUEL**, sur DuckStation. C'est la seule fenêtre où ce maillon est
@@ -728,6 +769,12 @@ dans un journal de l'invité, relever `C:\nivuus\state\PROVISION.done` et le
 comparer à `payload.PROVISION_VERSION`.* Une étape qui n'a jamais tourné ne
 laisse aucune trace, et cette absence se lit exactement comme un échec.
 
+**C7 GARDE C2, et c'est sa conséquence la plus lourde.** Arbitré le 2026-09-05 :
+la bascule du type de manette ne se joue pas sur une console qui n'est pas celle
+du dépôt. Le filet de `nivuus/retro` qui doit rattraper cette bascule est livré
+sur `main` — donc dans le dépôt, donc pas sur cette machine. Tant que C7 tient,
+C2 attend. Voir la porte en tête de C2.
+
 ---
 
 ## La chaîne winget / Xbox — ce qui est mesuré, et ce qui ne l'est pas
@@ -757,14 +804,22 @@ l'épinglage `WINGET_VERSION = "v1.29.290"` du dépôt.
 
 ### Trois choses que la mesure a corrigées, et que la lecture seule ne donnait pas
 
-1. **`XblGameSave` ne reste pas en `Automatic`.** `Set-Service` **ne lève pas**
-   et le démarrage repart à `Manual` (`HKLM\SYSTEM\CurrentControlSet\Services\XblGameSave\Start`
-   = 3). Observé sur trois passages : deux échecs, une réussite. Le service a un
-   déclencheur `NETWORK EVENT / RPC INTERFACE EVENT` et Windows le regère. Le
-   geste est donc **rejoué à chaque ouverture de session**, et le journal dit
-   désormais ce qui a *pris*, relu service par service, au lieu de réciter la
-   liste voulue. Sans cette relecture, un réglage qui ne prend pas et un réglage
-   qui prend écrivaient **exactement la même ligne**.
+1. **`XblGameSave` n'est plus forcé du tout — il est démarré et laissé tel
+   quel, comme `ClipSVC`.** `Set-Service` **ne lève pas** et le démarrage repart
+   à `Manual` (`HKLM\SYSTEM\CurrentControlSet\Services\XblGameSave\Start` = 3),
+   observé sur trois passages sur quatre ; `sc qtriggerinfo XblGameSave` montre
+   un déclencheur `NETWORK EVENT / RPC INTERFACE EVENT`, donc **Windows regère
+   ce service et c'est le système qui fonctionne comme prévu, pas une panne**.
+   Le forcer revenait à se battre contre le système d'exploitation pour obtenir
+   un témoin **définitivement** `chaine-incomplete` — et un témoin toujours
+   rouge cesse d'être lu, si bien que le prochain **vrai** défaut de la chaîne
+   passerait inaperçu. `Manual` + déclencheur est donc inscrit dans le code
+   comme l'état **attendu** ; ce qui est vérifié, c'est qu'ils soient `Running`.
+   Mesuré après le changement, `XblGameSave` remis de force en `Manual` avant :
+   témoin `status=ok`, `Start=3`, `Status=Running`. Les quatre services qui,
+   eux, **tiennent** `Automatic` sont toujours réglés **et relus** — sans cette
+   relecture, un réglage qui ne prend pas et un réglage qui prend écrivaient
+   exactement la même ligne, la liste *voulue* : le patron même du faux oracle.
 2. **`ClipSVC` n'a pas rendu « Access is denied ».** `CLAUDE.md` l'affirmait ;
    la mesure ne le confirme pas — il démarre, il n'est pas reconfiguré, et
    aucune erreur n'a été vue. Le traitement à part reste juste (c'est un service
@@ -800,8 +855,13 @@ l'épinglage `WINGET_VERSION = "v1.29.290"` du dépôt.
 
 - **Aucun jeu GDK n'a été lancé.** La chaîne est complète et ses services
   tournent ; que Forza Horizon 6 démarre n'a pas été revérifié le 2026-09-04.
-- **Les deux tâches `AtLogOn` de l'étape 30** (`desktop-chrome`,
-  `steam-hold-notice`) ne sont **pas enregistrées** sur l'invité — l'étape 30
-  n'y a jamais tourné dans sa version actuelle (voir C7). Corollaire mesuré :
-  `StuckRects3\Settings[8]` vaut `0x02`, le bit d'auto-masquage de la barre des
-  tâches n'est **pas** posé.
+- **Les deux tâches `AtLogOn` de l'étape 30 ont été posées à la main le
+  2026-09-05**, l'étape 30 n'ayant jamais tourné sur cette machine (C7).
+  `desktop-chrome` (`PT5M`) et `steam-hold-notice` (`PT0S`) sont `Ready`, et
+  leur enregistrement est au passage une **deuxième confirmation indépendante**
+  du correctif `ExecutionTimeLimit`. Effet vérifié après un
+  `schtasks /run desktop-chrome` : `StuckRects3\Settings[8]` passe de `0x02` à
+  `0x03` (bit d'auto-masquage posé), `HideIcons = 1`, `Colors\Background`
+  épinglé à `0 0 0`, Explorer redémarré proprement (un seul processus).
+  ⚠️ Elles ne survivront pas à une reconstruction de C: **par ce geste-là** :
+  c'est l'étape 30 qui les repose, et C7 reste la vraie réponse.
