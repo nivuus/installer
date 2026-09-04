@@ -165,6 +165,7 @@ def domain_xml(*, gpu_functions: list[dict], nvme: dict, plan: dict,
                nvram_path: str = NVRAM_PATH,
                shares: tuple = SHARES,
                uuid: str | None = None,
+               smbios: dict | None = None,
                windows_iso: str | None = None,
                unattend_iso: str | None = None) -> str:
     """Render the production domain XML.
@@ -184,7 +185,7 @@ def domain_xml(*, gpu_functions: list[dict], nvme: dict, plan: dict,
     return env.get_template("domain.xml.j2").render(
         name=name, memory_kib=memory_kib, plan=plan, mac=mac, bridge=bridge,
         nvram_path=nvram_path, gpu_functions=gpu_functions, nvme=nvme,
-        shares=shares, uuid=uuid,
+        shares=shares, uuid=uuid, smbios=smbios or {},
         install_media=install_media(windows_iso, unattend_iso),
     )
 
@@ -312,6 +313,7 @@ def build_domain_xml(*, announce: bool = False,
         nvme=nvme,
         plan=vcpu_plan(pool),
         uuid=existing_uuid(),
+        smbios=hardware.host_smbios(),
         windows_iso=windows_iso,
         unattend_iso=unattend_iso,
     )

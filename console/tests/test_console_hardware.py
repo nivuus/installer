@@ -455,6 +455,45 @@ try:
 except hardware.HardwareError:
     pass
 
+# --------------------------------------------------------------------------- #
+# host_smbios: lecture DMI                                                    #
+# --------------------------------------------------------------------------- #
+# On sert un faux /sys/class/dmi/id plutot que celui de la machine : le test
+# doit valider la mise en forme, pas la carte mere du builder.
+import tempfile  # noqa: E402
+
+with tempfile.TemporaryDirectory() as _dmi:
+    _d = pathlib.Path(_dmi)
+    (_d / "bios_vendor").write_text("American Megatrends Inc.\n")
+    (_d / "bios_version").write_text("2404\n")
+    (_d / "sys_vendor").write_text("ASUS\n")
+    (_d / "board_name").write_text("ROG STRIX B660-G GAMING WIFI\n")
+    # Present mais vide : doit disparaitre, pas rendre une entree vide.
+    (_d / "board_version").write_text("\n")
+    # chassis_* absent en entier : la table entiere doit sauter.
+    smb = hardware.host_smbios(root=str(_d))
+
+    check("table bios", smb["bios"],
+          {"vendor": "American Megatrends Inc.", "version": "2404"})
+    check("table system", smb["system"], {"manufacturer": "ASUS"})
+    check("table baseBoard", smb["baseBoard"],
+          {"product": "ROG STRIX B660-G GAMING WIFI"})
+    check("un champ vide ne rend pas d'entree",
+          "version" in smb.get("baseBoard", {}), False)
+    check("une table sans aucun champ lisible saute",
+          "chassis" in smb, False)
+
+# Un repertoire DMI inexistant rend {} : le template n'emet alors aucun
+# <sysinfo>, et le guest garde le SMBIOS de QEMU au lieu d'en annoncer un
+# tronque.
+check("pas de DMI du tout rend un dict vide",
+      hardware.host_smbios(root="/nonexistent/dmi"), {})
+
+# La lecture ne doit pas laisser DMI_ROOT deplace derriere elle.
+_avant = hardware.DMI_ROOT
+hardware.host_smbios(root="/nonexistent/dmi")
+check("DMI_ROOT restaure apres lecture", hardware.DMI_ROOT, _avant)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

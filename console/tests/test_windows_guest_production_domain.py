@@ -145,6 +145,49 @@ check("locked", root.find("memoryBacking/locked") is not None, True)
 check("shared access", root.find("memoryBacking/access").get("mode"), "shared")
 
 check("emulated video present", root.find("devices/video/model").get("type"), "vga")
+
+# --------------------------------------------------------------------------- #
+# SMBIOS: le guest doit decrire la machine hote, pas l'emulateur              #
+# --------------------------------------------------------------------------- #
+# Sans <sysinfo>, l'invite annonce Manufacturer=QEMU, Model="Standard PC (Q35
+# + ICH9, 2009)" et un BIOS "Debian distribution of EDK II" / "BOCHS".
+check("pas de sysinfo quand smbios est vide", root.find("sysinfo"), None)
+check("pas de mode smbios quand smbios est vide", root.find("os/smbios"), None)
+
+SMBIOS = {
+    "bios": {"vendor": "American Megatrends Inc.", "version": "2404",
+             "date": "04/04/2023"},
+    "system": {"manufacturer": "ASUS", "product": "System Product Name"},
+    "baseBoard": {"manufacturer": "ASUSTeK COMPUTER INC.",
+                  "product": "ROG STRIX B660-G GAMING WIFI"},
+    "chassis": {"manufacturer": "Default string"},
+}
+smb_root = ET.fromstring(
+    domain.domain_xml(gpu_functions=GPU, nvme=NVME, plan=plan, smbios=SMBIOS)
+)
+check("sysinfo de type smbios", smb_root.find("sysinfo").get("type"), "smbios")
+check("os/smbios en mode sysinfo", smb_root.find("os/smbios").get("mode"),
+      "sysinfo")
+check("vendeur BIOS de l'hote",
+      smb_root.findtext("sysinfo/bios/entry[@name='vendor']"),
+      "American Megatrends Inc.")
+check("carte mere de l'hote",
+      smb_root.findtext("sysinfo/baseBoard/entry[@name='product']"),
+      "ROG STRIX B660-G GAMING WIFI")
+check("constructeur systeme de l'hote",
+      smb_root.findtext("sysinfo/system/entry[@name='manufacturer']"), "ASUS")
+
+# libvirt REFUSE une entree <system> uuid differente de l'uuid du domaine, et
+# l'omettre y retombe deja. En emettre une ne peut que casser le define.
+check("aucune entree uuid dans system",
+      smb_root.find("sysinfo/system/entry[@name='uuid']"), None)
+
+# Un hote sans DMI lisible ne doit pas produire un <sysinfo> vide, qui ferait
+# annoncer au guest un SMBIOS tronque au lieu de celui de QEMU.
+empty_root = ET.fromstring(
+    domain.domain_xml(gpu_functions=GPU, nvme=NVME, plan=plan, smbios={})
+)
+check("smbios vide ne rend aucun sysinfo", empty_root.find("sysinfo"), None)
 check("vnc listens locally", root.find("devices/graphics").get("listen"), "127.0.0.1")
 
 # Le partage unique « Data » exposait /media/data EN ENTIER : quatre partages

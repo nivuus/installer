@@ -679,3 +679,91 @@ def isolation_plan(cpu: dict) -> dict:
         isolated = []
     ranges = cpu_ranges(isolated)
     return {"isolcpus": ranges, "nohz_full": ranges}
+
+
+# --------------------------------------------------------------------------- #
+# Host SMBIOS (DMI)                                                           #
+# --------------------------------------------------------------------------- #
+# Which /sys/class/dmi/id file feeds which libvirt <sysinfo> entry. The libvirt
+# entry names are NOT the sysfs ones (`sys_vendor` -> `manufacturer`), so the
+# mapping has to be spelt out rather than derived.
+#
+# `product_uuid` is deliberately absent: libvirt rejects a <system> uuid entry
+# that differs from the domain's own uuid, and omitting it already makes QEMU
+# fall back to that same uuid. Adding it can only break the define.
+_DMI_TABLES: dict[str, list[tuple[str, str]]] = {
+    "bios": [
+        ("vendor", "bios_vendor"),
+        ("version", "bios_version"),
+        ("date", "bios_date"),
+    ],
+    "system": [
+        ("manufacturer", "sys_vendor"),
+        ("product", "product_name"),
+        ("version", "product_version"),
+        ("serial", "product_serial"),
+        ("sku", "product_sku"),
+        ("family", "product_family"),
+    ],
+    "baseBoard": [
+        ("manufacturer", "board_vendor"),
+        ("product", "board_name"),
+        ("version", "board_version"),
+        ("serial", "board_serial"),
+        ("asset", "board_asset_tag"),
+    ],
+    "chassis": [
+        ("manufacturer", "chassis_vendor"),
+        ("version", "chassis_version"),
+        ("serial", "chassis_serial"),
+        ("asset", "chassis_asset_tag"),
+    ],
+}
+
+DMI_ROOT = "/sys/class/dmi/id"
+
+
+def _read_dmi(path: str) -> str:
+    """One DMI field, or "" if absent or unreadable.
+
+    Several of these files are mode 0400 (`board_serial`, `product_serial`):
+    unreadable as a normal user, readable as root. Returning "" rather than
+    raising is what lets the caller degrade to a partial table instead of no
+    table at all.
+    """
+    try:
+        with open(os.path.join(DMI_ROOT, path)) as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def host_smbios(root: Optional[str] = None) -> dict[str, dict[str, str]]:
+    """The host's own SMBIOS tables, shaped for libvirt's <sysinfo>.
+
+    Without this the guest advertises `QEMU` / `Standard PC (Q35 + ICH9,
+    2009)` and a BIOS vendor of `Debian distribution of EDK II` - accurate,
+    but it means the VM describes the emulator instead of the machine it
+    actually runs on.
+
+    Empty and unreadable fields are dropped, and a table with nothing left in
+    it is dropped whole, so a host that exposes no DMI at all yields {} and
+    the template then renders no <sysinfo> element rather than an empty one.
+    """
+    global DMI_ROOT
+    previous = DMI_ROOT
+    if root is not None:
+        DMI_ROOT = root
+    try:
+        tables: dict[str, dict[str, str]] = {}
+        for table, fields in _DMI_TABLES.items():
+            entries = {}
+            for entry_name, dmi_file in fields:
+                value = _read_dmi(dmi_file)
+                if value:
+                    entries[entry_name] = value
+            if entries:
+                tables[table] = entries
+        return tables
+    finally:
+        DMI_ROOT = previous
