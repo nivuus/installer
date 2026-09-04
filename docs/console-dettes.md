@@ -194,6 +194,145 @@ session Moonlight ne s'ouvre — `403 Permission denied` au `/launch`, le client
 appairé portant `perm=0x3000000` là où les clients fonctionnels portent
 `0x7131f00`. Toute mesure de C2 au flux passe d'abord par ce `perm`.
 
+### Le dossier de la bascule — mesuré le 2026-09-04, sur l'invité de production
+
+Ce qui suit ne décide rien : c'est ce qu'il fallait mesurer **avant** de
+décider. La bascule n'a **pas** été jouée. Elle appartient au propriétaire,
+parce qu'elle se joue à deux dépôts.
+
+#### 1. La demi-marche déjà franchie, et ce qu'elle a déjà réglé
+
+Le 2026-08-30, `sunshine.conf.j2` a reçu `gamepad = x360` — **épingler**, pas
+basculer. Vérifié le 2026-09-04 dans le journal de l'invité :
+
+    config: [gamepad] -- [x360]
+    Info: config: 'gamepad' = x360
+    [2026-09-02 19:28:44] Info: Gamepad 0 will be Xbox 360 controller (manual selection)
+
+`(manual selection)` a remplacé `(default)`. Ce que ça règle : le type ne
+change plus tout seul (le 2026-08-30, il avait basculé seul en DualShock 4
+« auto-selected by motion sensor presence » entre deux sessions). Ce que ça ne
+règle pas : c'est toujours un X360, donc toujours sans capteur.
+
+#### 2. La clé, ses valeurs, et la règle de l'en-tête — VÉRIFIÉES SUR LE BINAIRE
+
+L'en-tête de `sunshine.conf.j2` exige qu'une clé soit vue présente dans
+l'Apollo **installé**. Elle l'est, trois fois :
+
+| Preuve | Ce qu'elle dit |
+|---|---|
+| `sunshine.exe` FileVersion | **0.4.6** |
+| `assets\web\assets\config-*.js` | l'`<option>` `gamepad` n'offre, **sous `windows:`**, que `auto`, `ds4`, `x360` |
+| `sunshine.log` | Apollo a **accepté et journalisé** `'gamepad' = x360` |
+
+⚠️ **Le piège que le fichier de langue tend, et qu'il faut nommer** :
+`locale\en.json` porte aussi `gamepad_ds5` (DualSense), `gamepad_switch` et
+`gamepad_xone`. **Ce sont des valeurs Linux.** Le composant Vue ne les rend que
+dans son créneau `linux:`, et une recherche de la chaîne `xone` dans
+`sunshine.exe` rend **zéro** occurrence. Sur Windows, le choix est
+binaire : **x360 ou ds4**. Recopier `ds5` d'une lecture du fichier de langue
+donnerait une valeur ignorée en silence — exactement ce que la règle interdit.
+
+#### 3. Ce que la bascule rapporterait — Apollo le dit lui-même
+
+Les chaînes de `sunshine.exe` contiennent ce couple, et il est décisif :
+
+    Gamepad %d has motion sensors, but they are not usable when emulating an Xbox 360 controller
+    Gamepad %d has a touchpad, but it is not usable when emulating an Xbox 360 controller
+
+Et le journal de la console, `sunshine.log.backup`, **2026-09-01 12:27:44 puis
+12:28:30**, deux sessions :
+
+    Info:    Gamepad 0 will be Xbox 360 controller (manual selection)
+    Warning: Gamepad 0 has motion sensors, but they are not usable when
+             emulating an Xbox 360 controller
+
+**La manette du salon envoie déjà ses capteurs, et c'est l'épinglage x360 qui
+les jette.** Le plan D4 de `nivuus/retro` (tâche 5) écrit que les trois
+maillons du mouvement — (a) le client envoie, (b) Apollo reçoit, (c) le rapport
+ViGEm porte les champs — sont **tous non mesurés**. Deux le sont désormais :
+(a) et (b) sont établis par cet avertissement, qu'Apollo n'émet qu'après avoir
+lu la présence des capteurs dans ce que le client lui a annoncé.
+
+**Ce qui reste non mesuré, et qui ne l'est pas ici :** (c). Aucune session
+DualShock n'a jamais tourné sur cette console.
+
+**Et une deuxième chose que la bascule ne rapporterait PAS :** il n'y a **aucun**
+avertissement `has a touchpad, but it is not usable` dans le journal. Le pad du
+salon annonce des capteurs de mouvement, **pas** de pavé tactile. Le titre de
+cette dette promet « ni gyroscope, ni tactile » : seul le premier est
+récupérable avec ce pad-là.
+
+#### 4. Ce que la bascule coûterait — et c'est ce qui appartient à `nivuus/retro`
+
+`gamepad = ds4` fait créer par ViGEmBus un périphérique `VID_054C&PID_05C4` au
+lieu de `VID_045E&PID_028E`. Conséquences, dans l'ordre de gravité :
+
+1. **Un DualShock 4 ViGEm n'est pas énuméré par XInput.** Les émulateurs de
+   cette console sont configurés en XInput, et l'index XInput **est** le numéro
+   de port — c'est ce qui rend l'ordre des quatre manettes déterministe. On
+   perd cela.
+2. **RPCS3 meurt en silence.** Son `Default.yml` porte `Handler: XInput` +
+   `Device: "XInput Pad #1"`, **posé à la main sur la machine**, donc dans
+   aucun fichier versionné et sous aucune garde (`nivuus/retro`, dette D7).
+   C'est le premier à casser, et rien ne le dira.
+3. **DuckStation survit, probablement.** Ses vingt-sept liaisons ne portent
+   qu'un **index** (`SDL-0`), jamais un GUID — relevé sur le binaire le
+   2026-08-29, et resté « à confirmer ».
+
+#### 5. L'état du filet, côté `nivuus/retro` — VÉRIFIÉ le 2026-09-04
+
+Le plan D4 (`docs/superpowers/plans/2026-08-29-d4-mouvement-et-type-de-pad.md`)
+impose : « les tâches 1 à 4 sont livrées **avant** que la bascule ait lieu. Un
+filet posé après la casse ne sert qu'à la constater. » Elles **le sont**, sur
+`main` de `nivuus/retro` :
+
+| Tâche | Preuve dans le dépôt |
+|---|---|
+| 1 — garde anti-GUID | `tests/test_donnees.py` |
+| 2 — `[input] pad_releve` | `retro/profiles.py` (`PADS_CONNUS`), et `duckstation.toml` + `rpcs3.toml` déclarent `pad_releve = "x360"` |
+| 3 — lire le témoin | `retro/launcher.py` : `TEMOIN_PADS`, `lire_pads` ; `retro/status.py` |
+| 4 — l'écrire | `retro/data/launcher/retro-launch.cs` : `joyGetNumDevs` / `JOYCAPSW` → `pads.txt` |
+
+**Le filet est donc dans le dépôt. Il n'est pas prouvé sur la console** — le
+lanceur installé sur l'invité n'a pas été relevé, et D5 a déjà montré une fois
+que la console faisait tourner un `retro` périmé.
+
+#### 6. SI la bascule est décidée — ce que `nivuus/retro` doit faire, et dans quel ordre
+
+À ne PAS jouer depuis ce dépôt. Écrit ici pour le chantier `retro` qui suit.
+
+1. **Avant tout, et une seule fois : D1 mesure la vibration sous le pad
+   ACTUEL**, sur DuckStation. C'est la seule fenêtre où ce maillon est
+   mesurable sans deux inconnues (plan D4, « L'ordre avec D1 », point 1).
+2. **Prouver le filet sur la console, pas seulement dans le dépôt** : que le
+   lanceur installé sur l'invité soit bien celui qui écrit `pads.txt`
+   (`retro identite` + `_launcher\pads.txt` présent après un lancement).
+   ⚠️ WinRM ouvre une **session 0**, où aucune manette n'existe : toute
+   vérification passe par `schtasks /it`, sinon elle rapportera zéro manette
+   sur une console dont le pad est sain.
+3. **Sauver RPCS3 AVANT la bascule** : son `Default.yml` (`Handler: XInput`,
+   `Device: "XInput Pad #1"`) doit entrer dans un fichier versionné, sans quoi
+   il casse sans laisser de trace. Le plan D4 le note déjà : sous SDL il
+   deviendra `Handler: SDL`, ce qui change aussi `Device:` — et les valeurs
+   d'`Axis` du bloc mouvement ne sont **pas relevées** et ne se devinent pas.
+4. **Puis, seulement, dire à ce dépôt-ci de poser `gamepad = ds4`** dans
+   `console/guest/templates/sunshine.conf.j2` — une ligne, plus son test
+   (`test_windows_guest_apollo.py` épingle aujourd'hui la valeur `x360`, il
+   faut le faire bouger dans le même geste).
+5. **Relever, immédiatement après**, dans `C:\Windows\Temp\sunshine.log` (et
+   **pas** `D:\state\apollo\sunshine.log`, qui fait 0 octet) :
+   - `Gamepad 0 will be DualShock 4 controller (manual selection)` ;
+   - l'**absence** du `has motion sensors, but they are not usable` ;
+   - et si un `is emulating a DualShock 4 controller, but the client gamepad
+     doesn't have motion sensors active` apparaît, la bascule n'a rien rapporté
+     et il faut reculer.
+6. **Puis les tâches 6 et 7 du plan D4** (compter les pads, confirmer
+   l'exception DuckStation avec Crash Team Racing).
+
+**Reculer tient en une ligne** : `gamepad = x360`. Ce qui ne recule pas tout
+seul, ce sont les fichiers d'entrée que la bascule aura fait réécrire.
+
 ---
 
 ## C3 — Le fond d'écran de la console est hors charte — RÉGLÉ le 2026-08-28
@@ -340,7 +479,48 @@ cohérent — ce sont les mêmes, à la version du dépôt près. La divergence 
 donc temporaire et se referme toute seule ; elle n'a pas à être « corrigée » à
 la main dans l'autre sens.
 
-### ⚠️ Le fond d'écran n'a PAS été déployé, et il ne peut pas l'être à chaud
+### ⚠️ ~~Le fond d'écran n'a PAS été déployé~~ — LEVÉ le 2026-09-04
+
+**Cet avertissement est périmé sur ses deux moitiés.** Il est gardé pour qui
+lirait une version antérieure de cette page, et parce que la cause de sa
+levée est instructive.
+
+1. **Le verrou n'existe plus, parce que le script qui le tenait n'existe
+   plus.** `steam-shell.ps1` faisait `Image::FromFile` et gardait le handle
+   ouvert toute la session ; il a été **supprimé** le 2026-08-30 quand
+   `explorer.exe` est redevenu le shell. Ce n'est plus une fenêtre WinForms qui
+   peint le fond mais **Windows lui-même**, depuis le registre
+   (`desktop-chrome.ps1` pose `Wallpaper` + `SystemParametersInfo`) : Windows
+   travaille sur sa copie transcodée, il ne verrouille pas le PNG source.
+2. **Le fond est déployé.** Mesuré le 2026-09-04 sur l'invité :
+   `C:\nivuus\wallpaper.png` fait 56 474 octets, SHA256
+   `533f1d75bc0c591c84e87707abdaa8aa9d1ed11d524e55a85a7b68eb133fcb74` —
+   **identique à l'octet** au `console/guest/assets/wallpaper.png` du dépôt.
+   L'ancien est conservé à côté sous `wallpaper.png.avant-20260829`
+   (43 374 octets), ce qui date l'échange. `HKCU\Control Panel\Desktop\Wallpaper`
+   pointe bien dessus.
+
+**C3 est donc close des deux côtés** : dans le dépôt et sur la machine.
+
+**Ce que le changement de shell a déplacé, et qui n'était pas dans C3 :** les
+deux `#000` de la charte ne venaient plus du même endroit. La fenêtre de
+`steam-shell.ps1` posait son `BackColor` à `#000` ; Windows, lui, complète une
+image en style **6 (Ajuster)** avec la **couleur de fond du bureau**,
+`HKCU\Control Panel\Colors\Background`, que rien ne posait. Relevée le
+2026-09-04 : `0 0 0` — la charte tenait donc **par chance**, sur le défaut de
+Windows. `desktop-chrome.ps1` la pose désormais explicitement. Le bandeau de
+64 px, lui, survit tel quel dans `steam-hold-notice.ps1` (`$form.Height = 64`,
+ancré à `$screen.Bottom - 64`, fond `FromArgb(0,0,0)`) : le dixième inférieur
+de l'image doit toujours rester vide.
+
+⚠️ **Pour `nivuus/design`** : le § 8 de `docs/brand.md` décrit encore un fond
+« peint par `steam-shell.ps1` dans une fenêtre plein écran qu'il tient
+lui-même ». Ce mécanisme est mort. Le fond est aujourd'hui un **fond d'écran
+Windows ordinaire**, posé par le registre ; les deux `#000` et le bandeau de
+64 px, eux, sont intacts.
+
+### Ce que disait l'avertissement, et pourquoi il était juste à sa date
+
 
 Le remplacement de `wallpaper.png` a **échoué**, mesuré le 2026-08-29
 (`MethodInvocationException`). La cause est dans `steam-shell.ps1` lui-même :
@@ -495,3 +675,133 @@ tienne **APRÈS** le provisionnement.
 **Ce que ça coûte aujourd'hui :** la bibliothèque de jeux disparaît sans
 préavis et sans message. Vu du canapé, les jeux ne se lancent plus ; il n'y a
 rien à lire, et le seul geste qui répare demande une console PowerShell.
+
+---
+
+## C7 — L'invité tourne trois versions de provisionnement en retard, et rien ne le crie
+
+**Constaté le 2026-09-04, sur l'invité de production.**
+`C:\nivuus\state\PROVISION.done` porte :
+
+    provision_version=B1
+    completed=2026-08-26T18:39:36.5576588+02:00
+    computer=NIVUUS-WIN
+    agent_session=2
+
+Le dépôt était alors en **B3**, et il est en **B4** depuis ce jour. Le
+répertoire des témoins d'étape confirme la lecture : `C:\nivuus\state` ne
+contient que les douze `*.ps1.done` du 2026-08-26, de `00-bootstrap` à
+`99-marker`. **Ni `32-retro`, ni `33-winget`, ni `34-gaming-services` n'y
+figurent** — ces étapes n'ont jamais tourné sur cette machine.
+
+**Ce que ça veut dire, et il faut le lire deux fois :** tout ce qui a été
+commité dans ce dépôt depuis le 2026-08-26 — le masquage du curseur (C4), le
+type de manette épinglé (C2), la chaîne winget/Xbox, le shell `explorer.exe` —
+existe sur la console **uniquement parce que quelqu'un l'y a posé à la main**.
+Rien ne l'y a porté. Et l'inverse est vrai aussi : la console porte des choses
+qu'aucun provisionnement ne reposerait.
+
+**Le piège que ça arme, et qui est le vrai objet de cette dette.**
+`guest-ready-watch.py` compare le `provision_version` du marqueur à
+`payload.PROVISION_VERSION` pour décider si l'invité est à jour. Tant que la
+constante ne bouge pas quand la séquence bouge, **un invité provisionné avant
+le changement se déclare à jour**. C'est exactement ce qui a failli arriver ici :
+la chaîne winget ajoutait deux étapes, changeait le shell et trois assets, et
+laissait `PROVISION_VERSION = "B3"`. Une console qui n'a jamais vu winget
+passait pour une console qui l'avait.
+
+**Fait le 2026-09-04 :** `PROVISION_VERSION` est passée à **B4**, dans les deux
+langues du dépôt (`payload.py` et la chaîne écrite par `99-marker.ps1`), et le
+test qui l'épingle porte désormais la mesure ci-dessus en commentaire, pour que
+le prochain lecteur sache **pourquoi** il ne faut pas oublier de la bouger.
+
+**Ce qui reste dû, et qui n'est pas dans ce dépôt :** rien ne signale à
+l'utilisateur qu'une console est en retard de provisionnement. Le comparatif
+existe (`guest-ready-watch.py`), mais il ne tourne qu'après un `activate` ; sur
+une console déjà installée, personne ne lit jamais ce marqueur. Le geste qui
+rattraperait C7 est une **reconstruction complète de l'invité**, ce qui n'est
+pas un geste anodin — et c'est précisément pourquoi cette dette est écrite ici
+plutôt que réparée en passant.
+
+**La règle, en attendant :** *avant de conclure quoi que ce soit d'une absence
+dans un journal de l'invité, relever `C:\nivuus\state\PROVISION.done` et le
+comparer à `payload.PROVISION_VERSION`.* Une étape qui n'a jamais tourné ne
+laisse aucune trace, et cette absence se lit exactement comme un échec.
+
+---
+
+## La chaîne winget / Xbox — ce qui est mesuré, et ce qui ne l'est pas
+
+Ajoutée le 2026-08-30, terminée et commitée le 2026-09-04. Ce n'est pas une
+dette : c'est le relevé de ce que la chaîne fait vraiment, pour que la prochaine
+panne ne se rediagnostique pas de zéro.
+
+**Mesuré sur l'invité de production le 2026-09-04**, la tâche
+`gaming-services-refresh` lancée par `schtasks /run` (donc en session 1) :
+
+    services Xbox en Automatic et demarres (relu) : wlidsvc, XblAuthManager,
+        XboxNetApiSvc, XblGameSave, LicenseManager, ClipSVC
+    Services de jeu : deja a jour en 38.116.6003.0
+    Fournisseur d identite Xbox : deja a jour en 12.130.16001.0
+    Application Xbox : deja a jour en 2608.1001.17.0
+    Microsoft Store : deja a jour en 22607.1401.8.0
+    chaine Xbox complete (Services de jeu 38.116.6003.0)
+
+puis, immédiatement rejouée :
+
+    services Xbox en Automatic et demarres (relu) : ...
+    Store non interroge : dernier controle il y a 0,0 h (seuil 20 h), version 38.116.6003.0
+
+Les quatre paquets du Store sont présents, winget est en **1.29.290.0** —
+l'épinglage `WINGET_VERSION = "v1.29.290"` du dépôt.
+
+### Trois choses que la mesure a corrigées, et que la lecture seule ne donnait pas
+
+1. **`XblGameSave` ne reste pas en `Automatic`.** `Set-Service` **ne lève pas**
+   et le démarrage repart à `Manual` (`HKLM\SYSTEM\CurrentControlSet\Services\XblGameSave\Start`
+   = 3). Observé sur trois passages : deux échecs, une réussite. Le service a un
+   déclencheur `NETWORK EVENT / RPC INTERFACE EVENT` et Windows le regère. Le
+   geste est donc **rejoué à chaque ouverture de session**, et le journal dit
+   désormais ce qui a *pris*, relu service par service, au lieu de réciter la
+   liste voulue. Sans cette relecture, un réglage qui ne prend pas et un réglage
+   qui prend écrivaient **exactement la même ligne**.
+2. **`ClipSVC` n'a pas rendu « Access is denied ».** `CLAUDE.md` l'affirmait ;
+   la mesure ne le confirme pas — il démarre, il n'est pas reconfiguré, et
+   aucune erreur n'a été vue. Le traitement à part reste juste (c'est un service
+   protégé, et il n'a pas besoin d'être en `Automatic`), mais **la raison écrite
+   n'était pas la raison mesurée**.
+3. **L'étranglement de 20 h ne couvre plus que le Store.** Il couvrait aussi les
+   services, ce qui étranglait la moitié qui ne coûte rien — et, pire,
+   l'horodatage n'étant écrit qu'en cas de succès **complet**, un service qui
+   refuse de tenir empêchait de l'écrire à jamais : les quatre appels winget
+   repartaient alors à chaque ouverture de session et tous les jours,
+   indéfiniment. Les deux moitiés sont séparées.
+
+### Deux pièges d'exécution payés le 2026-09-04, à ne pas repayer
+
+- **`ExecutionTimeLimit` est une chaîne, pas un `TimeSpan`.**
+  `(New-ScheduledTaskSettingsSet).ExecutionTimeLimit` est un `System.String`
+  valant `PT72H` ; c'est le **paramètre du cmdlet** qui convertit un `TimeSpan`
+  en durée ISO-8601, jamais l'affectation à la propriété. Y affecter un
+  `TimeSpan` dépose `00:05:00`, et `Register-ScheduledTask` refuse : *« The task
+  XML contains a value which is incorrectly formatted or out of range.
+  (37,36):ExecutionTimeLimit:00:05:00 »*. Sous `$ErrorActionPreference = 'Stop'`,
+  l'étape 30 mourait là — et avec elle **le provisionnement entier**.
+- **`$ErrorActionPreference` est à portée DYNAMIQUE, donc un asset dot-sourcé
+  hérite du `Stop` de l'étape.** `gaming-services.ps1` promet « NE LÈVE PAS » ;
+  cette promesse était fausse du seul fait d'être appelée depuis l'étape 34, où
+  `& $winget ... 2>&1` rendait terminante la moindre ligne d'erreur native. Et
+  la tâche planifiée, elle, tourne sous le `Continue` par défaut : **les deux
+  chemins ne se comportaient pas pareil en panne**, alors que l'en-tête du
+  fichier affirme le contraire. Le mode est rétabli **dans la fonction**, jamais
+  au niveau du fichier (qui désarmerait le `Stop` du reste de l'étape 34).
+
+### Ce qui n'est PAS mesuré
+
+- **Aucun jeu GDK n'a été lancé.** La chaîne est complète et ses services
+  tournent ; que Forza Horizon 6 démarre n'a pas été revérifié le 2026-09-04.
+- **Les deux tâches `AtLogOn` de l'étape 30** (`desktop-chrome`,
+  `steam-hold-notice`) ne sont **pas enregistrées** sur l'invité — l'étape 30
+  n'y a jamais tourné dans sa version actuelle (voir C7). Corollaire mesuré :
+  `StuckRects3\Settings[8]` vaut `0x02`, le bit d'auto-masquage de la barre des
+  tâches n'est **pas** posé.
