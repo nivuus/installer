@@ -82,7 +82,19 @@ what did not finish:
 2. **payload** — `guest/fetch_payload.py` fetches the offline driver/tool
    binaries and copies `agent.exe` out of the package itself (see
    "`agent.exe` ships inside this package" below) — the one binary in the
-   offline payload that is never downloaded.
+   offline payload that is never downloaded. It also stages **winget** (App
+   Installer, pinned to `WINGET_VERSION`, with its offline licence and the
+   three x64 frameworks mined out of the vendor's dependency zip): IoT
+   Enterprise LTSC ships no Microsoft Store, and `provision/34-gaming-services.ps1`
+   needs winget's `msstore` source to install **Gaming Services** — the Store
+   package (`9MWPM2CQNLHN`) that GDK titles, Steam ones included, refuse to
+   launch without. Gaming Services itself is the second thing the guest
+   fetches online (after the retro emulators): the Store publishes no offline
+   file, and a version frozen at build time is exactly the "Ensure
+   GamingServices is up to date" failure, months later. A scheduled task
+   (`gaming-services-refresh`, at logon +2 min and daily at 04:00, throttled
+   to one real check per 20 h) replays the same command, because nothing else
+   on a Store-less SKU will ever update that package.
 3. **build** — `guest/build.py` renders the unattended ISO (answer file +
    payload), fingerprinted (medium identity, payload tree, answers, package
    code) so any change — not just a date — forces a rebuild.

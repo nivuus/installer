@@ -11,6 +11,7 @@ import hashlib
 import pathlib
 import sys
 import tempfile
+import zipfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "console" / "guest"))
@@ -306,6 +307,139 @@ check("fetch_payload n annonce plus agent.exe comme jamais recuperable",
       "never fetchable" in _src, False)
 check("... et dit desormais d ou il vient vraiment",
       "payload/agent/README.md" in _src and "package itself" in _src, True)
+
+
+# --- winget : la part de « Services de jeu » que la construction PEUT figer.
+#
+# Le paquet du Store lui-meme se telecharge sur l invite (etape 34) parce
+# qu il n existe nulle part sous forme de fichier et que le figer serait de
+# toute facon l erreur - les jeux refusent une copie perimee. Son client, lui,
+# voyage hors ligne et epingle : c est la contrepartie, et ces controles
+# gardent qu elle est bien payee.
+_wg = {d.name: d for d in fetch_payload.plan_downloads(pathlib.Path("/tmp/x"))}
+for _name in ("winget-bundle", "winget-license", "winget-deps"):
+    check(f"{_name} est telecharge sans qu aucune option soit cochee",
+          _name in _wg, True)
+check("le bundle atterrit dans drivers/winget/",
+      _wg["winget-bundle"].dest.parent, pathlib.Path("/tmp/x/winget"))
+# Renomme en atterrissant : le nom publie porte un condensat propre a la
+# livraison, et 33-winget.ps1 doit pointer un chemin qui ne bouge pas avec
+# l epinglage.
+check("la licence atterrit sous un nom stable",
+      _wg["winget-license"].dest, pathlib.Path("/tmp/x/winget/License1.xml"))
+check("... alors que la source, elle, porte le condensat de la livraison",
+      _wg["winget-license"].url.endswith(fetch_payload.WINGET_LICENSE_NAME), True)
+# Le zip de dependances est un intermediaire de construction, comme l ISO
+# virtio : mine puis laisse dans le cache, jamais expedie a l invite.
+check("le zip de dependances reste dans le cache de construction",
+      fetch_payload.BUILD_CACHE_DIRNAME in _wg["winget-deps"].dest.parts, True)
+# Les trois URL viennent de la MEME livraison. Un bundle d une version et une
+# licence d une autre s installent tous les deux et ne vont pas ensemble.
+for _name in ("winget-bundle", "winget-license", "winget-deps"):
+    check(f"{_name} vient de la livraison epinglee",
+          f"/{fetch_payload.WINGET_VERSION}/" in _wg[_name].url, True)
+check("les trois viennent bien de winget-cli, pas d un miroir",
+      all(_wg[n].url.startswith("https://github.com/microsoft/winget-cli/releases/download/")
+          for n in ("winget-bundle", "winget-license", "winget-deps")), True)
+
+# Le dossier que les deux modules nomment : payload.py y cherche ce que
+# celui-ci y depose (meme garde que pour le retrogaming plus haut).
+check("payload.py cherche winget la ou fetch_payload le depose",
+      any(sub.split("/")[0] == fetch_payload.WINGET_DIRNAME
+          for sub, _, _ in payload.REQUIRED_BINARIES), True)
+
+# extract_winget_deps : ne prend que x64, et REFUSE de rendre la main sur un
+# zip qui ne porte pas les frameworks nommes. Un bundle pose sans eux
+# s installe sans erreur et ne depose aucun winget.exe - le silence que ce
+# refus transforme en echec de construction.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    archive = root / "deps.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("x64/Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx", "x")
+        zf.writestr("x64/Microsoft.WindowsAppRuntime.1.8_8000.616.304.0_x64.appx", "x")
+        zf.writestr("arm64/Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_arm64.appx", "x")
+        zf.writestr("x86/Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x86.appx", "x")
+        zf.writestr("x64/readme.txt", "x")
+    got = sorted(fetch_payload.extract_winget_deps(archive, root))
+    check("seuls les frameworks x64 sont extraits", got,
+          ["Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx",
+           "Microsoft.WindowsAppRuntime.1.8_8000.616.304.0_x64.appx"])
+    check("ils sont aplatis dans drivers/winget/deps/",
+          sorted(q.name for q in (root / "winget" / "deps").iterdir()), got)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    archive = root / "deps.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("x64/Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx", "x")
+    try:
+        fetch_payload.extract_winget_deps(archive, root)
+        failures.append("un zip sans Windows App Runtime a ete accepte")
+    except fetch_payload.FetchError as exc:
+        check("un zip sans le runtime nomme est refuse a la construction",
+              "WindowsAppRuntime" in str(exc), True)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    archive = root / "deps.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("arm64/Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_arm64.appx", "x")
+    try:
+        fetch_payload.extract_winget_deps(archive, root)
+        failures.append("un zip sans x64 a ete accepte")
+    except fetch_payload.FetchError as exc:
+        check("un zip sans x64 est refuse plutot que vide en silence",
+              "x64" in str(exc), True)
+
+
+# prune_stale_winget : relever l epinglage doit VRAIMENT changer ce qui part.
+#
+# Le defaut sans elle : fetch() saute le telechargement des que le fichier
+# existe, et les trois artefacts winget atterrissent sur des chemins qui NE
+# PORTENT PAS la version (le bundle a un nom fixe, la licence est renommee
+# License1.xml, le zip de dependances est un nom fixe du cache). Sur un hote de
+# construction dont le drivers/ est deja peuple, relever WINGET_VERSION ne
+# changeait donc que des URL : l ANCIEN winget repartait dans l image, en
+# silence, et le manifeste TOFU ne pouvait rien voir - meme chemin, meme
+# condensat. C est la meme forme de defaut que prune_stale_retro, et la meme
+# reponse : un temoin de version a cote des fichiers, et on jette tout des que
+# les deux ne concordent plus.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    wg = root / fetch_payload.WINGET_DIRNAME
+    (wg / fetch_payload.WINGET_DEPS_DIRNAME).mkdir(parents=True)
+    (wg / "vieux.msixbundle").write_text("ancien bundle")
+    (wg / "License1.xml").write_text("ancienne licence")
+    (wg / fetch_payload.WINGET_DEPS_DIRNAME / "vieux.appx").write_text("ancien framework")
+    cache = root / fetch_payload.BUILD_CACHE_DIRNAME
+    cache.mkdir()
+    (cache / fetch_payload.WINGET_DEPS_NAME).write_text("ancien zip")
+    (wg / fetch_payload.WINGET_STAMP_NAME).write_text("v1.2.3\n")
+
+    gone = fetch_payload.prune_stale_winget(root)
+    check("un epinglage different jette le winget deja pose", bool(gone), True)
+    check("... y compris le zip de dependances du cache",
+          (cache / fetch_payload.WINGET_DEPS_NAME).exists(), False)
+    check("... et les frameworks deja extraits",
+          (wg / fetch_payload.WINGET_DEPS_DIRNAME / "vieux.appx").exists(), False)
+
+    # Rejoue : le temoin porte maintenant la version voulue, plus rien ne part.
+    (wg / fetch_payload.WINGET_DEPS_DIRNAME).mkdir(parents=True, exist_ok=True)
+    (wg / "a-garder.msixbundle").write_text("bundle a jour")
+    fetch_payload.stamp_winget(root)
+    check("le temoin porte l epinglage courant",
+          (wg / fetch_payload.WINGET_STAMP_NAME).read_text().strip(),
+          fetch_payload.WINGET_VERSION)
+    check("un epinglage inchange ne jette rien",
+          fetch_payload.prune_stale_winget(root), [])
+    check("... et laisse le bundle en place",
+          (wg / "a-garder.msixbundle").exists(), True)
+
+# Un drivers/ vierge n est pas une erreur : il n y a rien a jeter.
+with tempfile.TemporaryDirectory() as tmp:
+    check("un drivers/ vierge ne fait rien jeter",
+          fetch_payload.prune_stale_winget(pathlib.Path(tmp)), [])
 
 
 if failures:

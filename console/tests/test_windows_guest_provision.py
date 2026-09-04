@@ -15,7 +15,8 @@ PROVISION = GUEST / "provision"
 PROBE = GUEST / "probe"
 
 STAGES = ["00-bootstrap.ps1", "10-nvidia.ps1", "15-virtio.ps1", "20-disk.ps1",
-          "25-apollo.ps1", "30-steam.ps1", "32-retro.ps1", "35-shares.ps1",
+          "25-apollo.ps1", "30-steam.ps1", "32-retro.ps1", "33-winget.ps1",
+          "34-gaming-services.ps1", "35-shares.ps1",
           "40-agent.ps1", "45-debloat.ps1", "50-power.ps1",
           "55-updates.ps1", "99-marker.ps1"]
 
@@ -60,11 +61,224 @@ for stage in ("50-power.ps1", "99-marker.ps1"):
     check(f"{stage} never uses Test-Path on hiberfil.sys (Hidden+System)",
           any("Test-Path" in ln for ln in hiberfil_lines), False)
 
-if failures:
-    print(f"FAIL ({len(failures)})")
-    for f in failures:
-        print("  -", f)
-    sys.exit(1)
+# --- Etapes 33 et 34 : winget hors ligne, puis « Services de jeu » du Store.
+#
+# Ce que ces controles gardent n est pas la syntaxe PowerShell (rien ici ne
+# peut l executer) mais les quatre constats qui ont coute une mesure sur
+# l invite de production le 2026-08-30, et qu une relecture innocente
+# defairait sans s en apercevoir.
+_winget = (PROVISION / "33-winget.ps1").read_text(encoding="utf-8")
+_winget_code = code_only(_winget)
+_gaming = (PROVISION / "34-gaming-services.ps1").read_text(encoding="utf-8")
+_gaming_code = code_only(_gaming)
+_gs_asset = (PROVISION / "assets" / "gaming-services.ps1").read_text(encoding="utf-8")
+_gs_code = code_only(_gs_asset)
+# La pile Xbox est sortie dans son propre asset le 2026-08-30 : gaming-services
+# garde l etranglement, le journal et le temoin, xbox-stack porte les paquets,
+# les services et le SEUL appel a winget.
+_xbox_asset = (PROVISION / "assets" / "xbox-stack.ps1").read_text(encoding="utf-8")
+_xbox_code = code_only(_xbox_asset)
+_wpath_code = code_only(
+    (PROVISION / "assets" / "winget-path.ps1").read_text(encoding="utf-8"))
+
+# 1. Les frameworks AVANT le bundle. Un bundle App Installer pose sans eux
+# s installe SANS erreur et ne depose aucun winget.exe : inverser ces deux
+# lignes ne casse rien de visible, et l etape 34 echouerait ensuite en
+# parlant du Store.
+_i_deps = _winget_code.find("foreach ($dep in $deps)")
+_i_bundle = _winget_code.find("Add-AppxPackage -Path $bundle")
+check("33-winget pose les frameworks avant le bundle",
+      _i_deps >= 0 and _i_bundle > _i_deps, True)
+check("33-winget refuse un payload sans framework au lieu de poser le bundle seul",
+      "aucun framework" in _winget_code, True)
+
+# 2 bis. L INSCRIPTION DANS L IMAGE EST AUSSI REJOUABLE que la pose. Le
+# commentaire qui justifie le try/catch du bundle - reposer une version deja
+# presente rend une erreur qui n en est pas une - vaut mot pour mot pour
+# Add-AppxProvisionedPackage, et l en-tete de l etape dit qu on la rejoue a la
+# main pour diagnostiquer. Non protegee, elle mourait AVANT la verification
+# finale, qui est justement ce qui devait trancher. Et run-all.ps1 n ecrit le
+# temoin .done qu au retour de l etape : un echec plus bas ramene ici au
+# passage suivant.
+check("l inscription dans l image est protegee comme la pose du bundle",
+      "try { Add-AppxProvisionedPackage" in _winget_code, True)
+
+# 2. La licence hors ligne. Sans elle Add-AppxProvisionedPackage refuse, et
+# winget repartirait avec le premier profil recree.
+check("33-winget inscrit winget dans l image, pas seulement dans le profil",
+      "Add-AppxProvisionedPackage -Online" in _winget_code, True)
+check("33-winget passe la licence hors ligne", "-LicensePath $license" in _winget_code, True)
+
+# 3. La verification LANCE winget. Constater le paquet est precisement l etat
+# qu un bundle sans frameworks produit : seul un appel qui rend 0 distingue
+# « installe » de « utilisable ».
+check("33-winget lance winget au lieu de constater sa presence",
+      "--version" in _winget_code and "$LASTEXITCODE" in _winget_code, True)
+# Et l alias par utilisateur n est jamais le chemin retenu : il n existe pas
+# encore dans la session qui vient de l installer.
+check("le chemin de winget vient du paquet, pas de l alias WindowsApps",
+      "WindowsApps" in _wpath_code, False)
+check("Resolve-Winget distingue le paquet absent du paquet vide",
+      _wpath_code.count("throw"), 2)
+# LE TRI DES VERSIONS EST UN TRI DE TEXTE, et c est mesure : sur l invite,
+# Get-AppxPackage rend un Version de type System.String, et
+#   @('1.9.0.0','1.29.290.0') | Sort-Object -Descending
+# donne « 1.9.0.0 > 1.29.290.0 ». Choisir « la plus recente » ainsi retient donc
+# l ANCIENNE des que deux versions cohabitent pour l utilisateur - ce qui est
+# exactement le cas que « -Descending | Select -First 1 » existe pour traiter.
+for _label, _code in (("winget-path.ps1", _wpath_code),
+                      ("gaming-services.ps1", _gs_code)):
+    check(f"{_label} trie les versions en versions, pas en texte",
+          "Sort-Object -Property Version" in _code, False)
+    check(f"... {_label} passe par [version]", "[version]" in _code, True)
+
+# 4. L etape 34 NE LEVE PAS quand le Store est injoignable : un Store en
+# panne pendant l heure du provisionnement ne doit pas emporter une console
+# qui diffuse Steam, d autant que la tache rejouera le meme geste demain.
+_i_update = _gaming_code.find("Update-GamingServices -Force")
+check("34 appelle bien l installation", _i_update >= 0, True)
+check("34 ne fait pas echouer le provisionnement sur un Store injoignable",
+      "throw" in _gaming_code[_i_update:], False)
+# La tache est posee AVANT l installation, sans quoi un echec l emporterait
+# avec lui - et c est elle, pas l installation d aujourd hui, qui repare.
+_i_task = _gaming_code.find("Register-ScheduledTask")
+check("34 pose la tache avant de tenter l installation",
+      _i_task >= 0 and _i_task < _i_update, True)
+check("34 relit les declencheurs au lieu de croire l enregistrement",
+      "$registered.Triggers.Count" in _gaming_code, True)
+# ... et le message doit rester lisible quand la tache est ABSENTE : le -or
+# court-circuite sur $null, et « $($registered.Triggers.Count) » s interpole
+# alors en vide - « (trouve ) », qui se lit comme un bug du message plutot que
+# comme l absence qu il decrit.
+check("... et le dit lisiblement quand la tache est absente",
+      "if (-not $registered)" in _gaming_code, True)
+
+# Le script du rafraichissement tourne longtemps apres que l ISO de charge
+# utile a disparu : il est lance depuis C:, jamais depuis $PayloadRoot.
+check("34 lance la tache depuis C:, pas depuis la charge utile",
+      "-File $Script -Run" in _gaming_code and "$PayloadRoot" not in
+      _gaming_code[_i_task:_i_task + 400], True)
+check("34 copie le script sur C: avant de l enregistrer",
+      _gaming_code.find("Copy-Item") < _i_task, True)
+
+# L identifiant Store, tel que l URL du Store le porte. Ecrit une seule fois.
+check("l identifiant Store de Services de jeu est celui demande",
+      "9MWPM2CQNLHN" in _gs_code, True)
+check("... et n est pas recopie dans les etapes", "9MWPM2CQNLHN" in _gaming_code, False)
+
+# « Aucune mise a niveau disponible » (0x8A15002B) est le cas NORMAL, a chaque
+# ouverture de session sauf le jour d une publication. Le traiter comme un
+# echec ferait crier la console tous les jours.
+check("le code « deja a jour » est accepte, pas traite en echec",
+      "-1978335189" in _gs_code, True)
+# UNE seule commande, et c est le fond de l affaire : sur un paquet deja
+# present `winget install` bascule de lui-meme en mise a niveau. Deux chemins
+# de code separes - un pour poser, un pour mettre a jour - se mettraient a
+# diverger, et c est celui que personne ne regarde qui tournerait tous les
+# jours.
+check("l installation vaut mise a jour : une seule commande winget",
+      _xbox_code.count("install --id"), 1)
+check("... et elle vise la source msstore, seule accessible depuis LTSC",
+      "--source msstore" in _xbox_code, True)
+# LA CHAINE ENTIERE, pas seulement Services de jeu : un jeu GDK ne dit jamais
+# lequel de ces composants lui manque, il reste fige sans message.
+for _pkg in ("9MWPM2CQNLHN", "9WZDNCRD1HKW", "9MV0B5HZVK9Z", "9WZDNCRFJBMP"):
+    check(f"xbox-stack.ps1 pose le paquet Store {_pkg}", _pkg in _xbox_code, True)
+# Les services d ouverture de session sont livres en Manual par LTSC et leurs
+# declencheurs a la demande ne partent pas : sans Automatic ils sont Stopped a
+# chaque redemarrage et la connexion Xbox echoue.
+check("xbox-stack.ps1 met les services Xbox en demarrage automatique",
+      "Automatic" in _xbox_code and "wlidsvc" in _xbox_code, True)
+# ClipSVC est PROTEGE : Set-Service y rend « Access is denied » meme en
+# administrateur, alors qu il se DEMARRE tres bien. Le traiter comme les autres
+# ferait echouer l etape pour un service qui, lui, repond.
+check("... et traite ClipSVC a part, sans tenter de le reconfigurer",
+      "ClipSVC" in _xbox_code and "Set-Service -Name 'ClipSVC'" not in _xbox_code, True)
+
+# RELIRE PLUTOT QUE CROIRE, jusque sur les services. MESURE le 2026-09-04 sur
+# l invite de production : le journal a ecrit « services Xbox en Automatic et
+# demarres : wlidsvc, XblAuthManager, XboxNetApiSvc, XblGameSave,
+# LicenseManager + ClipSVC » alors que XblGameSave etait reste en 'Manual'
+# (HKLM\SYSTEM\CurrentControlSet\Services\XblGameSave\Start = 3). Set-Service
+# n avait pas leve, et la ligne du journal est une CONSTANTE - la liste voulue,
+# jamais ce qui a pris. Un reglage qui ne prend pas et un reglage qui prend
+# donnaient donc exactement le meme message, ce qui est la definition d une
+# panne muette. Le reste du depot relit deja ses ecritures (Winlogon Shell dans
+# 30-steam.ps1, les declencheurs dans 34) ; ici aussi.
+check("les services Xbox sont RELUS apres avoir ete regles",
+      "Get-Service -Name $name" in _xbox_code
+      and "StartType" in _xbox_code, True)
+check("... et le journal nomme ce qui a pris, pas la liste voulue",
+      "$XboxServices -join ', '" in _xbox_code, False)
+
+# Le piege du dot-source : l etape 34 dot-source cet asset, et un `exit` en
+# dot-source quitte l APPELANT - il emporterait le provisionnement.
+_i_run = _gs_code.find("if ($Run)")
+check("l asset ne sort du processus que sous -Run",
+      _i_run >= 0 and all(_gs_code.find(f"exit {c}") > _i_run for c in ("0", "1")), True)
+
+# L etranglement, et la panne muette qu il a reellement eue le 2026-08-30 :
+# [datetime]::TryParse sur une variable non typee echoue a resoudre sa
+# surcharge, l erreur n est pas terminante, et le controle se contentait de ne
+# JAMAIS s appliquer. Rien ne le montrait sauf le journal - deux controles
+# complets a deux minutes d intervalle la ou il devait y en avoir un.
+check("l horodatage n est pas relu par TryParse (surcharge non resolue)",
+      "TryParse" in _gs_code, False)
+check("il est relu en culture invariante, comme il est ecrit (-Format o)",
+      "InvariantCulture" in _gs_code and "RoundtripKind" in _gs_code, True)
+check("un horodatage illisible vaut « pas d horodatage », jamais une erreur",
+      "catch { $last = $null }" in _gs_code, True)
+
+# LE CONTRAT « NE LEVE PAS » NE SURVIT PAS AU DOT-SOURCE, si l asset ne le
+# retablit pas lui-meme. $ErrorActionPreference est a portee DYNAMIQUE : l etape
+# 34 le met a 'Stop' (comme toutes les etapes), et dot-source ensuite cet asset,
+# qui herite donc de 'Stop'. Deux consequences, et aucune ne se voit en lisant
+# l asset seul :
+#   - `& $winget ... 2>&1` : sous 'Stop', la MOINDRE ligne d erreur native de
+#     winget devient une exception terminante (NativeCommandError) au lieu
+#     d une ligne de $out ;
+#   - Add-Content du journal : un disque plein leve au lieu d ecrire.
+# Dans les deux cas l exception traverse Update-GamingServices - dont l en-tete
+# promet « NE LEVE PAS » - et emporte l etape 34, qui promet de ne jamais faire
+# echouer le provisionnement. Et comme la tache planifiee, elle, tourne sous le
+# 'Continue' par defaut, les DEUX chemins ne se comportaient pas pareil en
+# panne : exactement ce que l en-tete de l asset dit qu ils font.
+check("l asset retablit lui-meme le mode non terminant qu il promet",
+      "$ErrorActionPreference = 'Continue'" in _gs_code, True)
+# Dans la FONCTION, pas au niveau du fichier : un dot-source appliquerait le
+# 'Continue' au reste de l etape 34, qui compte sur 'Stop' pour ses copies.
+_i_upd = _gs_code.find("function Update-GamingServices")
+check("... dans la fonction, sans desarmer le 'Stop' de l etape qui l appelle",
+      _i_upd >= 0
+      and _gs_code.find("$ErrorActionPreference = 'Continue'") > _i_upd, True)
+
+# L ETRANGLEMENT NE COUVRE QUE LE STORE, et les services passent AVANT lui.
+# Deux raisons mesurees le 2026-09-04, et elles vont dans le meme sens :
+#   - Set-Service est local, instantane et gratuit ; c est le Store qui est
+#     lent, distant et qu il ne faut pas interroger a chaque ouverture de
+#     session. Etrangler les deux ensemble etrangle la moitie qui ne coute
+#     rien.
+#   - le demarrage de XblGameSave a ete VU repartir en 'Manual' tout seul entre
+#     deux passages ; le seul geste qui repare une derive pareille est celui
+#     qu on rejoue a chaque ouverture de session, donc jamais etrangle.
+# Et l horodatage date desormais le controle du STORE, sans quoi un service qui
+# refuse de tenir empechait de l ecrire A JAMAIS : les quatre appels winget
+# repartaient a chaque ouverture de session ET tous les jours, indefiniment -
+# exactement ce que l etranglement existe pour eviter.
+_i_svc = _gs_code.find("Set-XboxServicesAutomatic")
+_i_throttle = _gs_code.find("-lt $MinHoursBetweenChecks")
+check("les services sont reposes avant l etranglement, donc a chaque passage",
+      _i_svc >= 0 and _i_throttle >= 0 and _i_svc < _i_throttle, True)
+check("l horodatage est ecrit des que les paquets sont bons",
+      "if ($failed.Count -eq 0) {" in _gs_code, True)
+
+# Le temoin durable : l etape ne levant pas, ce fichier sur le volume qui
+# survit aux reconstructions est la SEULE trace persistante de l issue.
+check("l asset ecrit un temoin sur le volume persistant",
+      "D:\\state\\gaming-services.txt" in _gs_code, True)
+check("un temoin impossible (D: non monte) n est pas un echec",
+      "if (-not (Test-Path 'D:\\state')) { return }" in _gs_code, True)
+
 
 # Recursive: provision/assets/*.ps1 (run-agent.ps1, steam-session.ps1) are
 # shipped and executed inside the guest just like the numbered stages, and
@@ -171,7 +385,16 @@ check("target device name info type is 2 (GET_TARGET_NAME)",
 
 # --- Sub-project B.
 # R1: the version lives in two languages and must move in one step.
-check("provision version is B3", payload.PROVISION_VERSION, "B3")
+# B3 -> B4 le 2026-09-04. LA VERSION DOIT BOUGER QUAND LA SEQUENCE BOUGE, et
+# elle vient de bouger de deux etapes (33-winget, 34-gaming-services), d un
+# shell (le kiosque a laisse la place a explorer.exe) et de trois assets. Sans
+# ce relevement, le marqueur d un invite provisionne AVANT tout cela relit
+# « B3 » et guest-ready-watch.py le declare a jour : la console qui n a jamais
+# vu winget passe pour une console qui l a. MESURE le 2026-09-04 sur l invite
+# de production, et c est exactement ce piege en action - son
+# C:\nivuus\state\PROVISION.done porte encore provision_version=B1, du
+# 2026-08-26, alors que le depot etait deja en B3.
+check("provision version is B4", payload.PROVISION_VERSION, "B4")
 check("the standalone SudoVDA stage is gone",
       (PROVISION / "20-sudovda.ps1").exists(), False)
 
@@ -310,7 +533,7 @@ check(r"D:\Steam: 99-marker.ps1 matches apollo.STEAM_DIR",
       apollo.STEAM_DIR in marker, True)
 
 for name in ["run-all.ps1", "25-apollo.ps1", "40-agent.ps1", "99-marker.ps1",
-             "run-agent.ps1", "steam-launch.ps1", "steam-shell.ps1"]:
+             "run-agent.ps1", "steam-launch.ps1", "steam-hold-notice.ps1"]:
     check(rf"C:\nivuus\state: {name} uses the canonical state directory",
           "C:\\nivuus\\state" in texts[name], True)
 
@@ -364,11 +587,50 @@ check("25-apollo.ps1 detecte le nom du GPU au lieu de le figer",
 # taches, ni fond d ecran, ni icones. Le lanceur boucle parce que Steam qui se
 # ferme ne doit pas laisser un ecran noir sur une machine sans ecran physique.
 _steam = (PROVISION / "30-steam.ps1").read_text(encoding="utf-8")
-check("30-steam.ps1 installe Steam comme shell de session",
-      "Winlogon" in _steam and "steam-shell.ps1" in _steam, True)
+# EXPLORER.EXE EST LE SHELL depuis le 2026-08-30, et ce test garde la RAISON,
+# pas le gout : le kiosque precedent empechait TOUTE activation d application
+# UWP (« Class not registered »), or le formulaire de connexion a un compte
+# Microsoft en est une - donc l ouverture de session Xbox Live echouait en
+# 0x80040154 et tout jeu GDK restait fige sur un ecran noir SANS message.
+check("30-steam.ps1 rend explorer.exe shell de session",
+      "Winlogon" in _steam and "'explorer.exe'" in _steam, True)
+check("... et ne remet pas le kiosque a la place",
+      "steam-shell.ps1" in _steam, False)
+# LE PIEGE QUI A COUTE L ACCES A LA CONSOLE : sous le kiosque HKCU\...\Run
+# n etait jamais execute (seul Explorer traite ces entrees) et la cle Steam de
+# SteamSetup y dormait. Avec Explorer elle relance Steam en doublon, Apollo
+# trouve Steam deja la, et steam-session.ps1 - dont la sortie ferme la session -
+# sort aussitot : « La connexion a ete interrompue » a chaque tentative.
+check("30-steam.ps1 retire le demarrage automatique de Steam",
+      "CurrentVersion\\Run" in _steam and "Remove-ItemProperty" in _steam, True)
+check("... et relit la cle au lieu de croire la suppression",
+      "Explorer relancerait Steam en doublon" in _steam, True)
+# Les deux taches AtLogOn remplacent ce que le shell faisait : elles sont
+# INDEPENDANTES du shell, donc insensibles a ce qu il devient.
+check("30-steam.ps1 pose la tache d habillage du bureau",
+      "desktop-chrome" in _steam, True)
+check("30-steam.ps1 pose la tache d avertissement steam.hold",
+      "steam-hold-notice" in _steam, True)
+# LA DUREE MAXIMALE NE S ECRIT PAS PAR AFFECTATION, et ce defaut-la emportait
+# TOUT le provisionnement. MESURE sur l invite de production le 2026-09-04 :
+#   (New-ScheduledTaskSettingsSet).ExecutionTimeLimit.GetType() = System.String
+#   sa valeur par defaut = « PT72H », une duree ISO-8601
+# La conversion TimeSpan -> « PT5M » est faite par le PARAMETRE du cmdlet, pas
+# par la propriete. Une affectation y depose donc « 00:05:00 », que le
+# planificateur refuse - mesure du meme jour, sur une tache jetable :
+#   Register-ScheduledTask : The task XML contains a value which is
+#   incorrectly formatted or out of range. (37,36):ExecutionTimeLimit:00:05:00
+# Sous $ErrorActionPreference = 'Stop', l etape 30 mourait donc la, et avec
+# elle la console entiere. 40-agent.ps1 ecrit deja la forme juste.
+_steam_code = code_only(_steam)
+check("30-steam.ps1 n affecte jamais la duree maximale a la propriete",
+      ".ExecutionTimeLimit =" in _steam_code, False)
+check("... elle passe par le parametre du cmdlet, comme dans 40-agent.ps1",
+      "New-ScheduledTaskSettingsSet" in _steam_code
+      and "-ExecutionTimeLimit" in _steam_code, True)
 check("30-steam.ps1 arme le filet AutoRestartShell",
       "AutoRestartShell" in _steam, True)
-_shell = (PROVISION / "assets" / "steam-shell.ps1").read_text(encoding="utf-8")
+_shell = (PROVISION / "assets" / "steam-hold-notice.ps1").read_text(encoding="utf-8")
 _shell_code = [ln for ln in _shell.splitlines()
                if ln.strip() and not ln.lstrip().startswith(("#", "<#", "»"))]
 # LE SHELL NE DOIT PLUS LANCER STEAM. Il s execute a l ouverture de session,
@@ -697,11 +959,45 @@ check("45-debloat.ps1 ne touche pas a Defender",
 # posee dans le registre ne s afficherait nulle part. Le lanceur la dessine
 # lui-meme, DERRIERE tout le reste, et sous try — un fond qui echoue ne doit pas
 # empecher la console de demarrer.
-check("le lanceur dessine le fond lui-meme", "BackgroundImage" in _shell, True)
-check("le fond ne passe jamais devant un jeu",
-      "$form.TopMost = $false" in _shell and "SendToBack" in _shell, True)
-check("l habillage ne peut pas empecher Steam de demarrer",
-      "wallpaper not shown" in _shell, True)
+# Le fond d ecran a CHANGE DE MAIN le 2026-08-30 : Explorer le dessine, donc
+# desktop-chrome.ps1 se contente de le poser dans le registre. Le peindre dans
+# une form n avait de sens que sans bureau.
+_chrome = (PROVISION / "assets" / "desktop-chrome.ps1").read_text(encoding="utf-8")
+check("l habillage pose le fond par le registre, plus par une form",
+      "SystemParametersInfo" in _chrome and "BackgroundImage" not in _chrome, True)
+check("l habillage cache les icones du bureau", "HideIcons" in _chrome, True)
+check("l habillage met la barre des taches en masquage automatique",
+      "StuckRects3" in _chrome, True)
+# La cle StuckRects3 n existe pas tant qu Explorer n a jamais tourne : ecrire un
+# binaire de 40 octets invente a sa place poserait une structure que Windows n a
+# pas ecrite. On n allume qu un bit sur la valeur EXISTANTE, et l absence de cle
+# est un report au prochain logon, pas une panne.
+check("l habillage n invente pas la valeur binaire de la barre",
+      "-bor 0x01" in _chrome, True)
+# LE NOIR DES BANDES LATERALES, et il ne vient plus de la meme main. Sous le
+# kiosque, steam-shell.ps1 peignait le fond dans une form dont il posait lui-
+# meme le BackColor a #000. Explorer redevenu shell, c est Windows qui dessine,
+# et le style 6 (Ajuster) complete l image avec la COULEUR DE FOND DU BUREAU -
+# HKCU\Control Panel\Colors\Background, que rien ici ne posait. Elle vaut
+# « 0 0 0 » par defaut (mesure du 2026-09-04 sur l invite), donc la charte
+# tenait par chance : le telephone du salon streame en 2410x1080, jamais en
+# 16:9, et ces bandes sont visibles a chaque session. La charte Nivuus
+# (paragraphe 3) est noir et blanc sans exception - on la pose.
+check("l habillage pose le noir des bandes laterales du fond",
+      "Colors" in _chrome and "Background" in _chrome, True)
+check("... et le style Ajuster, qui est ce qui les cree",
+      "WallpaperStyle" in _chrome, True)
+check("... et rejoue au logon suivant si Explorer n a pas encore ecrit la cle",
+      "retrying next logon" in _chrome, True)
+# Une valeur Settings trop courte tombait dans le vide : aucun message, alors
+# que toutes les autres branches de ce fichier disent ce qu elles ont fait ou
+# pourquoi elles n ont rien fait. Un silence est indiscernable d un succes.
+check("une valeur de barre inexploitable est dite, pas avalee",
+      "trop courte" in _chrome, True)
+check("l avertissement ne passe jamais devant un jeu",
+      "$form.TopMost = $false" in _shell, True)
+check("l habillage ne peut pas empecher la console de demarrer",
+      "hold notice not shown" in _shell, True)
 
 # Task 2 (sub-project C2) : le shell ne pose ni ne consomme le sentinel
 # steam.hold (c est steam-launch.ps1 qui empeche le relancement, voir plus
@@ -1080,6 +1376,15 @@ check("aucun choix implicite du premier installateur venu",
       "Select-Object -First 1" in _retro_code, False)
 
 
+# UN SEUL bloc de rapport, et il est le DERNIER du fichier. Ce n est pas du
+# style : ce fichier a porte deux blocs identiques jusqu au 2026-08-30, l un a
+# la ligne 200 et l autre a la fin, avec 113 lignes de checks recopiees entre
+# les deux. Le `sys.exit(1)` du premier faisait que le MOINDRE echec en amont
+# empechait les ~1100 lignes suivantes de s executer - silencieusement, en
+# affichant un « FAIL (1) » parfaitement credible. Mesure de la reparation :
+# deux sondes fabriquees pour echouer, une tot et une tard, etaient rapportees
+# 1 sur 2 avant, 2 sur 2 apres.
+# Ne jamais reintroduire un `sys.exit` ailleurs qu ici.
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

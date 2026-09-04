@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
 """Build-time acquisition of the payload binaries that are not already local.
 
-Networking is allowed HERE, and - with ONE named exception - nowhere else: the
-guest provisions offline, so a URL that rots must break the build, never an
-install. Nothing in this module is imported by the guest-facing code paths.
+Networking is allowed HERE, and - with TWO named exceptions - nowhere else:
+the guest provisions offline, so a URL that rots must break the build, never
+an install. Nothing in this module is imported by the guest-facing code paths.
 
-The exception is retrogaming, and only when it is enabled: 32-retro.ps1 runs
-`retro install` on the guest, which downloads the emulators themselves. They
-weigh about a gigabyte, they move on their own schedule, and freezing them
-into the image would mean rebuilding it to refresh one - while that install is
-idempotent and replayable. So this module still fetches, offline-first,
-everything that install NEEDS (the interpreter, 7zr.exe, the whole wheel
-closure), and the emulator archives it does not carry are pinned by sha256 in
-the package's own manifest: a URL rotting there is a named failure on the
-guest, recorded on the persistent volume, never a silent substitution.
+The first exception is retrogaming, and only when it is enabled: 32-retro.ps1
+runs `retro install` on the guest, which downloads the emulators themselves.
+They weigh about a gigabyte, they move on their own schedule, and freezing
+them into the image would mean rebuilding it to refresh one - while that
+install is idempotent and replayable. So this module still fetches,
+offline-first, everything that install NEEDS (the interpreter, 7zr.exe, the
+whole wheel closure), and the emulator archives it does not carry are pinned
+by sha256 in the package's own manifest: a URL rotting there is a named
+failure on the guest, recorded on the persistent volume, never a silent
+substitution.
+
+The second is Gaming Services (34-gaming-services.ps1), and it is not a
+trade-off but a fact about the artefact: it is a Microsoft Store package, the
+Store publishes no offline file, and its whole point is to be CURRENT - a
+version frozen into the image is the "Ensure GamingServices is up to date"
+error that stops a game launching, months later, on a console nobody wants to
+reimage. The same arbitration as retrogaming applies to what CAN be frozen:
+winget, the only client measured to reach the Store from a SKU that ships
+none, travels offline and pinned (WINGET_VERSION below).
 
 Usage:
     sudo python3 fetch_payload.py --drivers-dir /media/data/nivuus-win-payload
@@ -27,6 +37,7 @@ import shutil
 import subprocess
 import sys
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,6 +60,52 @@ VIRTIO_ISO_URL = ("https://fedorapeople.org/groups/virt/virtio-win/"
 STEAM_URL = "https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe"
 WINFSP_URL = ("https://github.com/winfsp/winfsp/releases/download/"
               "v2.0/winfsp-2.0.23075.msi")
+
+# App Installer, i.e. winget. IoT Enterprise LTSC ships NO Microsoft Store,
+# and Gaming Services only exists as a Store package: winget's `msstore`
+# source is the one path measured to reach it from this SKU (2026-08-30, on
+# the production guest, build 26100 - `winget install --id 9MWPM2CQNLHN
+# --source msstore` returned "Installe correctement" and left
+# Microsoft.GamingServices 38.116.6003.0 with both its services Running).
+#
+# PINNED to one release, unlike Steam and virtio-win which are deliberately
+# moving pointers. Two reasons, and neither is taste: the license file's name
+# carries a per-release hash (so "latest" would rename the file under the
+# build), and winget is the machinery that installs everything else - a
+# machinery that changes on its own is the one that fails on a screenless
+# guest. Bumping the version means editing WINGET_LICENSE_NAME in the same
+# gesture: they are one release, not two knobs.
+WINGET_VERSION = "v1.29.290"
+WINGET_BUNDLE_NAME = "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+WINGET_LICENSE_NAME = "e53e159d00e04f729cc2180cffd1c02e_License1.xml"
+WINGET_DEPS_NAME = "DesktopAppInstaller_Dependencies.zip"
+WINGET_BASE_URL = ("https://github.com/microsoft/winget-cli/releases/download/"
+                   f"{WINGET_VERSION}/")
+WINGET_DIRNAME = "winget"
+WINGET_DEPS_DIRNAME = "deps"
+# Le temoin d epinglage, DANS drivers/winget/ a cote de ce qu il date.
+# Sans lui, relever WINGET_VERSION ne relevait rien du tout : fetch() saute le
+# telechargement des que le fichier existe, et les trois artefacts atterrissent
+# sur des chemins qui ne portent PAS la version (nom fixe du bundle, licence
+# renommee License1.xml, zip de dependances au nom fixe). Sur un hote de
+# construction dont drivers/ est deja peuple, un relevement ne changeait donc
+# que des URL : l ANCIEN winget repartait dans l image, en silence, et le
+# manifeste TOFU ne pouvait rien voir puisque le chemin et le condensat etaient
+# les memes. Meme forme de defaut que les installateurs Python du retrogaming,
+# et meme reponse (prune_stale_retro).
+WINGET_STAMP_NAME = ".winget-version"
+# The dependency zip carries every architecture (93 MB); the guest is x64 and
+# needs three of them, 31.6 MB in total (measured 2026-08-30). Mining the zip
+# for x64 mirrors extract_virtio: the vendor publishes no per-architecture
+# artefact, and shipping the whole zip would send arm64 and x86 frameworks to
+# a machine that can never load them.
+WINGET_DEPS_MEMBER_DIR = "x64"
+# Without these two the bundle installs but winget.exe never appears, and it
+# does so SILENTLY - the failure mode Microsoft's own IoT documentation warns
+# about. Named here so a vendor who reorganises the zip breaks the build
+# rather than the guest.
+WINGET_DEPS_REQUIRED = ("Microsoft.VCLibs.140.00.UWPDesktop",
+                        "Microsoft.WindowsAppRuntime.")
 
 # agent.exe is the ONE offline payload binary that is never downloaded: it is
 # a compiled artefact of the sibling repository nivuus/desk, vendored
@@ -160,12 +217,26 @@ def plan_downloads(drivers_dir: Path, retro: bool = False) -> list[Download]:
     retrogaming: an installation without it has no reason to grow by an
     interpreter, an extractor and a wheelhouse it will never open.
     """
+    winget_dir = drivers_dir / WINGET_DIRNAME
     items = [
         Download("steam", STEAM_URL, drivers_dir / "steam" / "SteamSetup.exe"),
         Download("winfsp", WINFSP_URL,
                  drivers_dir / "winfsp" / "winfsp-2.0.23075.msi"),
         Download("virtio-iso", VIRTIO_ISO_URL,
                  drivers_dir / BUILD_CACHE_DIRNAME / "virtio-win.iso"),
+        # winget is NOT behind a flag: the owner asked for Gaming Services by
+        # default, and an appliance that silently lacks the only client able
+        # to install it would fail at the one moment nobody is watching - the
+        # first time a game asks for it.
+        Download("winget-bundle", WINGET_BASE_URL + WINGET_BUNDLE_NAME,
+                 winget_dir / WINGET_BUNDLE_NAME),
+        # Renamed on landing: the source name carries a per-release hash, and
+        # 33-winget.ps1 must point at ONE path that does not move with the
+        # pin. The hash stays in WINGET_LICENSE_NAME, where a bump reads it.
+        Download("winget-license", WINGET_BASE_URL + WINGET_LICENSE_NAME,
+                 winget_dir / "License1.xml"),
+        Download("winget-deps", WINGET_BASE_URL + WINGET_DEPS_NAME,
+                 drivers_dir / BUILD_CACHE_DIRNAME / WINGET_DEPS_NAME),
     ]
     if retro:
         retro_dir = drivers_dir / RETRO_DIRNAME
@@ -341,6 +412,99 @@ def extract_virtio(iso: Path, drivers_dir: Path) -> None:
     print(f"extracted {', '.join(VIRTIO_MEMBERS)} from {iso.name}")
 
 
+def extract_winget_deps(archive: Path, drivers_dir: Path) -> list[str]:
+    """Pull the x64 framework packages winget needs out of its dependency zip.
+
+    Returns the names extracted. Refuses (raises FetchError) when the zip
+    carries no x64 directory, or when one of WINGET_DEPS_REQUIRED is not
+    among what came out: an App Installer bundle whose frameworks are missing
+    installs WITHOUT ERROR and then has no winget.exe at all - Microsoft's own
+    IoT guidance calls that failure out as silent, and a silent failure at
+    build time becomes an unexplainable one an hour into provisioning, on a
+    guest with no screen.
+
+    zipfile, not `7z`: unlike the virtio ISO this is a plain archive, and the
+    standard library keeps this module runnable without the extra binary.
+    """
+    dest = drivers_dir / WINGET_DIRNAME / WINGET_DEPS_DIRNAME
+    dest.mkdir(parents=True, exist_ok=True)
+    extracted: list[str] = []
+    with zipfile.ZipFile(archive) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            parts = Path(info.filename).parts
+            if WINGET_DEPS_MEMBER_DIR not in parts:
+                continue
+            if not info.filename.lower().endswith(".appx"):
+                continue
+            name = Path(info.filename).name
+            # Flattened like extract_virtio, and for the same reason: the
+            # guest step points at one directory rather than guessing a
+            # vendor layout that can be reorganised between releases.
+            with zf.open(info) as src, open(dest / name, "wb") as out:
+                shutil.copyfileobj(src, out)
+            extracted.append(name)
+    if not extracted:
+        raise FetchError(
+            f"{archive.name} carries no {WINGET_DEPS_MEMBER_DIR}/*.appx: the "
+            f"winget {WINGET_VERSION} dependency zip was reorganised, and "
+            "shipping the bundle without its frameworks would leave the guest "
+            "with no winget.exe and no error to explain it")
+    for needed in WINGET_DEPS_REQUIRED:
+        if not any(name.startswith(needed) for name in extracted):
+            raise FetchError(
+                f"no {needed}* among the x64 frameworks extracted from "
+                f"{archive.name} (got {', '.join(sorted(extracted))}): winget "
+                "would install and then not exist. Check what winget "
+                f"{WINGET_VERSION} now depends on before bumping the pin.")
+    print(f"extracted {len(extracted)} x64 framework(s) from {archive.name}: "
+          f"{', '.join(sorted(extracted))}")
+    return extracted
+
+
+def prune_stale_winget(drivers_dir: Path) -> list[str]:
+    """Drop a winget payload staged for a different WINGET_VERSION.
+
+    Returns what was removed. Nothing staged, or a witness that already
+    carries this pin, means nothing to do - so this is safe to call on every
+    build and on a drivers/ that has never seen winget.
+
+    The dependency zip in the build cache goes too: extract_winget_deps mines
+    it into deps/, so leaving yesterday's zip beside today's bundle is the
+    same trap one directory up.
+    """
+    winget_dir = drivers_dir / WINGET_DIRNAME
+    stamp = winget_dir / WINGET_STAMP_NAME
+    try:
+        current = stamp.read_text().strip()
+    except OSError:
+        current = ""
+    if current == WINGET_VERSION:
+        return []
+    removed: list[str] = []
+    if winget_dir.is_dir():
+        removed.append(f"{WINGET_DIRNAME}/")
+        shutil.rmtree(winget_dir)
+    zip_cache = drivers_dir / BUILD_CACHE_DIRNAME / WINGET_DEPS_NAME
+    if zip_cache.exists():
+        zip_cache.unlink()
+        removed.append(f"{BUILD_CACHE_DIRNAME}/{WINGET_DEPS_NAME}")
+    return removed
+
+
+def stamp_winget(drivers_dir: Path) -> None:
+    """Record the pin the staged winget payload was built from.
+
+    Written only AFTER the frameworks are extracted, so an interrupted fetch
+    leaves no witness and the next build prunes and starts over rather than
+    shipping a half-staged winget.
+    """
+    winget_dir = drivers_dir / WINGET_DIRNAME
+    winget_dir.mkdir(parents=True, exist_ok=True)
+    (winget_dir / WINGET_STAMP_NAME).write_text(f"{WINGET_VERSION}\n")
+
+
 def _pip(args: list[str], what: str) -> None:
     """Run pip on THIS host, and fail loudly with its own diagnostic."""
     proc = subprocess.run([sys.executable, "-m", "pip", *args],
@@ -416,9 +580,18 @@ def main(argv=None) -> int:
                  "given)"))
         print(f"  agent sha256 {install_packaged_agent(drivers)} "
               "(bundled in the package, not downloaded)")
+        # AVANT les telechargements : fetch() garde ce qui existe deja, donc
+        # un epinglage releve ne change rien tant que l ancien est encore la.
+        for gone in prune_stale_winget(drivers):
+            print(f"  winget: removed the stale {gone}")
         for item in plan_downloads(drivers, retro=retro):
             print(f"  {item.name} sha256 {fetch(item, drivers)}")
         extract_virtio(drivers / BUILD_CACHE_DIRNAME / "virtio-win.iso", drivers)
+        extract_winget_deps(
+            drivers / BUILD_CACHE_DIRNAME / WINGET_DEPS_NAME, drivers)
+        # Le temoin en dernier : une extraction interrompue ne doit pas laisser
+        # croire que cet epinglage est completement pose.
+        stamp_winget(drivers)
         if retro:
             for gone in prune_stale_retro(drivers):
                 print(f"  retro: removed the stale {gone}")

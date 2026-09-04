@@ -6,6 +6,7 @@ Run: python3 console/tests/test_windows_guest_payload.py
 import pathlib
 import shutil
 import sys
+import inspect
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -33,7 +34,13 @@ def make_tree(root: pathlib.Path) -> "payload.PayloadSources":
     (root / "provision" / "assets" / "steam-launch.ps1").write_text("# steam-launch\n")
     (root / "provision" / "assets" / "steam-cursor.ps1").write_text("# steam-cursor\n")
     (root / "provision" / "assets" / "apollo-junction.ps1").write_text("# junction\n")
-    (root / "provision" / "assets" / "steam-shell.ps1").write_text("# steam-shell\n")
+    # Depuis le 2026-08-30 explorer.exe est le shell : le kiosque a laisse la
+    # place a deux taches AtLogOn, et la pile Xbox a son propre asset.
+    (root / "provision" / "assets" / "steam-hold-notice.ps1").write_text("# hold notice\n")
+    (root / "provision" / "assets" / "desktop-chrome.ps1").write_text("# desktop chrome\n")
+    (root / "provision" / "assets" / "xbox-stack.ps1").write_text("# xbox stack\n")
+    (root / "provision" / "assets" / "winget-path.ps1").write_text("# winget path\n")
+    (root / "provision" / "assets" / "gaming-services.ps1").write_text("# gaming\n")
     (root / "provision" / "assets" / "retro-status.ps1").write_text("# retro-status\n")
     (root / "provision" / "assets" / "retro-7zr.ps1").write_text("# retro-7zr\n")
     (root / "assets").mkdir(exist_ok=True)
@@ -53,6 +60,11 @@ def make_tree(root: pathlib.Path) -> "payload.PayloadSources":
     (drivers / "winfsp" / "winfsp-2.0.msi").write_bytes(b"MSI")
     (drivers / "agent").mkdir()
     (drivers / "agent" / "agent.exe").write_bytes(b"MZ")
+    (drivers / "winget" / "deps").mkdir(parents=True)
+    (drivers / "winget" / "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle").write_bytes(b"PK")
+    (drivers / "winget" / "License1.xml").write_text("<License/>\n")
+    (drivers / "winget" / "deps" / "Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx").write_bytes(b"PK")
+    (drivers / "winget" / "deps" / "Microsoft.WindowsAppRuntime.1.8_8000.616.304.0_x64.appx").write_bytes(b"PK")
     config = root / "config"
     config.mkdir()
     for name in ["sunshine.conf", "apps.json", "secrets.psd1"]:
@@ -241,6 +253,18 @@ with tempfile.TemporaryDirectory() as tmp:
     check("dot-directory contents are not staged",
           (dest / "drivers" / "virtio" / ".build-cache").exists(), False)
 
+# Les DEUX assets de la chaine winget que verify_staged laissait passer.
+# xbox-stack.ps1 y etait, ses deux jumeaux non - et ce sont eux que les etapes
+# 33 et 34 copient sur C: sous $ErrorActionPreference = 'Stop'. Absents, le
+# Copy-Item leve : l etape 34, qui promet de ne JAMAIS faire echouer le
+# provisionnement, le fait quand meme, et pour une raison qui appartient a la
+# construction. Meme raisonnement que steam-cursor.ps1 en 2026-08-29 : ce qui
+# se constate a la construction ne doit pas se decouvrir sur l invite.
+_required = inspect.getsource(payload.verify_staged)
+for _asset in ("winget-path.ps1", "gaming-services.ps1", "xbox-stack.ps1"):
+    check(f"verify_staged exige provision/assets/{_asset}",
+          f"provision/assets/{_asset}" in _required, True)
+
 # --- Sous-projet B : la charge utile déclare ses artefacts en un seul endroit.
 # ⚠️ PROVISION_VERSION n'est PAS touché ici : test_windows_guest_provision.py
 # le recoupe avec la chaîne écrite par 99-marker.ps1, donc les deux doivent
@@ -250,7 +274,8 @@ with tempfile.TemporaryDirectory() as tmp:
     root = pathlib.Path(tmp)
     missing = payload.missing_binaries(root)
     joined = "\n".join(missing)
-    for needle in ["nvidia", "apollo", "steam", "virtio", "winfsp", "agent"]:
+    for needle in ["nvidia", "apollo", "steam", "virtio", "winfsp", "agent",
+                   "winget"]:
         check(f"empty payload reports {needle} missing", needle in joined, True)
     # SudoVDA rides inside the Apollo installer; requiring it separately would
     # install the same IDD twice.
@@ -271,6 +296,11 @@ def _make_complete_payload(root: pathlib.Path) -> None:
     (root / "winfsp" / "winfsp-2.0.msi").write_text("x")
     (root / "agent").mkdir()
     (root / "agent" / "agent.exe").write_text("x")
+    (root / "winget" / "deps").mkdir(parents=True)
+    (root / "winget" / "App.msixbundle").write_text("x")
+    (root / "winget" / "License1.xml").write_text("x")
+    (root / "winget" / "deps" / "Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx").write_text("x")
+    (root / "winget" / "deps" / "Microsoft.WindowsAppRuntime.1.8_8000.616.304.0_x64.appx").write_text("x")
 
 with tempfile.TemporaryDirectory() as tmp:
     root = pathlib.Path(tmp)
@@ -329,7 +359,11 @@ with tempfile.TemporaryDirectory() as tmp:
     (src / "provision" / "assets" / "steam-launch.ps1").write_text("x")
     (src / "provision" / "assets" / "steam-cursor.ps1").write_text("x")
     (src / "provision" / "assets" / "apollo-junction.ps1").write_text("x")
-    (src / "provision" / "assets" / "steam-shell.ps1").write_text("x")
+    (src / "provision" / "assets" / "steam-hold-notice.ps1").write_text("x")
+    (src / "provision" / "assets" / "desktop-chrome.ps1").write_text("x")
+    (src / "provision" / "assets" / "xbox-stack.ps1").write_text("x")
+    (src / "provision" / "assets" / "winget-path.ps1").write_text("x")
+    (src / "provision" / "assets" / "gaming-services.ps1").write_text("x")
     (src / "provision" / "assets" / "retro-status.ps1").write_text("x")
     (src / "provision" / "assets" / "retro-7zr.ps1").write_text("x")
     (src / "assets").mkdir(exist_ok=True)

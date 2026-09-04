@@ -3,15 +3,23 @@
 Everything the guest will ever need must be here: provisioning runs offline.
 A missing binary fails the build, never the install.
 
-ONE deliberate exception, and only when retrogaming is enabled: 32-retro.ps1
-runs `retro install`, which downloads the emulators from their vendors. They
-are gigabytes, they change on their own schedule, and freezing them into the
-image would mean rebuilding it to refresh one of them - while the install
-itself is idempotent and replayable. What still travels offline is everything
-that install NEEDS: the interpreter, 7zr.exe and the whole wheel closure. The
-emulator archives are pinned by sha256 in the package's manifest, so the worst
-case there is a named failure, never a silent substitution - and 32-retro.ps1
-records that failure on the persistent volume rather than only in the log.
+TWO deliberate exceptions. The first, and only when retrogaming is enabled:
+32-retro.ps1 runs `retro install`, which downloads the emulators from their
+vendors. They are gigabytes, they change on their own schedule, and freezing
+them into the image would mean rebuilding it to refresh one of them - while
+the install itself is idempotent and replayable. What still travels offline is
+everything that install NEEDS: the interpreter, 7zr.exe and the whole wheel
+closure. The emulator archives are pinned by sha256 in the package's manifest,
+so the worst case there is a named failure, never a silent substitution - and
+32-retro.ps1 records that failure on the persistent volume rather than only in
+the log.
+
+The second is Gaming Services (34-gaming-services.ps1). It is a Microsoft
+Store package with no offline file to carry, and carrying one would be the
+wrong goal anyway: games refuse to launch against a stale copy, so a version
+frozen at image time is a failure scheduled for later. Same arbitration as
+above for what CAN be frozen - winget, the client that fetches it, is in
+REQUIRED_BINARIES below, pinned and offline.
 """
 from __future__ import annotations
 
@@ -21,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MARKER_NAME = "PAYLOAD.id"
-PROVISION_VERSION = "B3"
+PROVISION_VERSION = "B4"
 TARGET_BUILD = "26100"
 
 
@@ -56,6 +64,23 @@ REQUIRED_BINARIES = [
     ("virtio/netkvm", "*.inf", "NetKVM virtio-net driver"),
     ("winfsp", "*.msi", "WinFsp installer (virtiofs depends on it)"),
     ("agent", "agent.exe", "Guacamole agent, extracted before the wipe"),
+    # winget and its x64 frameworks. Not optional and not behind a toggle:
+    # Gaming Services is installed by default, LTSC ships no Store, and
+    # winget's msstore source is the only client measured to reach it.
+    #
+    # The frameworks are named one by one rather than checked as "deps/ is
+    # not empty", for the same reason the retro wheels are: an App Installer
+    # bundle whose dependencies are missing installs WITHOUT ERROR and simply
+    # leaves no winget.exe behind, so an incomplete deps/ would surface on
+    # the guest, offline, as a command that does not exist.
+    ("winget", "*.msixbundle", "App Installer bundle (winget)"),
+    ("winget", "License1.xml",
+     "winget offline license (Add-AppxProvisionedPackage refuses without it)"),
+    ("winget/deps", "Microsoft.VCLibs.140.00.UWPDesktop_*.appx",
+     "VCLibs Desktop framework (winget installs silently without it, then "
+     "does not exist)"),
+    ("winget/deps", "Microsoft.WindowsAppRuntime.*.appx",
+     "Windows App Runtime framework (same silent failure)"),
 ]
 
 
@@ -248,7 +273,20 @@ def verify_staged(dest_root: Path) -> None:
         # s'etait creee lors du passage a apps.json.j2.
         "provision/assets/steam-cursor.ps1",
         "provision/assets/apollo-junction.ps1",
-        "provision/assets/steam-shell.ps1",
+        # Depuis le 2026-08-30 explorer.exe est le shell (sans lui aucune
+        # application UWP ne s active, donc pas d ouverture de session Xbox) :
+        # ces deux-la sont des taches AtLogOn, plus un shell.
+        "provision/assets/steam-hold-notice.ps1",
+        "provision/assets/desktop-chrome.ps1",
+        # Les trois de la chaine winget. Les etapes 33 et 34 les copient sur C:
+        # sous $ErrorActionPreference = 'Stop' : absent, le Copy-Item leve, et
+        # l'etape 34 - qui promet de ne JAMAIS faire echouer le provisionnement
+        # - le fait quand meme, pour une raison qui appartient a la
+        # construction. C'est le meme arbitrage que steam-cursor.ps1 : ce qui se
+        # constate ici ne doit pas se decouvrir sur l'invite, hors ligne.
+        "provision/assets/winget-path.ps1",
+        "provision/assets/gaming-services.ps1",
+        "provision/assets/xbox-stack.ps1",
         # Dot-sources par 32-retro.ps1 AVANT qu'elle lise le basculement, donc
         # requis meme sans retrogaming: absents, l'etape meurt au lieu de dire
         # posement que l'option n'est pas cochee.

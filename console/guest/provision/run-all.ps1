@@ -24,6 +24,11 @@ try {
                 # et six mois plus tard personne ne saurait si elle a echoue ou
                 # n'a jamais tourne.
                 '32-retro.ps1',
+                # 33 pose winget, 34 s en sert : « Services de jeu » n existe
+                # que dans le Store, que cette edition de Windows n a pas.
+                # Elles viennent APRES 20 (le volume persistant porte leur
+                # temoin) et avant 35, dont les partages ne les concernent pas.
+                '33-winget.ps1', '34-gaming-services.ps1',
                 '35-shares.ps1',
                 '40-agent.ps1', '45-debloat.ps1', '50-power.ps1', '55-updates.ps1',
                 '99-marker.ps1')
