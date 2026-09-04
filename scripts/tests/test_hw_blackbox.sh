@@ -146,7 +146,23 @@ print("ok")' "$NIVUUS_BLACKBOX_STATE" >/dev/null 2>&1 \
 
 echo "== a rail swinging inside its own band is not drift =="
 # Relearn with a rail that legitimately swings, the way Vcore does under load.
-# More samples here so the whole cycle is observed before anything is judged.
+#
+# LE BALANCEMENT AVANCE D UN CRAN PAR LECTURE DU PRODUIT, JAMAIS SUR L HORLOGE.
+# Il tournait dans un fil demon toutes les 10 ms pendant que l echantillonneur
+# lisait toutes les 20 ms (NIVUUS_BLACKBOX_INTERVAL) : deux horloges, un cycle
+# de SIX valeurs, donc un BATTEMENT. Une phase malheureuse faisait sauter
+# l indice 3 - le pic a 870 - pendant les 40 echantillons d apprentissage, la
+# bande s arretait a 780, et le premier 870 vu ensuite se lisait comme une
+# derive de 11,5 %. Le test echouait alors une fois sur huit (mesure du
+# 2026-09-05, 8 tours), en accusant un produit qui avait parfaitement raison :
+# face a une bande 620-780, un 870 EST hors bande.
+#
+# Cadencer le stimulus sur les lectures rend la couverture DETERMINISTE - 40
+# echantillons sur un cycle de 6 voient chaque phase au moins six fois - et
+# rend le test PLUS fort : il verifie desormais vraiment ce qu il affirme,
+# c est-a-dire qu une bande apprise sur tout le balancement ne crie pas dessus.
+# Le produit n est pas touche : le vrai read_int est appele, le vrai fichier
+# est ouvert et relu. Seule la DATE du stimulus change.
 rm -rf "$TMP/state" "$TMP/bb.csv"
 NIVUUS_BLACKBOX_BASELINE=40 timeout 6 python3 -c '
 import os, sys, importlib.util, threading, itertools
@@ -156,15 +172,28 @@ spec.loader.exec_module(mod)
 mod.HWMON = os.environ["FAKE_HWMON"]
 chip = os.environ["FAKE_CHIP"]
 swing = itertools.cycle([620, 700, 780, 870, 780, 700])
-def wobble():
-    while True:
+_real = mod.read_int
+def read_int(path):
+    if path.endswith("in0_input"):
         open(chip + "/in0_input", "w").write(str(next(swing)) + "\n")
-        threading.Event().wait(0.01)
-threading.Thread(target=wobble, daemon=True).start()
+    return _real(path)
+mod.read_int = read_int
 threading.Timer(2.5, lambda: os._exit(0)).start()
 sys.argv = ["bb", "run"]
 mod.main()
 ' >/dev/null 2>"$TMP/err_band"
+# LA PRECONDITION AVANT L ABSENCE, et c est le second defaut de ce bloc. Une
+# assertion d absence est verte quand le produit se comporte bien ET quand il
+# n a jamais tourne : mesure du 2026-09-05, un BB_PATH casse faisait planter le
+# python et "raises no alert" passait au vert sur une trace de pile. On exige
+# donc d abord que la fenetre d apprentissage ait VU tout le balancement -
+# faute de quoi l absence d alerte ne prouverait rien.
+python3 -c '
+import json, sys
+r = json.load(open(sys.argv[1]))["in0"]
+sys.exit(0 if r["lo"] <= 620 and r["hi"] >= 870 else 1)' "$NIVUUS_BLACKBOX_STATE" 2>/dev/null \
+  && ok "the learning window observed the whole swing" \
+  || bad "the learning window observed the whole swing" "$(cat "$NIVUUS_BLACKBOX_STATE" 2>/dev/null)"
 check_absent "a wide-swinging rail raises no alert" "rail in0 drifted" "$(cat "$TMP/err_band")"
 python3 -c '
 import json, sys

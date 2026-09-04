@@ -659,7 +659,7 @@ python3 console/guest/retro_sync.py   # retrogaming (OPTIONAL): replay
 # The three below also run as `cd installer && make test-scripts`, and as a
 # prerequisite of `make test-packages` - they were hand-run only until 2026-08-29.
 scripts/tests/test_pcie_wifi_link_guard.sh  # 16 assertions on a fake sysfs tree
-scripts/tests/test_hw_blackbox.sh           # 26 assertions on a fake hwmon tree
+scripts/tests/test_hw_blackbox.sh           # 27 assertions on a fake hwmon tree
 scripts/tests/test_net_rps_ecores.sh        # 20 assertions on a fake hybrid CPU
 console/tests/test_vm_wake_gate.py
 console/tests/test_handle_vm_start.sh       # 10 assertions on a fake virsh

@@ -103,7 +103,14 @@ test-packages: test-scripts
 #
 # They guard hardware-facing scripts but need no hardware: all three build a
 # fake tree under mktemp. Measured 2026-08-29 on a machine with none of the
-# devices they describe - 26 + 20 + 16 assertions, exit 0 each.
+# devices they describe - 27 + 20 + 16 assertions, exit 0 each.
+#
+# test_hw_blackbox comptait 26 assertions et ECHOUAIT UNE FOIS SUR HUIT jusqu au
+# 2026-09-05 : son bloc de balancement faisait tourner le stimulus sur une
+# horloge (un fil demon toutes les 10 ms) pendant que l echantillonneur lisait
+# sur la sienne (20 ms), donc un battement qui pouvait faire sauter le pic du
+# cycle pendant l apprentissage. Une suite qui echoue une fois sur huit cesse
+# d etre lue, et celle-ci garde cette cible.
 #
 # They are a PREREQUISITE of test-packages rather than a trailing call, so that
 # a base without pydantic - which stops the Python loop at test_webapp_models -
