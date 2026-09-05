@@ -81,7 +81,7 @@ if [ "$STRIKES" -ge "$IDLE_STRIKES_LIMIT" ]; then
     # Moonlight poll re-wakes the VM - leaving "running" at ANY point = success.
     timeout 10 /usr/local/bin/winvm "shutdown /h /f" >/dev/null 2>&1
     HIBERNATED=0
-    for i in $(seq 1 45); do
+    for _ in $(seq 1 45); do
         sleep 2
         if ! LC_ALL=C virsh domstate "$VM_NAME" 2>/dev/null | grep -q running; then
             HIBERNATED=1; break
