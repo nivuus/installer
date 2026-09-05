@@ -775,6 +775,134 @@ du dépôt. Le filet de `nivuus/retro` qui doit rattraper cette bascule est livr
 sur `main` — donc dans le dépôt, donc pas sur cette machine. Tant que C7 tient,
 C2 attend. Voir la porte en tête de C2.
 
+### Tentative du 2026-09-05 : trois obstacles distincts, aucun levé
+
+La reconstruction a été autorisée par le propriétaire et **n'a pas eu lieu**.
+Elle s'est arrêtée avant toute action destructrice, sur la première
+vérification. Rien n'a été détruit, rien n'a été sauvegardé, l'invité n'a pas
+été touché. Ce qui suit vaut pour la prochaine tentative.
+
+#### Obstacle 1 — le garde du mode disque ne tenait pas (RÉPARÉ le 2026-09-05)
+
+`guest_steps.refuse_implicit_wipe()` avait été livré précisément pour empêcher
+un `--disk-mode wipe` implicite d'emporter `D:`. **Éprouvé en vrai, il n'a pas
+refusé.** Banc d'essai : vrai `virsh` en lecture seule, vrai `/sys/block`,
+vraies réponses du wizard, exécuteur qui lève une sentinelle dès qu'un
+sous-processus serait lancé.
+
+    _disk_mode(answers)                        -> 'wipe', explicite=False
+    build.run()  -> GuestBuildError: the Windows medium ... is not readable
+
+L'erreur qui sortait était **le médium manquant**, pas le refus. Or le garde
+est appelé *avant* `media_identity()` : il avait donc été traversé sans un mot.
+
+**La cause.** Le garde tranchait avec `domain_matches_disk()`, qui résout le
+disque par `hardware.pci_address_for_device()` — une lecture de `/sys/block`.
+Le disque de la console est lié à **vfio-pci**, ce qui est le *but* du
+passthrough et non un accident, et un disque ainsi lié n'a aucune entrée dans
+`/sys/block` :
+
+    /sys/block                                    -> nvme0n1 seul (disque HÔTE)
+    pci_address_for_device('/dev/nvme1n1')        -> None
+    hostdev du domaine (virsh dumpxml)            -> 0000:03:00.0  (LE disque)
+    domain_matches_disk(xml_réel, '/dev/nvme1n1') -> False
+
+Le docstring du garde **nommait ce piège** (« the dedicated NVMe is bound to
+vfio-pci and exposes NO block device to the host ») puis s'appuyait sur une
+fonction qui exige précisément ce périphérique bloc. Le garde voulait deux
+preuves — le domaine défini *et* l'identité du disque ; la seconde n'existe
+pas côté hôte.
+
+**Pourquoi les tests ne l'ont pas vu, et c'est le vrai enseignement.** Les 24
+suites étaient vertes, celle du garde comprise, parce que
+`test_console_guest_steps.py` injectait partout `_default_pci_address_of`, un
+double qui rend l'adresse **inconditionnellement**. Le double satisfaisait
+exactement la précondition que le réel ne peut pas satisfaire. Le commentaire
+du test décrivait correctement le problème vfio, puis le neutralisait dans le
+montage — ce qui est pire qu'un oubli, parce que ça se relit comme si le cas
+avait été traité. **Un garde de sûreté vert en test et inerte en production
+est pire qu'un garde absent.**
+
+**Réparé.** Le garde applique désormais la règle que le module revendique,
+dans le bon sens : *en cas de doute, refuser*. Seul un disque **prouvé
+différent** laisse passer un wipe ; une identité qui ne peut pas être établie
+refuse — et c'est l'état **normal** ici, pas l'exception. `disk_pci_identity()`
+sépare « autre disque » de « ne peut pas savoir », que `domain_matches_disk()`
+repliait en un seul `False` légitime pour lui, faux pour ce garde.
+
+Vérifié sur la machine de production après correction :
+
+    a libvirt domain 'Windows' is already defined on this host, and
+    /dev/nvme1n1's identity CANNOT BE ESTABLISHED from here [...]
+
+Deux corollaires livrés avec :
+
+* **Le raccourci qui contournait le garde est fermé.** `refuse_implicit_wipe()`
+  n'était appelé que depuis `build_run()`, lui-même appelé seulement si
+  `build_done()` rendait `False`. Une ISO déjà construite **et estampillée**
+  fait rendre `True`, l'étape est sautée, et le garde n'est jamais traversé —
+  alors que cette ISO *est* une ISO d'effacement, l'empreinte couvrant les
+  réponses, qui re-valident donc leur propre image destructrice. Sans objet
+  tant qu'aucune ISO n'existe ; réel le jour d'une reconstruction, c'est-à-dire
+  le seul jour où ce garde sert. Le garde est maintenant traversé **avant** le
+  raccourci, dans `build_done()`.
+* **Le remède que le garde imprime est devenu atteignable.** `wizard.yaml` ne
+  collectait ni `disk_mode` ni `target_disk_verified` : le garde refusait en
+  nommant une sortie qui n'existait pas, ce qui n'enseigne qu'à le contourner
+  en éditant les réponses à la main. Les deux questions existent désormais.
+  `disk_mode` est un `choix` **requis et sans défaut** — délibérément : un
+  défaut n'est pas une phrase, et `wipe` par défaut aurait rendu la réponse
+  « explicite » au sens de `_disk_mode()`, donc aurait fait taire le garde pour
+  tout le monde. `target_disk_verified` vaut faux par défaut : on ne présume
+  jamais qu'un humain a vérifié de quel disque il s'agit.
+
+Les tests éprouvent désormais le **résolveur réel** rendant `None`, pas
+seulement le double qui répond juste. Le double reste pour le cas nominal — ce
+n'est pas lui le fautif, c'est qu'il ait été le seul.
+
+#### Obstacle 2 — aucun médium Windows sur l'hôte
+
+`/var/lib/nivuus/guest/` ne contient que `payload/retro/wheels/` (4,4 Mo). Il
+manque `windows-source.iso`, `secrets/`, `nivuus-unattend.iso`, et `agent.exe`
+(le témoin de `payload_done`). `copy_windows_medium()` n'est appelé que par
+`hooks/install.py`, au seul moment où le médium live et la cible coexistent —
+il est parti depuis longtemps. Recherche sur tout l'hôte : aucun ISO Windows,
+seuls les `live-image-amd64.hybrid.iso` de l'installeur.
+
+#### Obstacle 3 — le paquet console n'a jamais été installé par le moteur ici
+
+`/etc/nivuus/packages.json` est absent, donc **aucune réponse enregistrée** —
+et `activate_cli.py` en dépend entièrement. `/opt/nivuus/installer` est absent.
+`nivuus-guest-ready.timer` **n'existe pas** sur cette machine : le minuteur
+censé lire le marqueur et faire passer à `ready` n'est pas là, donc le « ~1 h
+jusqu'à ready » du runbook ne s'appliquerait pas tel quel.
+
+Ces deux obstacles appartiennent au propriétaire, pas au dépôt.
+
+#### Relevés d'avant, à comparer à la prochaine tentative
+
+* `C:\nivuus\state\PROVISION.done` (**pas** à la racine, comme on pourrait le
+  lire trop vite) : `provision_version=B1`, `completed=2026-08-26T18:39:36`,
+  `computer=NIVUUS-WIN`, `agent_session=2`.
+* Un `PROVISION.failed` cohabite avec lui : `stage=10-nvidia.ps1`,
+  `error=NVIDIA installer exited -469762040`.
+* `C:\nivuus\state` : les douze `.done` du 26/08, ni `32-retro`, ni
+  `33-winget`, ni `34-gaming-services`. Le reste sont des relevés manuels.
+* `C:\nivuus` porte aussi `lot28` et `lot29` (en plus de `lot27`/`lot30`/
+  `lot31`), plus `agent/`, `apollo/`, `gaming/`.
+* Disque, mesuré : **un seul**, `Samsung SSD 970 EVO Plus 2TB`, GPT, 1863 Go —
+  `D:` 1750 Go (1355 Go libres) et `C:` 111,9 Go (80,9 libres), plus
+  System/Reserved/Recovery. La règle du mode disque est confirmée par la
+  mesure, pas supposée.
+* Aucune session de streaming au moment du relevé : 474 puis 126 octets TX sur
+  `vnet37` en 5 s, CPU invité ~0,6 cœur sur 14.
+* Hôte : RTX 4070 (`01:00.0` + `01:00.1`) déjà sur `vfio-pci`, VM en cours ;
+  `ollama`, `nvidia-persistenced`, `tdarr-node` déjà `inactive`. C'est l'état
+  **trouvé**, pas un effet de la tentative.
+* `//192.168.3.2/D$` est monté sur `/media/win-d` : `D:\state\apollo\credentials`
+  est donc accessible depuis l'hôte sans passer par WinRM, ce qui simplifie la
+  sauvegarde de la racine d'appairage le jour venu.
+
 ---
 
 ## La chaîne winget / Xbox — ce qui est mesuré, et ce qui ne l'est pas

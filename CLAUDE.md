@@ -437,6 +437,44 @@ drives the **production runner itself** through the `build` step
 `python`, never a fake runner) — that seam had no assertion at all, which is
 exactly how the defect crossed it.
 
+**A TEST DOUBLE THAT SATISFIES A PRECONDITION PRODUCTION CANNOT SATISFY MAKES
+A SAFETY GUARD GREEN IN TEST AND INERT IN PRODUCTION (2026-09-05).** The worst
+form of the previous entry, and the only one that can cost 363 GB.
+`guest_steps.refuse_implicit_wipe()` exists to stop a `--disk-mode wipe`
+reached *by omission* from recreating the whole partition table — on this host
+one disk carries both `C:` and the games partition `D:` (Steam library, the
+logged-in session, `shortcuts.vdf`, `D:\Emulation`, and
+`D:\state\apollo\credentials`, the Apollo pairing root). It decided with
+`domain_matches_disk()`, which resolves the disk through `/sys/block`. **The
+console's disk is bound to vfio-pci — the point of the passthrough — so it has
+no `/sys/block` entry at all**, `pci_address_for_device()` returns `None`,
+the match reads `False`, and the guard returned silently. Measured on the real
+host with a bench (real read-only `virsh`, real `/sys/block`, a runner raising
+a sentinel before any subprocess): an activation with **no** `--disk-mode` was
+**not** refused. Twenty-four suites were green throughout, the guard's own
+among them, because every test injected a `pci_address_of` double returning the
+address unconditionally — and the test's comment *described* the vfio problem
+before neutralising it in the fixture, which reads on review as if the case had
+been handled. The guard's own docstring named the trap and then depended on the
+very lookup it said was impossible. **Three rules.** (1) When a guard's
+predicate can answer "cannot tell", that is a THIRD outcome, never folded into
+"no" — `disk_pci_identity()` now returns `None` distinctly, and only a disk
+*proven* different lets a wipe through; doubt is the normal state here, not the
+exception. (2) A guard reachable only from the `run()` side is bypassed by its
+own step's `already_done()` shortcut — `refuse_implicit_wipe()` is called from
+`build_done()` first, because a stamped ISO built from mode-less answers *is*
+an erasing ISO and re-validates its own fingerprint. (3) **Every guard needs at
+least one test driving the REAL resolver**, not only the double that answers
+correctly; keep the double for the nominal case, never as the only path.
+
+**A guard whose printed remedy is unreachable teaches people to bypass it
+(2026-09-05).** The same refusal told operators to answer `--disk-mode rebuild
+--target-disk-verified`, while `console/wizard.yaml` collected **neither** key
+— so the only way out was hand-editing the answers file. Both questions now
+exist; `disk_mode` is a **required `choix` with NO default**, deliberately: a
+default is not a statement, and defaulting it to `wipe` would have made the
+answer "explicit" for `_disk_mode()` and silenced the guard for everyone.
+
 **A HIBERNATED CONSOLE IS `shut off` — `domain_up()` cannot tell it from a
 machine that never booted (2026-08-28).** The whole energy strategy rests on S4
 (`vm-idle-shutdown.sh` runs `shutdown /h /f`), and `virsh start` *resumes* that
