@@ -166,15 +166,52 @@ def domain_matches_disk(xml: str, disk: str, *,
     match", never as "cannot tell so assume yes": the module's own WHEN IN
     DOUBT rule (see the module docstring) applies here exactly as it does to
     the build fingerprint.
+
+    THAT FOLDING IS RIGHT HERE AND WRONG ELSEWHERE, which is why the
+    resolution now lives in disk_pci_identity() instead of inline. This
+    predicate answers "is the domain ALREADY the one we want" - for it,
+    "cannot tell" and "does not match" both mean "not done", and collapsing
+    them is safe. refuse_implicit_wipe() asks the OPPOSITE question, "is
+    there something to lose", where the two answers are opposites: a disk
+    proven to be a different one is safe to erase, a disk whose identity
+    cannot be established is not. A caller that needs the distinction must
+    call disk_pci_identity() and read None for itself.
+    """
+    address = disk_pci_identity(disk, pci_address_of=pci_address_of)
+    if address is None:
+        return False
+    return address in hostdev_source_addresses(xml)
+
+
+def disk_pci_identity(disk: str, *,
+                      pci_address_of: Callable[[str], str | None] | None = None
+                      ) -> str | None:
+    """`disk`'s host PCI address in canonical form, or None if unknowable.
+
+    None is not "no": it is "this host cannot say", and the two must never
+    be conflated by a caller for whom they differ (see domain_matches_disk
+    above, and refuse_implicit_wipe below, which read the same fact in
+    opposite directions).
+
+    None IS THE NORMAL ANSWER FOR THE CONSOLE'S OWN DISK, and that is the
+    whole reason this function is named and separate. The default resolver
+    reads /sys/block; the dedicated NVMe is bound to vfio-pci - which is the
+    POINT of the passthrough, not an accident - and a disk bound to vfio-pci
+    exposes no block device to the host at all. Measured on the production
+    host 2026-09-05: /sys/block lists only the host's own nvme0n1, and
+    pci_address_for_device('/dev/nvme1n1') returns None while `virsh dumpxml
+    Windows` shows that very disk passed through at 0000:03:00.0. So on the
+    one machine this module exists to serve, this function answers None for
+    the one disk that matters.
     """
     resolver = pci_address_of or _disk_pci_address
     address = resolver(disk)
     if not address:
-        return False
+        return None
     match = _PCI_ADDRESS_RE.fullmatch(address)
     if not match:
-        return False
-    return _normalize_pci_address(match.groups()) in hostdev_source_addresses(xml)
+        return None
+    return _normalize_pci_address(match.groups())
 
 
 def _disk_pci_address(disk: str) -> str | None:
@@ -1049,6 +1086,25 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         _grant_qemu_traverse(root, chmod)
 
     def build_done() -> bool:
+        # THE GUARD IS TRAVERSED BEFORE THE SHORTCUT, not only inside
+        # build_run(). Called only from there, it was skipped entirely
+        # whenever this predicate said True - and this predicate says True
+        # exactly when an ISO is already built and stamped. That ISO is
+        # itself a WIPE ISO when the answers that produced it carried no
+        # disk mode (the fingerprint covers `answers`, so the same
+        # mode-less answers re-validate their own erasing image), and the
+        # pipeline would then walk straight from `secrets` to `define` and
+        # `start` without the question ever being asked. Harmless while no
+        # ISO exists; live the day a rebuild is actually attempted, which
+        # is the one day this guard is for.
+        #
+        # Raising from a predicate is the established shape here, not a new
+        # liberty: see ensure_qemu_owned() below, allowed to raise for the
+        # same reason - returning False would send the caller into a full
+        # rebuild for a problem a rebuild cannot fix. activate.py's
+        # run_steps() calls already_done() inside its classified region
+        # precisely so this reaches an operator as one named line.
+        refuse_implicit_wipe()
         if not iso_out.is_file():
             return False
         try:
@@ -1257,12 +1313,32 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         see the passthrough disk"). The host-side equivalent is a libvirt
         domain already defined AND already wired to THIS disk: Windows has
         been installed onto it at least once, so its data partition may hold
-        everything above. domain_matches_disk() is the same identity check
-        domain_defined() trusts, and it is deliberately weaker here - the
-        media state is irrelevant to the question "is there something to
-        lose", so a half-defined domain must refuse too, not slip through.
+        everything above.
 
-        WHEN IN DOUBT, REFUSE. An unreachable libvirtd yields no XML and
+        THE FIRST CUT OF THIS GUARD NAMED THAT TRAP AND THEN WALKED INTO IT,
+        and it is worth spelling out because it never failed a test. It
+        refused only on domain_matches_disk(), which resolves the disk
+        through /sys/block - the very lookup the paragraph above says is
+        impossible for this disk. Measured on the production host
+        2026-09-05: /sys/block lists only the host's own nvme0n1,
+        disk_pci_identity('/dev/nvme1n1') is None, `virsh dumpxml Windows`
+        shows that disk passed through at 0000:03:00.0, and an activation
+        with no --disk-mode was NOT refused. Twenty-four suites were green
+        throughout, because every one of them injected a `pci_address_of`
+        double that returns the address unconditionally - the double
+        satisfied exactly the precondition production cannot satisfy. A
+        safety guard that is green in test and inert in production is worse
+        than an absent one, and this is the shape it takes.
+
+        SO THE RULE IS THE MODULE'S OWN, APPLIED THE RIGHT WAY UP. "When in
+        doubt, refuse" - and here doubt is the NORMAL state, not the
+        exception, because the passthrough guarantees the disk is not
+        resolvable. Only a disk PROVEN to be a different one lets a wipe
+        through: an identity that cannot be established never does. That is
+        the single behavioural difference from the first cut, and it is the
+        difference between a guard that mords and one that does not.
+
+        WHAT THIS STILL CANNOT DO. An unreachable libvirtd yields no XML and
         therefore no refusal: that is the one direction this cannot fix -
         it is the same limit every other predicate in this module carries,
         and it is named here rather than hidden.
@@ -1272,22 +1348,37 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         xml = defined_xml()
         if xml is None:
             return
-        if not domain_matches_disk(xml, disk, pci_address_of=pci_address_of):
-            return
+        # NOT domain_matches_disk(): it folds "different disk" and "cannot
+        # tell" into one False, and those are OPPOSITE answers to the
+        # question asked here. See its docstring, and disk_pci_identity's.
+        identity = disk_pci_identity(disk, pci_address_of=pci_address_of)
+        if identity is not None and identity not in hostdev_source_addresses(xml):
+            return                  # proven to be some other disk
+        if identity is None:
+            constat = (
+                f"a libvirt domain '{DOMAIN_NAME}' is already defined on "
+                f"this host, and {disk}'s identity CANNOT BE ESTABLISHED "
+                "from here - the console's own disk is bound to vfio-pci, "
+                "so it has no block device the host can read, and 'this is "
+                "a different disk' can therefore never be proven, only "
+                "assumed")
+        else:
+            constat = (
+                f"{disk} already carries a console: the libvirt domain "
+                f"'{DOMAIN_NAME}' is defined against this exact disk")
         raise GuestBuildError(
-            f"{disk} already carries a console: the libvirt domain "
-            f"'{DOMAIN_NAME}' is defined against this exact disk. No "
-            "--disk-mode was given, and the default is 'wipe', which "
-            "RECREATES THE WHOLE PARTITION TABLE - it would destroy the "
-            "games partition D: as well as C:, and on this machine both "
-            "live on that one disk: the Steam library and its logged-in "
-            "session, the retro library's shortcuts.vdf, D:\\Emulation, and "
-            "D:\\state\\apollo\\credentials - the Apollo pairing root, "
-            "whose loss means re-pairing every Moonlight client by hand. "
-            "To reinstall Windows and KEEP the games partition, answer "
-            "'--disk-mode rebuild --target-disk-verified' once you have "
-            "confirmed this is the right disk. To genuinely erase the whole "
-            "disk, ask for it in as many words with '--disk-mode wipe'.")
+            f"{constat}. No --disk-mode was given, and the default is "
+            "'wipe', which RECREATES THE WHOLE PARTITION TABLE - it would "
+            "destroy the games partition D: as well as C:, and on this "
+            "machine both live on that one disk: the Steam library and its "
+            "logged-in session, the retro library's shortcuts.vdf, "
+            "D:\\Emulation, and D:\\state\\apollo\\credentials - the Apollo "
+            "pairing root, whose loss means re-pairing every Moonlight "
+            "client by hand. To reinstall Windows and KEEP the games "
+            "partition, answer '--disk-mode rebuild --target-disk-verified' "
+            "once you have confirmed this is the right disk. To genuinely "
+            "erase the whole disk, ask for it in as many words with "
+            "'--disk-mode wipe'.")
 
 
     return [

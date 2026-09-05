@@ -1464,6 +1464,164 @@ with tempfile.TemporaryDirectory() as tmp:
                               {"disk_mode": "format-everything"}))
 
 
+# --- le garde s appuyait sur ce que le passthrough EFFACE ----------------- #
+# MESURE DU 2026-09-05, SUR L HOTE DE PRODUCTION, ET LE BLOC CI-DESSUS ETAIT
+# VERT PENDANT CE TEMPS. Le garde n a JAMAIS mordu sur cette machine.
+#
+# Il tranchait avec domain_matches_disk(), qui resout le disque par
+# hardware.pci_address_for_device() - une lecture de /sys/block. Or le disque
+# de la console est lie a vfio-pci, ce qui est le BUT du passthrough et non un
+# accident, et un disque ainsi lie n a AUCUNE entree dans /sys/block. Mesure,
+# chaine reelle, virsh reel, executeur qui refuse de lancer quoi que ce soit :
+#
+#     /sys/block                                    -> nvme0n1 seul (disque HOTE)
+#     pci_address_for_device('/dev/nvme1n1')        -> None
+#     domain_matches_disk(xml_reel, '/dev/nvme1n1') -> False
+#     hostdev du domaine                            -> 0000:03:00.0 (LE disque)
+#     build.run() sans --disk-mode                  -> AUCUN refus
+#
+# Et si le bloc ci-dessus ne l a pas vu, c est qu il injecte partout
+# _default_pci_address_of, un double qui rend l adresse INCONDITIONNELLEMENT :
+# le double satisfait exactement la precondition que le reel ne peut pas
+# satisfaire. Ce n est pas le double qui est fautif - le cas nominal a besoin
+# de lui, et il reste - c est qu il ait ete le SEUL. Tout ce qui suit passe
+# par le resolveur REEL.
+#
+# La regle du module est « en cas de doute, refuser ». Le garde l appliquait
+# a l envers : il ne refusait que sur une CORRESPONDANCE PROUVEE, alors que
+# le doute est ici l etat NORMAL et non l exception.
+
+# Un nom d unite qui n est PAS dans /sys/block sur la machine qui joue ce
+# test : c est l etat du disque de la console une fois lie a vfio-pci,
+# reproduit sans exiger de materiel particulier.
+_BLOCS = set(os.listdir("/sys/block")) if os.path.isdir("/sys/block") else set()
+DISQUE_INVISIBLE = next(f"/dev/nvme{n}n1" for n in range(9, 99)
+                        if f"nvme{n}n1" not in _BLOCS)
+
+check("le resolveur REEL - celui de la production, sans double - ne resout "
+      "pas un disque absent de /sys/block",
+      steps.disk_pci_identity(DISQUE_INVISIBLE), None)
+check("une adresse illisible n est pas une adresse",
+      steps.disk_pci_identity("/dev/nvme1n1",
+                              pci_address_of=lambda d: "pas-une-adresse"), None)
+check("une adresse lisible est rendue sous forme canonique",
+      steps.disk_pci_identity("/dev/nvme1n1",
+                              pci_address_of=lambda d: "0:3:0.0"),
+      DEFAULT_NVME_PCI)
+
+
+def plan_reel(tmp, virsh, answers=None, **extra):
+    """plan_steps SANS pci_address_of : le resolveur REEL, celui qui lit
+    /sys/block. C est le seul montage qui prouve quelque chose du chemin de
+    production - un test qui n eprouve que le double qui repond juste ne dit
+    rien du chemin qui compte."""
+    given = dict(ANSWERS, guest_workdir=tmp, dedicated_nvme=DISQUE_INVISIBLE)
+    given.pop("disk_mode", None)
+    given.update(answers or {})
+    return by_name(steps.plan_steps(
+        given, {}, tmp, virsh=virsh,
+        runner=lambda *a, **k: None,
+        size_of=lambda device: DISK_BYTES,
+        qemu_owner=lambda: (0, 0), chown=_inert_chown, **extra))
+
+
+def message_du_refus(etape):
+    """Le texte du refus, ou None si l etape n a rien refuse."""
+    try:
+        etape.run()
+    except steps.GuestBuildError as exc:
+        return str(exc)
+    return None
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    # Le domaine de regime : aucun media, le bon disque. C est exactement
+    # l etat de la console de production aujourd hui.
+    console_reelle = FakeVirsh(
+        {"dumpxml": (0, "<domain><devices>" + nvme_hostdev()
+                     + "</devices></domain>"),
+         "domstate": (0, "shut off\n")})
+
+    # LE ROUGE. Sur la vraie machine, avec le vrai resolveur, un wipe
+    # implicite contre une console existante passait sans un mot.
+    message = message_du_refus(plan_reel(tmp, console_reelle)["build"])
+    check("un wipe implicite est refuse MEME quand l identite du disque est "
+          "inconnaissable - c est l etat NORMAL du disque de la console",
+          message is not None, True)
+    check("et le refus dit que l identite n a PAS pu etre etablie, sans "
+          "pretendre avoir reconnu le disque",
+          "identity" in (message or "").lower(), True)
+    check("le refus nomme toujours ce qui serait detruit",
+          "D:" in (message or ""), True)
+    check("et le remede exact",
+          "--disk-mode rebuild --target-disk-verified" in (message or ""), True)
+
+    # Aucun domaine defini : machine neuve, rien a perdre, le garde se tait
+    # meme si le disque reste inconnaissable. Sinon plus aucune installation
+    # ne serait possible sur une machine ou le disque est deja lie a vfio.
+    check("sans domaine defini il n y a rien a perdre : pas de refus",
+          message_du_refus(plan_reel(tmp, FakeVirsh(NO_DOMAIN))["build"]), None)
+
+    # Un disque PROUVE different : le domaine ne le passe pas, il n y a rien
+    # de la console a perdre. Le doute seul refuse, pas le desaccord.
+    check("un disque prouve etranger au domaine n est pas protege par ce "
+          "garde",
+          message_du_refus(plan_reel(
+              tmp, console_reelle,
+              pci_address_of=lambda d: AUTRE_NVME)["build"]), None)
+
+    # Le mode explicite reste la porte de sortie, dans les deux sens.
+    check("un wipe EXPLICITE reste possible, identite inconnaissable ou non",
+          message_du_refus(plan_reel(tmp, console_reelle,
+                                     {"disk_mode": "wipe"})["build"]), None)
+    check("et le mode sur ne declenche jamais ce garde",
+          message_du_refus(plan_reel(tmp, console_reelle,
+                                     {"disk_mode": "rebuild"})["build"]), None)
+
+
+# --- le raccourci qui contournait le garde entierement -------------------- #
+# refuse_implicit_wipe() n etait appele que depuis build_run(), or build_run()
+# n est appele que si build_done() a rendu False. Une ISO deja construite ET
+# estampillee fait rendre True, l etape est sautee, et le garde n est jamais
+# traverse - alors que cette ISO EST une ISO d effacement, puisqu elle a ete
+# fabriquee a partir de reponses qui ne portaient aucun mode. Sans objet tant
+# qu aucune ISO n existe ; reel le jour ou une reconstruction se joue, qui est
+# exactement le jour ou ce garde sert.
+#
+# Le predicat a donc le droit de LEVER plutot que de rendre True - le meme
+# choix, et pour la meme raison, que ensure_qemu_owned() dans sa branche
+# « deja courant » : rendre False enverrait reconstruire pour un probleme
+# qu une reconstruction ne corrige pas.
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    console_reelle = FakeVirsh(
+        {"dumpxml": (0, "<domain><devices>" + nvme_hostdev()
+                     + "</devices></domain>"),
+         "domstate": (0, "shut off\n")})
+
+    sans_mode = plan_reel(tmp, console_reelle)["build"]
+    iso_out = pathlib.Path(arg(sans_mode.command, "--output"))
+    iso_out.parent.mkdir(parents=True, exist_ok=True)
+    iso_out.write_bytes(b"iso")
+    steps.write_build_stamp(steps.build_stamp_path(str(iso_out)),
+                            sans_mode.fingerprint())
+    check_raises("une ISO d effacement implicite DEJA estampillee est refusee "
+                 "par le predicat lui-meme, jamais silencieusement sautee",
+                 steps.GuestBuildError, sans_mode.already_done)
+
+    # Et le chemin nominal reste sautable : des que le mode est dit, une ISO
+    # courante se saute comme avant. Le garde ne rend pas la re-activation
+    # bavarde, il ne parle que de ce qui n a jamais ete demande.
+    dit = plan_reel(tmp, console_reelle, {"disk_mode": "wipe"})["build"]
+    iso_dit = pathlib.Path(arg(dit.command, "--output"))
+    iso_dit.write_bytes(b"iso")
+    steps.write_build_stamp(steps.build_stamp_path(str(iso_dit)),
+                            dit.fingerprint())
+    check("une ISO courante dont le mode a ete DIT se saute normalement",
+          dit.already_done(), True)
+
+
 if failures:
     for item in failures:
         print(f"FAIL - {item}")
