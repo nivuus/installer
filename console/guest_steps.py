@@ -67,6 +67,16 @@ MIN_GAMES_GIB = 100
 # guest/domain.py's DOMAIN_NAME. Same copy-not-import reason.
 DOMAIN_NAME = "Windows"
 
+# guest/autounattend.py's DISK_MODES. Same copy-not-import reason.
+#
+# "wipe" RECREATES THE WHOLE PARTITION TABLE of the dedicated disk; "rebuild"
+# reformats the system partition and nothing else. On the production console
+# both C: and D: live on ONE physical disk, so the difference between these
+# two words is the difference between keeping and destroying the games
+# partition. See refuse_implicit_wipe() for what that costs.
+DISK_MODES = ("wipe", "rebuild")
+
+
 # The one payload file whose presence proves the CURRENT fetch_payload.py
 # ran, not merely that some payload/ tree exists. Mirrors that script's own
 # `dest = drivers_dir / "agent" / "agent.exe"` - copied, not imported (the
@@ -831,6 +841,26 @@ def _retro_flag(answers: Mapping[str, object]) -> list[str]:
     return ["--retro" if value else "--no-retro"]
 
 
+def _disk_mode(answers: Mapping[str, object]) -> tuple[str, bool]:
+    """The disk mode and whether the operator actually asked for it.
+
+    The second element is the whole point. build.py defaults `--disk-mode` to
+    "wipe" and plan_steps() used to pass no flag at all, so the destructive
+    mode was reached BY OMISSION - nobody ever typed it, and nothing ever
+    said so. Distinguishing "wipe because it was asked for" from "wipe
+    because nothing was said" is what lets refuse_implicit_wipe() stop only
+    the second.
+    """
+    if "disk_mode" not in answers:
+        return "wipe", False
+    value = answers["disk_mode"]
+    if value not in DISK_MODES:
+        raise GuestBuildError(
+            f"the answer 'disk_mode' expects one of {DISK_MODES}, got "
+            f"{value!r}.")
+    return str(value), True
+
+
 def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
                workdir: str, *, virsh: Callable[..., object] | None = None,
                runner: Callable[..., None] | None = None,
@@ -864,6 +894,12 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
 
     secrets = {key: _secret(answers, key) for key in SECRET_FILES}
     retro_flag = _retro_flag(answers)
+    disk_mode, disk_mode_explicit = _disk_mode(answers)
+    # NEVER synthesised: --target-disk-verified is build.py's record that a
+    # HUMAN checked which disk this is. Inventing it here would forge that
+    # signature and disarm the one guard build.py does have.
+    verified_flag = (["--target-disk-verified"]
+                     if answers.get("target_disk_verified") is True else [])
 
     disk = str(answers.get("dedicated_nvme") or "").strip()
     if not disk:
@@ -921,7 +957,8 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
                  "--apollo-user", str(answers.get("apollo_user",
                                                   DEFAULT_APOLLO_USER)),
                  "--hostname", str(answers.get("hostname", DEFAULT_HOSTNAME)),
-                 "--data-partition-gb", str(data_gib)] + retro_flag
+                 "--data-partition-gb", str(data_gib),
+                 "--disk-mode", disk_mode] + retro_flag + verified_flag
     # No --replace: redefining an existing domain makes the next boot of a
     # hibernated Windows resume into changed hardware and discard the session.
     #
@@ -1029,6 +1066,15 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
     stage_dir = root / "tmp"
 
     def build_run() -> None:
+        # FIRST, and deliberately here rather than in plan_steps' body:
+        # plan_steps() "Runs nothing" (see its docstring) and must stay free
+        # of side effects, while the only honest test of "is a wipe about to
+        # happen" is build_done(), which reasserts qemu ownership and can
+        # chown. Refusing here also keeps an idempotent re-activation green:
+        # a console whose ISO is already stamped never reaches this function
+        # at all, because the step is skipped. Nothing is destroyed until
+        # `start` boots Setup, two steps later, so this is early enough.
+        refuse_implicit_wipe()
         media_identity(source_iso)      # refuse a missing medium by name
         stage_dir.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ, TMPDIR=str(stage_dir))
@@ -1169,6 +1215,68 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         runner(start_cmd)
         if not was_up and booting_media:
             send_boot_keys(virsh, sleep)
+
+    def refuse_implicit_wipe() -> None:
+        r"""Refuse to wipe a disk that already carries a console, unasked.
+
+        WHY THIS EXISTS AT ALL. build.py::enforce_disk_mode_guard is mounted
+        the wrong way round: it refuses "rebuild" - the mode that only
+        reformats C: - and waves "wipe" through, the mode that recreates the
+        WHOLE partition table. Since plan_steps() passed no --disk-mode, the
+        destructive mode was the one reached by omission. A guard that only
+        ever stops the safe path is worse than no guard: it reads, to the
+        next person, as if the dangerous path had been considered.
+
+        WHAT A WIPE COSTS HERE, measured on the production guest 2026-09-05.
+        ONE physical disk (Samsung SSD 970 EVO Plus 2 TB, GPT) carries both
+        C: (111.9 GB) and D: (1750 GB). A wipe takes D: with it:
+        D:\Steam (356.93 GB, of which 355.34 GB of installed games), the
+        logged-in Steam session, the retro library's shortcuts.vdf,
+        D:\Emulation, and D:\state\apollo\credentials - cacert.pem and
+        cakey.pem, the APOLLO PAIRING ROOT. Losing that last one means
+        re-pairing every Moonlight client in the living room by hand, on a
+        machine with no screen. autounattend.xml.j2 carries the scar of
+        2026-08-25, when a rebuild ate this partition once already.
+
+        WHAT COUNTS AS PROOF, AND WHAT CANNOT. D:\state\NIVUUS-DATA.id is
+        the marker 20-disk.ps1 uses, but it is unreadable from here: the
+        dedicated NVMe is bound to vfio-pci and exposes NO block device to
+        the host (see hardware.py::parse_nvme_controllers - "lsblk cannot
+        see the passthrough disk"). The host-side equivalent is a libvirt
+        domain already defined AND already wired to THIS disk: Windows has
+        been installed onto it at least once, so its data partition may hold
+        everything above. domain_matches_disk() is the same identity check
+        domain_defined() trusts, and it is deliberately weaker here - the
+        media state is irrelevant to the question "is there something to
+        lose", so a half-defined domain must refuse too, not slip through.
+
+        WHEN IN DOUBT, REFUSE. An unreachable libvirtd yields no XML and
+        therefore no refusal: that is the one direction this cannot fix -
+        it is the same limit every other predicate in this module carries,
+        and it is named here rather than hidden.
+        """
+        if disk_mode_explicit or disk_mode != "wipe":
+            return
+        xml = defined_xml()
+        if xml is None:
+            return
+        if not domain_matches_disk(xml, disk, pci_address_of=pci_address_of):
+            return
+        raise GuestBuildError(
+            f"{disk} already carries a console: the libvirt domain "
+            f"'{DOMAIN_NAME}' is defined against this exact disk. No "
+            "--disk-mode was given, and the default is 'wipe', which "
+            "RECREATES THE WHOLE PARTITION TABLE - it would destroy the "
+            "games partition D: as well as C:, and on this machine both "
+            "live on that one disk: the Steam library and its logged-in "
+            "session, the retro library's shortcuts.vdf, D:\\Emulation, and "
+            "D:\\state\\apollo\\credentials - the Apollo pairing root, "
+            "whose loss means re-pairing every Moonlight client by hand. "
+            "To reinstall Windows and KEEP the games partition, answer "
+            "'--disk-mode rebuild --target-disk-verified' once you have "
+            "confirmed this is the right disk. To genuinely erase the whole "
+            "disk, ask for it in as many words with '--disk-mode wipe'.")
+
 
     return [
         Step("secrets", secrets_done, write_secrets, None, None,

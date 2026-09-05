@@ -269,7 +269,13 @@ def _inert_chown(path, uid, gid):
 
 
 def plan(tmp, virsh, answers=None, disk_bytes=DISK_BYTES, pci_address_of=None):
-    given = dict(ANSWERS)
+    # disk_mode is stated EXPLICITLY here, and every test using this helper
+    # inherits it, because none of them is about the disk mode: an implicit
+    # "wipe" against a domain already wired to this disk is refused outright
+    # (refuse_implicit_wipe), which would otherwise turn most of this file
+    # into that one refusal. The tests that ARE about the mode build their
+    # answers by hand and deliberately leave the key out.
+    given = dict(ANSWERS, disk_mode="wipe")
     given.update(answers or {})
     given["guest_workdir"] = tmp
     return steps.plan_steps(given, {}, tmp, virsh=virsh,
@@ -1367,6 +1373,95 @@ try:
 except steps.GuestBuildError as exc:
     check("un utilisateur qemu inexistant est refuse EN LE NOMMANT (l uid)",
           "999999" in str(exc), True)
+
+
+# --- le garde-fou du mode disque ---------------------------------------- #
+# LE GARDE EXISTANT EST MONTE A L ENVERS, et c est tout l objet de ce bloc.
+# build.py::enforce_disk_mode_guard ne refuse que « rebuild » - le mode SUR,
+# celui qui ne reformate que C: - et laisse passer « wipe », le mode qui
+# efface le disque ENTIER. Or plan_steps() ne passait aucun --disk-mode, donc
+# build.py prenait son defaut, donc « wipe ».
+#
+# Mesure du 2026-09-05 sur l invite de production : un SEUL disque physique
+# (Samsung SSD 970 EVO Plus 2 To, GPT) porte a la fois C: (111,9 Go) et
+# D: (1750 Go). Sur D: vivent D:\Steam (356,93 Go), la session Steam, le
+# shortcuts.vdf de la bibliotheque retro, D:\Emulation, et
+# D:\state\apollo\credentials (cacert.pem + cakey.pem, LA RACINE
+# D APPAIRAGE Apollo : la perdre, c est reappairer chaque client Moonlight a
+# la main, sans ecran). Le gabarit autounattend.xml.j2 porte lui-meme la
+# cicatrice du 2026-08-25, ou une reconstruction a deja mange cette
+# partition.
+#
+# CE QUI NE PEUT PAS SERVIR DE PREUVE : D:\state\NIVUUS-DATA.id. Il est sur
+# le disque de l invite, et ce disque est lie a vfio-pci - il n a AUCUN
+# peripherique bloc cote hote (voir hardware.py::parse_nvme_controllers :
+# « lsblk cannot see the passthrough disk »). L hote ne peut donc ni le
+# monter ni le lire. Le domaine libvirt deja defini sur CE disque est la
+# preuve equivalente qui, elle, existe cote hote.
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    # Le domaine de regime : aucun media, le bon disque. C est exactement
+    # l etat de la console d aujourd hui.
+    console_existante = FakeVirsh(
+        {"dumpxml": (0, "<domain><devices>" + nvme_hostdev()
+                     + "</devices></domain>"),
+         "domstate": (0, "shut off\n")})
+
+    # LE ROUGE : aujourd hui, cette reconstruction part sans un mot. Le refus
+    # se lit sur l ETAPE build - la ou l ISO qui efface serait fabriquee -
+    # et non a la construction du plan, qui ne doit rien executer.
+    sans_mode = dict(ANSWERS, guest_workdir=tmp)
+    sans_mode.pop("disk_mode", None)
+    implicite = by_name(steps.plan_steps(
+        sans_mode, {}, tmp, virsh=console_existante,
+        runner=lambda *a, **k: None,
+        size_of=lambda device: DISK_BYTES,
+        pci_address_of=_default_pci_address_of,
+        qemu_owner=lambda: (0, 0), chown=_inert_chown))
+    check("construire le plan n execute toujours rien",
+          implicite["build"].command[1].endswith("build.py"), True)
+    try:
+        implicite["build"].run()
+        failures.append("un wipe implicite sur une console existante n a pas "
+                        "ete refuse")
+    except steps.GuestBuildError as exc:
+        message = str(exc)
+        check("le refus nomme la partition de donnees",
+              "D:" in message, True)
+        check("le refus nomme le remede exact",
+              "--disk-mode rebuild --target-disk-verified" in message, True)
+
+    # Un wipe EXPLICITEMENT demande reste possible : c est une console qu on
+    # reconstruit vraiment de zero, et l operateur l a ecrit.
+    voulu = by_name(plan(tmp, console_existante, {"disk_mode": "wipe"}))
+    check("un wipe explicite est accepte sur une console existante",
+          arg(voulu["build"].command, "--disk-mode"), "wipe")
+
+    # Machine neuve : aucun domaine, donc rien a detruire. Le plan passe, et
+    # le mode est passe EXPLICITEMENT plutot que laisse au defaut de build.py.
+    neuve = by_name(plan(tmp, FakeVirsh(NO_DOMAIN)))
+    check("sur une machine neuve le mode est passe explicitement",
+          arg(neuve["build"].command, "--disk-mode"), "wipe")
+
+    # Le mode sur : passe tel quel, et la signature de l operateur n est
+    # JAMAIS inventee ici - sans elle, c est build.py qui refuse, avec son
+    # propre message.
+    sans_signature = by_name(plan(tmp, console_existante,
+                                  {"disk_mode": "rebuild"}))
+    check("le mode rebuild est transmis",
+          arg(sans_signature["build"].command, "--disk-mode"), "rebuild")
+    check("la signature de l operateur n est pas inventee",
+          "--target-disk-verified" in sans_signature["build"].command, False)
+
+    signe = by_name(plan(tmp, console_existante,
+                         {"disk_mode": "rebuild", "target_disk_verified": True}))
+    check("la signature de l operateur est transmise quand elle est donnee",
+          "--target-disk-verified" in signe["build"].command, True)
+
+    # Un mode inconnu est refuse ici, pas trois etapes plus loin.
+    check_raises("un mode disque inconnu est refuse", steps.GuestBuildError,
+                 lambda: plan(tmp, console_existante,
+                              {"disk_mode": "format-everything"}))
 
 
 if failures:
