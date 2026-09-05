@@ -278,10 +278,15 @@ def plan(tmp, virsh, answers=None, disk_bytes=DISK_BYTES, pci_address_of=None):
     given = dict(ANSWERS, disk_mode="wipe")
     given.update(answers or {})
     given["guest_workdir"] = tmp
+    # definition_on_disk : « absente », pour que cette suite ne lise JAMAIS
+    # le /etc/libvirt/qemu de la machine qui l execute. Sans cette injection
+    # les assertions dependraient de la presence d une VM sur le poste - le
+    # genre de dependance qui rend une suite verte ici et rouge ailleurs.
     return steps.plan_steps(given, {}, tmp, virsh=virsh,
                             size_of=lambda device: disk_bytes,
                             pci_address_of=pci_address_of or _default_pci_address_of,
-                            qemu_owner=lambda: (0, 0), chown=_inert_chown)
+                            qemu_owner=lambda: (0, 0), chown=_inert_chown,
+                            definition_on_disk=lambda: False)
 
 
 def by_name(plan_list):
@@ -477,7 +482,8 @@ with tempfile.TemporaryDirectory() as tmp:
     upgraded = steps.plan_steps(
         dict(ANSWERS, guest_workdir=tmp), {}, tmp,
         virsh=FakeVirsh(NO_DOMAIN), size_of=lambda d: DISK_BYTES,
-        build_inputs={"guest/build.py": "une-version-suivante"})
+        build_inputs={"guest/build.py": "une-version-suivante"},
+            definition_on_disk=lambda: False)
     check("une mise a jour du paquet force la reconstruction de l ISO",
           by_name(upgraded)["build"].already_done(), False)
     # A missing medium cannot be fingerprinted: rebuild, never skip. The
@@ -647,7 +653,8 @@ def lance(tmp, virsh_answers):
     given = dict(ANSWERS, guest_workdir=tmp)
     steps_list = steps.plan_steps(given, {}, tmp, virsh=FakeVirsh(virsh_answers),
                                   runner=vus.append,
-                                  size_of=lambda d: DISK_BYTES)
+                                  size_of=lambda d: DISK_BYTES,
+            definition_on_disk=lambda: False)
     by_name(steps_list)["define"].run()
     return vus[0]
 
@@ -748,7 +755,8 @@ def _run_start(tmp, virsh_answers):
     st = by_name(steps.plan_steps(
         given, {}, tmp, virsh=fake_virsh, runner=launched.append,
         size_of=lambda d: DISK_BYTES, pci_address_of=_default_pci_address_of,
-        qemu_owner=lambda: (0, 0), chown=_inert_chown, sleep=slept.append))
+        qemu_owner=lambda: (0, 0), chown=_inert_chown, sleep=slept.append,
+            definition_on_disk=lambda: False))
     try:
         st["start"].run()
     except Unbounded as exc:
@@ -923,7 +931,8 @@ with tempfile.TemporaryDirectory() as tmp:
 
     try:
         steps.plan_steps(dict(ANSWERS), {}, tmp, virsh=FakeVirsh(NO_DOMAIN),
-                         size_of=unsized)
+                         size_of=unsized,
+                definition_on_disk=lambda: False)
     except steps.GuestBuildError as exc:
         check("le refus nomme le disque", "nvme1n1" in str(exc), True)
 
@@ -933,7 +942,8 @@ with tempfile.TemporaryDirectory() as tmp:
 
     sized = steps.plan_steps(dict(ANSWERS, guest_workdir=tmp),
                              {"dedicated_nvme_size_bytes": 500 * GIB}, tmp,
-                             virsh=FakeVirsh(NO_DOMAIN), size_of=forbidden)
+                             virsh=FakeVirsh(NO_DOMAIN), size_of=forbidden,
+            definition_on_disk=lambda: False)
     cmd = by_name(sized)["build"].command
     check("hw fournit la taille quand il la connait",
           cmd[cmd.index("--data-partition-gb") + 1],
@@ -1125,7 +1135,8 @@ with tempfile.TemporaryDirectory() as tmp:
         given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=runner,
         size_of=lambda d: DISK_BYTES,
         qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown,
-        chmod=chmod))
+        chmod=chmod,
+            definition_on_disk=lambda: False))
     # secrets/ is written by the REAL step, never fabricated: what the
     # traverse grant must not expose is the directory that step creates.
     planned["secrets"].run()
@@ -1199,7 +1210,8 @@ with tempfile.TemporaryDirectory() as tmp:
     build_step = by_name(steps.plan_steps(
         given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=FakeBuildRunner(),
         size_of=lambda d: DISK_BYTES,
-        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown))["build"]
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown,
+            definition_on_disk=lambda: False))["build"]
     try:
         build_step.run()
         failures.append("un chown en echec sur l ISO n a pas ete refuse")
@@ -1225,7 +1237,8 @@ with tempfile.TemporaryDirectory() as tmp:
         given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=runner,
         size_of=lambda d: DISK_BYTES,
         qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown,
-        chmod=chmod))["build"]
+        chmod=chmod,
+            definition_on_disk=lambda: False))["build"]
 
     iso_target = pathlib.Path(build_step.command[build_step.command.index("--output") + 1])
     iso_target.parent.mkdir(parents=True, exist_ok=True)
@@ -1262,7 +1275,8 @@ with tempfile.TemporaryDirectory() as tmp:
     probe = by_name(steps.plan_steps(
         given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=FakeBuildRunner(),
         size_of=lambda d: DISK_BYTES,
-        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=_inert_chown))["build"]
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=_inert_chown,
+            definition_on_disk=lambda: False))["build"]
     iso_target = pathlib.Path(probe.command[probe.command.index("--output") + 1])
     iso_target.parent.mkdir(parents=True, exist_ok=True)
     iso_target.write_bytes(b"deja construite")
@@ -1274,7 +1288,8 @@ with tempfile.TemporaryDirectory() as tmp:
     build_step = by_name(steps.plan_steps(
         given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=runner,
         size_of=lambda d: DISK_BYTES,
-        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown))["build"]
+        qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=chown,
+            definition_on_disk=lambda: False))["build"]
     try:
         build_step.already_done()
         failures.append("un chown en echec sur une ISO deja a jour n a pas ete refuse")
@@ -1298,7 +1313,8 @@ with tempfile.TemporaryDirectory() as tmp:
         given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=FakeBuildRunner(),
         size_of=lambda d: DISK_BYTES,
         qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=_inert_chown,
-        chmod=chmod))["build"]
+        chmod=chmod,
+            definition_on_disk=lambda: False))["build"]
     build_step.run()
     check("un repertoire deja traversable n est pas rechmode", chmod.calls, [])
     check("et il l est toujours", os.stat(tmp).st_mode & 0o777, 0o751)
@@ -1315,7 +1331,8 @@ with tempfile.TemporaryDirectory() as tmp:
         given, {}, tmp, virsh=FakeVirsh(NO_DOMAIN), runner=FakeBuildRunner(),
         size_of=lambda d: DISK_BYTES,
         qemu_owner=lambda: (QEMU_UID, QEMU_GID), chown=_inert_chown,
-        chmod=chmod))["build"]
+        chmod=chmod,
+            definition_on_disk=lambda: False))["build"]
     try:
         build_step.run()
         failures.append("un chmod en echec sur le repertoire n a pas ete refuse")
@@ -1417,7 +1434,8 @@ with tempfile.TemporaryDirectory() as tmp:
         runner=lambda *a, **k: None,
         size_of=lambda device: DISK_BYTES,
         pci_address_of=_default_pci_address_of,
-        qemu_owner=lambda: (0, 0), chown=_inert_chown))
+        qemu_owner=lambda: (0, 0), chown=_inert_chown,
+            definition_on_disk=lambda: False))
     check("construire le plan n execute toujours rien",
           implicite["build"].command[1].endswith("build.py"), True)
     try:
@@ -1462,6 +1480,230 @@ with tempfile.TemporaryDirectory() as tmp:
     check_raises("un mode disque inconnu est refuse", steps.GuestBuildError,
                  lambda: plan(tmp, console_existante,
                               {"disk_mode": "format-everything"}))
+
+
+# --- le garde s appuyait sur ce que le passthrough EFFACE ----------------- #
+# MESURE DU 2026-09-05, SUR L HOTE DE PRODUCTION, ET LE BLOC CI-DESSUS ETAIT
+# VERT PENDANT CE TEMPS. Le garde n a JAMAIS mordu sur cette machine.
+#
+# Il tranchait avec domain_matches_disk(), qui resout le disque par
+# hardware.pci_address_for_device() - une lecture de /sys/block. Or le disque
+# de la console est lie a vfio-pci, ce qui est le BUT du passthrough et non un
+# accident, et un disque ainsi lie n a AUCUNE entree dans /sys/block. Mesure,
+# chaine reelle, virsh reel, executeur qui refuse de lancer quoi que ce soit :
+#
+#     /sys/block                                    -> nvme0n1 seul (disque HOTE)
+#     pci_address_for_device('/dev/nvme1n1')        -> None
+#     domain_matches_disk(xml_reel, '/dev/nvme1n1') -> False
+#     hostdev du domaine                            -> 0000:03:00.0 (LE disque)
+#     build.run() sans --disk-mode                  -> AUCUN refus
+#
+# Et si le bloc ci-dessus ne l a pas vu, c est qu il injecte partout
+# _default_pci_address_of, un double qui rend l adresse INCONDITIONNELLEMENT :
+# le double satisfait exactement la precondition que le reel ne peut pas
+# satisfaire. Ce n est pas le double qui est fautif - le cas nominal a besoin
+# de lui, et il reste - c est qu il ait ete le SEUL. Tout ce qui suit passe
+# par le resolveur REEL.
+#
+# La regle du module est « en cas de doute, refuser ». Le garde l appliquait
+# a l envers : il ne refusait que sur une CORRESPONDANCE PROUVEE, alors que
+# le doute est ici l etat NORMAL et non l exception.
+
+# Un nom d unite qui n est PAS dans /sys/block sur la machine qui joue ce
+# test : c est l etat du disque de la console une fois lie a vfio-pci,
+# reproduit sans exiger de materiel particulier.
+_BLOCS = set(os.listdir("/sys/block")) if os.path.isdir("/sys/block") else set()
+DISQUE_INVISIBLE = next(f"/dev/nvme{n}n1" for n in range(9, 99)
+                        if f"nvme{n}n1" not in _BLOCS)
+
+check("le resolveur REEL - celui de la production, sans double - ne resout "
+      "pas un disque absent de /sys/block",
+      steps.disk_pci_identity(DISQUE_INVISIBLE), None)
+check("une adresse illisible n est pas une adresse",
+      steps.disk_pci_identity("/dev/nvme1n1",
+                              pci_address_of=lambda d: "pas-une-adresse"), None)
+check("une adresse lisible est rendue sous forme canonique",
+      steps.disk_pci_identity("/dev/nvme1n1",
+                              pci_address_of=lambda d: "0:3:0.0"),
+      DEFAULT_NVME_PCI)
+
+
+def plan_reel(tmp, virsh, answers=None, **extra):
+    """plan_steps SANS pci_address_of : le resolveur REEL, celui qui lit
+    /sys/block. C est le seul montage qui prouve quelque chose du chemin de
+    production - un test qui n eprouve que le double qui repond juste ne dit
+    rien du chemin qui compte.
+
+    `definition_on_disk` EST injecte, lui, et vaut « absente » par defaut :
+    le vrai lit /etc/libvirt/qemu/, et cette suite ne doit rien conclure de
+    l etat libvirt de la machine qui l execute. Les tests qui portent SUR ce
+    fait le passent explicitement."""
+    given = dict(ANSWERS, guest_workdir=tmp, dedicated_nvme=DISQUE_INVISIBLE)
+    given.pop("disk_mode", None)
+    given.update(answers or {})
+    extra.setdefault("definition_on_disk", lambda: False)
+    return by_name(steps.plan_steps(
+        given, {}, tmp, virsh=virsh,
+        runner=lambda *a, **k: None,
+        size_of=lambda device: DISK_BYTES,
+        qemu_owner=lambda: (0, 0), chown=_inert_chown, **extra))
+
+
+def message_du_refus(etape):
+    """Le texte du refus, ou None si l etape n a rien refuse."""
+    try:
+        etape.run()
+    except steps.GuestBuildError as exc:
+        return str(exc)
+    return None
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    # Le domaine de regime : aucun media, le bon disque. C est exactement
+    # l etat de la console de production aujourd hui.
+    console_reelle = FakeVirsh(
+        {"dumpxml": (0, "<domain><devices>" + nvme_hostdev()
+                     + "</devices></domain>"),
+         "domstate": (0, "shut off\n")})
+
+    # LE ROUGE. Sur la vraie machine, avec le vrai resolveur, un wipe
+    # implicite contre une console existante passait sans un mot.
+    message = message_du_refus(plan_reel(tmp, console_reelle)["build"])
+    check("un wipe implicite est refuse MEME quand l identite du disque est "
+          "inconnaissable - c est l etat NORMAL du disque de la console",
+          message is not None, True)
+    check("et le refus dit que l identite n a PAS pu etre etablie, sans "
+          "pretendre avoir reconnu le disque",
+          "identity" in (message or "").lower(), True)
+    check("le refus nomme toujours ce qui serait detruit",
+          "D:" in (message or ""), True)
+    check("et le remede exact",
+          "--disk-mode rebuild --target-disk-verified" in (message or ""), True)
+
+    # Aucun domaine defini : machine neuve, rien a perdre, le garde se tait
+    # meme si le disque reste inconnaissable. Sinon plus aucune installation
+    # ne serait possible sur une machine ou le disque est deja lie a vfio.
+    check("sans domaine defini il n y a rien a perdre : pas de refus",
+          message_du_refus(plan_reel(tmp, FakeVirsh(NO_DOMAIN))["build"]), None)
+
+    # Un disque PROUVE different : le domaine ne le passe pas, il n y a rien
+    # de la console a perdre. Le doute seul refuse, pas le desaccord.
+    check("un disque prouve etranger au domaine n est pas protege par ce "
+          "garde",
+          message_du_refus(plan_reel(
+              tmp, console_reelle,
+              pci_address_of=lambda d: AUTRE_NVME)["build"]), None)
+
+    # Le mode explicite reste la porte de sortie, dans les deux sens.
+    check("un wipe EXPLICITE reste possible, identite inconnaissable ou non",
+          message_du_refus(plan_reel(tmp, console_reelle,
+                                     {"disk_mode": "wipe"})["build"]), None)
+    check("et le mode sur ne declenche jamais ce garde",
+          message_du_refus(plan_reel(tmp, console_reelle,
+                                     {"disk_mode": "rebuild"})["build"]), None)
+
+
+# --- libvirtd injoignable : le doute se leve par un FAIT, pas par defaut -- #
+# La version precedente de ce garde s effacait des que defined_xml() rendait
+# None - « un libvirtd injoignable ne prouve rien ». C est vrai du DEMON, et
+# faux de la QUESTION : une definition de domaine libvirt vit sur le disque
+# de l hote, dans /etc/libvirt/qemu/<nom>.xml, independamment de l etat du
+# demon. Mesure du 2026-09-05 sur l hote de production : virsh uri rend
+# qemu:///system (ni LIBVIRT_DEFAULT_URI ni uri_default), et
+# /etc/libvirt/qemu/Windows.xml est bien la, 9188 octets, portant ses
+# <hostdev>. Il n y a donc pas d arbitrage binaire entre « refuser sur demon
+# mort » et « ne pas bloquer une machine neuve » : le fait tranche.
+#
+#   demon muet + definition sur disque -> une console est la, on ne sait
+#                                         plus la lire : REFUSE
+#   demon muet + aucune definition     -> machine plausiblement neuve : PASSE
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    muet = FakeVirsh(NO_DOMAIN)          # dumpxml rc=1 : injoignable OU absent
+
+    message = message_du_refus(plan_reel(
+        tmp, muet, definition_on_disk=lambda: True)["build"])
+    check("libvirtd muet MAIS une definition sur disque : refuse, parce qu il "
+          "y a bien une console, seulement plus personne pour la lire",
+          message is not None, True)
+    check("et le refus dit que c est la DEFINITION SUR DISQUE qui l atteste, "
+          "pas une lecture du domaine",
+          "/etc/libvirt/qemu" in (message or ""), True)
+    check("le refus nomme encore ce qui serait detruit",
+          "D:" in (message or ""), True)
+
+    check("libvirtd muet ET aucune definition : machine plausiblement neuve, "
+          "rien a perdre, le garde se tait",
+          message_du_refus(plan_reel(
+              tmp, muet, definition_on_disk=lambda: False)["build"]), None)
+
+    check("et un mode explicite passe meme avec une definition sur disque",
+          message_du_refus(plan_reel(
+              tmp, muet, {"disk_mode": "wipe"},
+              definition_on_disk=lambda: True)["build"]), None)
+
+# Le lecteur de disque lui-meme, sur une arborescence controlee - jamais sur
+# le /etc/libvirt de la machine qui joue le test.
+with tempfile.TemporaryDirectory() as faux_etc:
+    check("aucune definition dans un repertoire vide",
+          steps.domain_definition_on_disk(faux_etc), False)
+    pathlib.Path(faux_etc, f"{steps.DOMAIN_NAME}.xml").write_text("<domain/>")
+    check("une definition portant le nom du domaine est vue",
+          steps.domain_definition_on_disk(faux_etc), True)
+    check("un repertoire qui n existe pas n est pas une definition",
+          steps.domain_definition_on_disk(
+              os.path.join(faux_etc, "nulle-part")), False)
+    # La sauvegarde que libvirt laisse a cote (Windows.xml.backup-*) n est PAS
+    # une definition : mesuree sur l hote de production, elle cohabite avec la
+    # vraie et un test de prefixe la confondrait avec elle.
+    os.remove(os.path.join(faux_etc, f"{steps.DOMAIN_NAME}.xml"))
+    pathlib.Path(faux_etc,
+                 f"{steps.DOMAIN_NAME}.xml.backup-20251018").write_text("<d/>")
+    check("une sauvegarde laissee a cote n est pas une definition",
+          steps.domain_definition_on_disk(faux_etc), False)
+
+
+# --- le raccourci qui contournait le garde entierement -------------------- #
+# refuse_implicit_wipe() n etait appele que depuis build_run(), or build_run()
+# n est appele que si build_done() a rendu False. Une ISO deja construite ET
+# estampillee fait rendre True, l etape est sautee, et le garde n est jamais
+# traverse - alors que cette ISO EST une ISO d effacement, puisqu elle a ete
+# fabriquee a partir de reponses qui ne portaient aucun mode. Sans objet tant
+# qu aucune ISO n existe ; reel le jour ou une reconstruction se joue, qui est
+# exactement le jour ou ce garde sert.
+#
+# Le predicat a donc le droit de LEVER plutot que de rendre True - le meme
+# choix, et pour la meme raison, que ensure_qemu_owned() dans sa branche
+# « deja courant » : rendre False enverrait reconstruire pour un probleme
+# qu une reconstruction ne corrige pas.
+with tempfile.TemporaryDirectory() as tmp:
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    console_reelle = FakeVirsh(
+        {"dumpxml": (0, "<domain><devices>" + nvme_hostdev()
+                     + "</devices></domain>"),
+         "domstate": (0, "shut off\n")})
+
+    sans_mode = plan_reel(tmp, console_reelle)["build"]
+    iso_out = pathlib.Path(arg(sans_mode.command, "--output"))
+    iso_out.parent.mkdir(parents=True, exist_ok=True)
+    iso_out.write_bytes(b"iso")
+    steps.write_build_stamp(steps.build_stamp_path(str(iso_out)),
+                            sans_mode.fingerprint())
+    check_raises("une ISO d effacement implicite DEJA estampillee est refusee "
+                 "par le predicat lui-meme, jamais silencieusement sautee",
+                 steps.GuestBuildError, sans_mode.already_done)
+
+    # Et le chemin nominal reste sautable : des que le mode est dit, une ISO
+    # courante se saute comme avant. Le garde ne rend pas la re-activation
+    # bavarde, il ne parle que de ce qui n a jamais ete demande.
+    dit = plan_reel(tmp, console_reelle, {"disk_mode": "wipe"})["build"]
+    iso_dit = pathlib.Path(arg(dit.command, "--output"))
+    iso_dit.write_bytes(b"iso")
+    steps.write_build_stamp(steps.build_stamp_path(str(iso_dit)),
+                            dit.fingerprint())
+    check("une ISO courante dont le mode a ete DIT se saute normalement",
+          dit.already_done(), True)
 
 
 if failures:

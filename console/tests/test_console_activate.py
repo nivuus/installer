@@ -401,6 +401,12 @@ def build_step_with(workdir, exit_code=0):
         pci_address_of=lambda disk: "0000:03:00.0",
         qemu_owner=lambda: (os.getuid(), os.getgid()),
         chown=lambda path, uid, gid: None,
+        # « aucune definition sur disque » : le vrai lit /etc/libvirt/qemu, et
+        # ce test porte sur la couture runner<->etape, pas sur l etat libvirt
+        # de la machine qui l execute. Sans cette injection il devient rouge
+        # sur tout poste ou une VM « Windows » est definie - ce qui est le cas
+        # de l hote de reference lui-meme.
+        definition_on_disk=lambda: False,
         python=fake_interpreter(workdir, exit_code))
     return {step.name: step for step in planned}["build"]
 

@@ -101,6 +101,38 @@ PAYLOAD_WITNESS = Path("agent") / "agent.exe"
 # which default_virsh forces.
 DOMAIN_UP_STATES = frozenset({"running", "idle", "paused", "pmsuspended"})
 
+# Where libvirt keeps a domain's PERSISTENT definition, for qemu:///system.
+# Measured on the production host 2026-09-05: `virsh uri` answers
+# qemu:///system (no LIBVIRT_DEFAULT_URI in the environment, no uri_default in
+# /etc/libvirt/libvirt.conf), and /etc/libvirt/qemu/Windows.xml is there,
+# 9188 bytes, 0600, carrying its <hostdev> elements. There is no session-scope
+# tree on this host (~/.config/libvirt/qemu does not exist).
+LIBVIRT_QEMU_CONFIG_DIR = "/etc/libvirt/qemu"
+
+
+def domain_definition_on_disk(config_dir: str | Path = LIBVIRT_QEMU_CONFIG_DIR,
+                              name: str = DOMAIN_NAME) -> bool:
+    """Is a persistent definition for `name` present on this host's disk?
+
+    THIS IS WHAT LETS A DEAD DAEMON STOP BEING AN ALIBI. Every other predicate
+    in this module reads the domain THROUGH libvirtd, so an unreachable
+    libvirtd makes them all answer "no" - and for most of them that is right,
+    because they ask "is this already done", where an unknown answer is
+    correctly not a "yes". refuse_implicit_wipe() asks "is there something to
+    lose", and there a dead informant must not read as "nothing to lose".
+
+    A definition does not need the daemon to exist: it is a file. So the
+    question "has a console ever been defined on this host" is answerable
+    while libvirtd is down, and that is exactly the question the guard needs.
+
+    EXACT NAME, never a prefix match. libvirt leaves siblings next to the real
+    file - `Windows.xml.backup-20251018-095837` is on the production host
+    right now - and a prefix test would read a backup as a definition. It
+    would err on the safe side here, but it would also refuse forever on a
+    host where the domain was properly undefined, which is a different bug.
+    """
+    return (Path(config_dir) / f"{name}.xml").is_file()
+
 # --- what actually identifies the domain: its hostdevs' HOST pci addresses -#
 # Matches the host address libvirt keeps verbatim inside <hostdev><source>
 # (measured on the running production domain, 2026-08-28: `virsh dumpxml
@@ -166,15 +198,52 @@ def domain_matches_disk(xml: str, disk: str, *,
     match", never as "cannot tell so assume yes": the module's own WHEN IN
     DOUBT rule (see the module docstring) applies here exactly as it does to
     the build fingerprint.
+
+    THAT FOLDING IS RIGHT HERE AND WRONG ELSEWHERE, which is why the
+    resolution now lives in disk_pci_identity() instead of inline. This
+    predicate answers "is the domain ALREADY the one we want" - for it,
+    "cannot tell" and "does not match" both mean "not done", and collapsing
+    them is safe. refuse_implicit_wipe() asks the OPPOSITE question, "is
+    there something to lose", where the two answers are opposites: a disk
+    proven to be a different one is safe to erase, a disk whose identity
+    cannot be established is not. A caller that needs the distinction must
+    call disk_pci_identity() and read None for itself.
+    """
+    address = disk_pci_identity(disk, pci_address_of=pci_address_of)
+    if address is None:
+        return False
+    return address in hostdev_source_addresses(xml)
+
+
+def disk_pci_identity(disk: str, *,
+                      pci_address_of: Callable[[str], str | None] | None = None
+                      ) -> str | None:
+    """`disk`'s host PCI address in canonical form, or None if unknowable.
+
+    None is not "no": it is "this host cannot say", and the two must never
+    be conflated by a caller for whom they differ (see domain_matches_disk
+    above, and refuse_implicit_wipe below, which read the same fact in
+    opposite directions).
+
+    None IS THE NORMAL ANSWER FOR THE CONSOLE'S OWN DISK, and that is the
+    whole reason this function is named and separate. The default resolver
+    reads /sys/block; the dedicated NVMe is bound to vfio-pci - which is the
+    POINT of the passthrough, not an accident - and a disk bound to vfio-pci
+    exposes no block device to the host at all. Measured on the production
+    host 2026-09-05: /sys/block lists only the host's own nvme0n1, and
+    pci_address_for_device('/dev/nvme1n1') returns None while `virsh dumpxml
+    Windows` shows that very disk passed through at 0000:03:00.0. So on the
+    one machine this module exists to serve, this function answers None for
+    the one disk that matters.
     """
     resolver = pci_address_of or _disk_pci_address
     address = resolver(disk)
     if not address:
-        return False
+        return None
     match = _PCI_ADDRESS_RE.fullmatch(address)
     if not match:
-        return False
-    return _normalize_pci_address(match.groups()) in hostdev_source_addresses(xml)
+        return None
+    return _normalize_pci_address(match.groups())
 
 
 def _disk_pci_address(disk: str) -> str | None:
@@ -883,7 +952,8 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
                qemu_owner: Callable[[], tuple[int, int]] | None = None,
                chown: Callable[[str, int, int], None] | None = None,
                chmod: Callable[[str, int], None] | None = None,
-               sleep: Callable[[float], None] | None = None
+               sleep: Callable[[float], None] | None = None,
+               definition_on_disk: Callable[[], bool] | None = None
                ) -> list[Step]:
     """The five steps, in order, for this host's answers. Runs nothing.
 
@@ -902,6 +972,11 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
     chown = chown or os.chown
     chmod = chmod or os.chmod
     sleep = sleep or time.sleep
+    # Injectable like every other reader here, and for the same reason: the
+    # real one reads /etc/libvirt/qemu, so a test suite that did not replace
+    # it would conclude from whatever VMs happen to exist on the machine
+    # running the tests.
+    definition_on_disk = definition_on_disk or domain_definition_on_disk
     python = python or sys.executable or "python3"
 
     secrets = {key: _secret(answers, key) for key in SECRET_FILES}
@@ -1049,6 +1124,25 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         _grant_qemu_traverse(root, chmod)
 
     def build_done() -> bool:
+        # THE GUARD IS TRAVERSED BEFORE THE SHORTCUT, not only inside
+        # build_run(). Called only from there, it was skipped entirely
+        # whenever this predicate said True - and this predicate says True
+        # exactly when an ISO is already built and stamped. That ISO is
+        # itself a WIPE ISO when the answers that produced it carried no
+        # disk mode (the fingerprint covers `answers`, so the same
+        # mode-less answers re-validate their own erasing image), and the
+        # pipeline would then walk straight from `secrets` to `define` and
+        # `start` without the question ever being asked. Harmless while no
+        # ISO exists; live the day a rebuild is actually attempted, which
+        # is the one day this guard is for.
+        #
+        # Raising from a predicate is the established shape here, not a new
+        # liberty: see ensure_qemu_owned() below, allowed to raise for the
+        # same reason - returning False would send the caller into a full
+        # rebuild for a problem a rebuild cannot fix. activate.py's
+        # run_steps() calls already_done() inside its classified region
+        # precisely so this reaches an operator as one named line.
+        refuse_implicit_wipe()
         if not iso_out.is_file():
             return False
         try:
@@ -1257,37 +1351,118 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         see the passthrough disk"). The host-side equivalent is a libvirt
         domain already defined AND already wired to THIS disk: Windows has
         been installed onto it at least once, so its data partition may hold
-        everything above. domain_matches_disk() is the same identity check
-        domain_defined() trusts, and it is deliberately weaker here - the
-        media state is irrelevant to the question "is there something to
-        lose", so a half-defined domain must refuse too, not slip through.
+        everything above.
 
-        WHEN IN DOUBT, REFUSE. An unreachable libvirtd yields no XML and
-        therefore no refusal: that is the one direction this cannot fix -
-        it is the same limit every other predicate in this module carries,
-        and it is named here rather than hidden.
+        THE FIRST CUT OF THIS GUARD NAMED THAT TRAP AND THEN WALKED INTO IT,
+        and it is worth spelling out because it never failed a test. It
+        refused only on domain_matches_disk(), which resolves the disk
+        through /sys/block - the very lookup the paragraph above says is
+        impossible for this disk. Measured on the production host
+        2026-09-05: /sys/block lists only the host's own nvme0n1,
+        disk_pci_identity('/dev/nvme1n1') is None, `virsh dumpxml Windows`
+        shows that disk passed through at 0000:03:00.0, and an activation
+        with no --disk-mode was NOT refused. Twenty-four suites were green
+        throughout, because every one of them injected a `pci_address_of`
+        double that returns the address unconditionally - the double
+        satisfied exactly the precondition production cannot satisfy. A
+        safety guard that is green in test and inert in production is worse
+        than an absent one, and this is the shape it takes.
+
+        SO THE RULE IS THE MODULE'S OWN, APPLIED THE RIGHT WAY UP. "When in
+        doubt, refuse" - and here doubt is the NORMAL state, not the
+        exception, because the passthrough guarantees the disk is not
+        resolvable. Only a disk PROVEN to be a different one lets a wipe
+        through: an identity that cannot be established never does. That is
+        the single behavioural difference from the first cut, and it is the
+        difference between a guard that mords and one that does not.
+
+        AN UNREACHABLE libvirtd IS NO LONGER AN ALIBI EITHER. The first cut
+        returned silently whenever defined_xml() answered None, on the
+        reasoning that a dead daemon proves nothing - true of the DAEMON,
+        false of the QUESTION. A domain's persistent definition is a FILE,
+        /etc/libvirt/qemu/<name>.xml, and it is there whether or not anything
+        is running to serve it (measured on the production host 2026-09-05,
+        see LIBVIRT_QEMU_CONFIG_DIR). So the doubt is settled by a fact, not
+        by a policy: a definition on disk with no daemon to read it means a
+        console IS there and we have merely lost the ability to look at it -
+        refuse. No definition at all means a plausibly fresh machine with
+        nothing to lose - pass, with the explicit-mode requirement unchanged.
+        That is what keeps this from blocking a first install on a host where
+        libvirt is not up yet, without letting a dead informant wave a wipe
+        through.
+
+        WHAT THIS STILL CANNOT DO, and it is named here rather than hidden -
+        the previous version's comment described the vfio trap and then walked
+        into it, so the limits of this one are worth stating exactly:
+
+          * It reads the SYSTEM scope only. A domain defined under
+            qemu:///session (~/.config/libvirt/qemu) is invisible to
+            domain_definition_on_disk(), so on a host driven that way a dead
+            daemon would once again let an implicit wipe through. This host is
+            qemu:///system and has no session tree at all; a host that is not
+            must pass its own `definition_on_disk`.
+          * It proves EXISTENCE, never IDENTITY. With the daemon down there is
+            no XML, so nothing says which disk that definition passes through
+            - the refusal is deliberately coarser in this branch, and it can
+            refuse a wipe of a disk that the defined console never used.
+            Refusing too much here costs an operator one explicit answer;
+            refusing too little costs the games partition.
+          * It cannot see a console that was installed and then UNDEFINED. The
+            disk would still be full and the file gone. Nothing host-side
+            survives that, and no guard in this module can.
         """
         if disk_mode_explicit or disk_mode != "wipe":
             return
         xml = defined_xml()
         if xml is None:
-            return
-        if not domain_matches_disk(xml, disk, pci_address_of=pci_address_of):
-            return
+            if not definition_on_disk():
+                return          # no daemon AND no definition: nothing to lose
+            raise GuestBuildError(
+                f"libvirt cannot be reached, but a persistent domain "
+                f"definition for '{DOMAIN_NAME}' is present on this host "
+                f"({LIBVIRT_QEMU_CONFIG_DIR}/{DOMAIN_NAME}.xml). A console "
+                "has been defined here; only the ability to read it has been "
+                "lost, and with libvirtd down there is no XML to say which "
+                "disk it uses - so this cannot even check whether "
+                f"{disk} is that disk. No --disk-mode was given, and the "
+                "default is 'wipe', which RECREATES THE WHOLE PARTITION "
+                "TABLE and would destroy the games partition D: along with "
+                "C:. Start libvirtd so this can be checked properly, or, if "
+                "you have confirmed which disk this is, say the mode in as "
+                "many words: '--disk-mode rebuild --target-disk-verified' to "
+                "keep the games partition, '--disk-mode wipe' to erase the "
+                "whole disk.")
+        # NOT domain_matches_disk(): it folds "different disk" and "cannot
+        # tell" into one False, and those are OPPOSITE answers to the
+        # question asked here. See its docstring, and disk_pci_identity's.
+        identity = disk_pci_identity(disk, pci_address_of=pci_address_of)
+        if identity is not None and identity not in hostdev_source_addresses(xml):
+            return                  # proven to be some other disk
+        if identity is None:
+            constat = (
+                f"a libvirt domain '{DOMAIN_NAME}' is already defined on "
+                f"this host, and {disk}'s identity CANNOT BE ESTABLISHED "
+                "from here - the console's own disk is bound to vfio-pci, "
+                "so it has no block device the host can read, and 'this is "
+                "a different disk' can therefore never be proven, only "
+                "assumed")
+        else:
+            constat = (
+                f"{disk} already carries a console: the libvirt domain "
+                f"'{DOMAIN_NAME}' is defined against this exact disk")
         raise GuestBuildError(
-            f"{disk} already carries a console: the libvirt domain "
-            f"'{DOMAIN_NAME}' is defined against this exact disk. No "
-            "--disk-mode was given, and the default is 'wipe', which "
-            "RECREATES THE WHOLE PARTITION TABLE - it would destroy the "
-            "games partition D: as well as C:, and on this machine both "
-            "live on that one disk: the Steam library and its logged-in "
-            "session, the retro library's shortcuts.vdf, D:\\Emulation, and "
-            "D:\\state\\apollo\\credentials - the Apollo pairing root, "
-            "whose loss means re-pairing every Moonlight client by hand. "
-            "To reinstall Windows and KEEP the games partition, answer "
-            "'--disk-mode rebuild --target-disk-verified' once you have "
-            "confirmed this is the right disk. To genuinely erase the whole "
-            "disk, ask for it in as many words with '--disk-mode wipe'.")
+            f"{constat}. No --disk-mode was given, and the default is "
+            "'wipe', which RECREATES THE WHOLE PARTITION TABLE - it would "
+            "destroy the games partition D: as well as C:, and on this "
+            "machine both live on that one disk: the Steam library and its "
+            "logged-in session, the retro library's shortcuts.vdf, "
+            "D:\\Emulation, and D:\\state\\apollo\\credentials - the Apollo "
+            "pairing root, whose loss means re-pairing every Moonlight "
+            "client by hand. To reinstall Windows and KEEP the games "
+            "partition, answer '--disk-mode rebuild --target-disk-verified' "
+            "once you have confirmed this is the right disk. To genuinely "
+            "erase the whole disk, ask for it in as many words with "
+            "'--disk-mode wipe'.")
 
 
     return [
