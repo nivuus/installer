@@ -109,7 +109,7 @@ check("iommu statique dans la cmdline",
 
 # --- les questions sont valides au sens du vocabulaire ------------------- #
 qs = load_questions(str(CONSOLE / m.questions_file))
-check("sept questions", len(qs), 7)
+check("neuf questions", len(qs), 9)
 check("le disque est un selecteur materiel",
       [q.type for q in qs if q.key == "dedicated_nvme"], ["disque"])
 check("le mot de passe est un secret",
@@ -117,12 +117,55 @@ check("le mot de passe est un secret",
 check("le secret n expose pas de defaut",
       "default" in [q for q in qs if q.key == "admin_password"][0].to_dict(),
       False)
-answers = validate_answers(qs, {"dedicated_nvme": "/dev/nvme1n1",
-                                "admin_password": "hunter2hunter2",
-                                "windows_iso": "/media/data/win-ltsc.iso",
-                                "ltsc_key": "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX",
-                                "apollo_password": "another-secret"})
+REPONSES = {"dedicated_nvme": "/dev/nvme1n1",
+            "admin_password": "hunter2hunter2",
+            "windows_iso": "/media/data/win-ltsc.iso",
+            "ltsc_key": "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX",
+            "apollo_password": "another-secret",
+            "disk_mode": "wipe"}
+answers = validate_answers(qs, REPONSES)
 check("retro prend son defaut", answers["retro"], False)
+
+# --- le mode disque SE DEMANDE, et n a pas de valeur par defaut ---------- #
+# guest_steps.refuse_implicit_wipe() refuse un effacement que personne n a
+# demande, et son message renvoie l operateur vers
+# '--disk-mode rebuild --target-disk-verified'. Tant que le wizard ne posait
+# ni l une ni l autre question, ce remede n etait atteignable que par une
+# edition a la main du fichier de reponses - c est-a-dire qu un garde
+# refusait en nommant une sortie qui n existait pas, ce qui n enseigne qu a
+# le contourner.
+#
+# ET IL N A PAS DE DEFAUT, deliberement. Un defaut n est pas une phrase :
+# 'wipe' par defaut aurait rendu la reponse EXPLICITE au sens de
+# _disk_mode(), donc aurait fait taire le garde pour tout le monde - le
+# defaut aurait dit a la place de l operateur precisement ce que le garde
+# exige que l operateur dise lui-meme. La question est donc requise.
+check("le mode disque est un choix",
+      [q.type for q in qs if q.key == "disk_mode"], ["choix"])
+check("et ses deux seules valeurs sont celles du gabarit autounattend",
+      sorted([q for q in qs if q.key == "disk_mode"][0].choices),
+      ["rebuild", "wipe"])
+check("le mode disque est requis",
+      [q.required for q in qs if q.key == "disk_mode"], [True])
+check("le mode disque n a AUCUN defaut : un defaut parlerait a la place de "
+      "l operateur, et ferait taire le garde",
+      [q.default for q in qs if q.key == "disk_mode"], [None])
+check_absent = validate_answers(qs, dict(REPONSES, disk_mode="rebuild"))
+check("le mode sur est accepte tel quel", check_absent["disk_mode"], "rebuild")
+try:
+    validate_answers(qs, {k: v for k, v in REPONSES.items()
+                          if k != "disk_mode"})
+    failures.append("un mode disque absent n a pas ete refuse")
+except Exception:
+    pass
+
+# La signature de l operateur : par defaut ABSENTE, jamais presumee.
+# guest_steps ne la synthetise jamais non plus (voir son verified_flag).
+check("la signature du disque est un booleen",
+      [q.type for q in qs if q.key == "target_disk_verified"], ["bool"])
+check("et elle vaut faux par defaut : on ne presume jamais qu un humain a "
+      "verifie de quel disque il s agit",
+      answers["target_disk_verified"], False)
 
 # Four answers now reach the guest build. The two secrets must be typed as
 # such: a `texte` would come back in the portal's payload with its default,
