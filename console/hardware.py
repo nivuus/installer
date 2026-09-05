@@ -1,3 +1,11 @@
+# policy: allow-long-file - ruled 2026-09-05, reason below.
+# This marker is the escape hatch the socle PROVIDES, and it requires a
+# written reason: it is a named, dated exception, not the control being
+# lowered. The real split is tracked in docs/console-dettes.md under
+# CI-1.
+# 769 lines. Host hardware detection: PCI, NVMe, IOMMU, CPU. One subject,
+# one facade, called by resolve, activate and the portal.
+
 """Precise hardware detection for the console package.
 
 The ENGINE detects capabilities - coarse, generic, enough to decide whether

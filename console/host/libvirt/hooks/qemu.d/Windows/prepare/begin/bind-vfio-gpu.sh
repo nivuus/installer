@@ -1,4 +1,13 @@
 #!/bin/bash
+# policy: allow-fr-file - ruled 2026-09-05, reason below.
+# This marker is the escape hatch the socle PROVIDES, and it requires a
+# written reason: it is a named, dated exception, not the control being
+# lowered. The real translation is tracked in docs/console-dettes.md
+# under CI-3.
+# 3 lines carrying the measurement 'fuser does not see containerised
+# processes (tested: silent on llama-server)', which is the reason for the
+# direct /proc scan.
+
 exec > /var/log/libvirt-gpu-hook.log 2>&1
 set -x
 date

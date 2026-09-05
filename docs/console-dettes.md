@@ -865,3 +865,161 @@ l'épinglage `WINGET_VERSION = "v1.29.290"` du dépôt.
   épinglé à `0 0 0`, Explorer redémarré proprement (un seul processus).
   ⚠️ Elles ne survivront pas à une reconstruction de C: **par ce geste-là** :
   c'est l'étape 30 qui les repose, et C7 reste la vraie réponse.
+
+---
+
+# Dettes de CI — le contrôle plutôt que le code
+
+Les quatre dettes qui suivent ne décrivent pas un manque de l'invité mais un
+défaut des **contrôles** qui gardent ce dépôt. Elles sont ici, et pas dans un
+plan, parce qu'elles ont été constatées en réparant la CI de la PR #8 le
+2026-09-05 et qu'elles se seraient sinon redécouvertes à la PR suivante.
+
+Le fait qui les relie : **`policy` et `python` échouaient sur du code qu'aucune
+de ces PR n'avait écrit.** Les cinq fichiers longs, les 399 lignes françaises et
+les 52 sujets de commit refusés viennent tous des 133 commits hérités de la
+PR #7, ouverte depuis le 2026-08-27.
+
+---
+
+## CI-1 — Cinq fichiers dépassent 500 lignes, et l'exception est posée, pas payée
+
+**Arbitré le 2026-09-05.** `policy / Coding rules` refusait cinq fichiers :
+
+    console/guest_steps.py            1318 lignes
+    console/guest/retro_sync.py       1096
+    console/hardware.py                769
+    console/guest/fetch_payload.py     624
+    console/host/guest-ready-watch.py  538
+
+Chacun porte désormais `policy: allow-long-file` **avec un motif écrit**, qui est
+l'échappatoire que le socle prévoit — le script `check-file-size.sh` l'annonce
+lui-même dans son message de refus. **Ce n'est pas le contrôle qu'on baisse :
+c'est une exception nommée, datée et suivie ici.** La nuance est essentielle, et
+c'est pourquoi le motif est obligatoire : une exception sans raison écrite est
+indistinguable d'un contournement.
+
+**Ce qui reste dû :** le découpage réel. Scinder 4 245 lignes de code hérité pour
+débloquer une PR de 162 commits était le mauvais ordre — une PR de cette taille
+qui reste ouverte une semaine de plus pourrit, et le découpage mérite son propre
+chantier, avec ses propres tests.
+
+**Le piège à ne pas répéter :** `guest_steps.py` est le plus gros et le moins
+divisible en l'état. Ses prédicats (« cette étape peut-elle être sautée ? »)
+portent chacun en commentaire la panne réelle qu'ils empêchent. Les séparer des
+étapes qu'ils gardent perdrait exactement le couplage que le fichier rend
+lisible.
+
+---
+
+## CI-2 — `ruff format --check` reformaterait 76 fichiers sur 77
+
+**Constaté le 2026-09-05.** L'étape ruff du socle enchaîne deux commandes :
+`ruff check` puis `ruff format --check`. La première est réparée — `ruff.toml`
+épingle désormais la sélection, et `requirements.txt` la version de ruff ; la
+seconde ne l'est pas :
+
+    76 files would be reformatted, 1 file already formatted
+
+**Ce dépôt n'a jamais adopté le formateur de ruff.** Son style est délibéré :
+des blocs de commentaires longs, alignés, qui *sont* sa documentation. Leur
+appliquer le formateur au milieu d'une PR de réparation de CI réécrirait
+précisément ces blocs.
+
+**Ce qui reste dû, et c'est une décision de projet, pas un geste de passage :**
+soit adopter le formateur et reformater le dépôt d'un coup, dans un commit qui
+ne fait que ça ; soit demander au socle une entrée qui rende cette moitié
+optionnelle, comme `test-paths` et `test-dirs` le sont déjà pour pytest et bats.
+
+**En attendant :** `python / Python checks` reste rouge sur cette moitié-là.
+Ce n'est pas un contexte bloquant — voir « Ce que la protection de `main` exige
+vraiment », en fin de fichier, pour la liste réelle.
+
+---
+
+## CI-3 — 399 lignes françaises exemptées, et la traduction reste à faire
+
+**Arbitré le 2026-09-05.** `Enforce English in code` refusait 399 lignes
+ajoutées, réparties sur quinze fichiers — 291 dans le seul
+`console/guest/retro_sync.py`, dont l'en-tête est la référence de la séquence de
+synchronisation rétro.
+
+Les quinze fichiers portent désormais `policy: allow-fr-file` **avec un motif
+écrit**, l'échappatoire que `check-english.sh` annonce lui-même. Même nuance
+qu'en CI-1 : exception nommée, pas contrôle baissé.
+
+**Ce qui reste dû :** la traduction. Elle n'a pas été faite ici parce que ces
+commentaires portent des **mesures** — des dates, des versions, des observations
+faites sur cette machine (« `fuser` ne voit PAS les process conteneurisés,
+testé : muet sur llama-server »). Les traduire en réparant une CI, c'est risquer
+d'en altérer le sens sans que personne ne le relise pour ce qu'il dit.
+
+**Un faux positif est déjà identifié, et ne se traduira jamais :**
+`console/guest/winrm_exec.py` est signalé pour une ligne **en anglais** dont le
+seul français est dans la chaîne citée en exemple — `"; Ecrit par << retro >>"`
+— qui est la **donnée** que le fichier décrit. Le marqueur par ligne
+`policy: allow-fr` est sans effet dans une chaîne (le socle le dit), d'où
+l'exemption de fichier.
+
+---
+
+## CI-4 — Le contrôle des sujets de commit vérifie le format de ce qui n'existera pas
+
+**Constaté le 2026-09-05. Cette dette-ci ne vit pas dans ce dépôt : elle est
+dans `nivuus/.github`, partagé par les dix dépôts de la suite.**
+
+`Enforce conventional commits` lance `check-commits.sh "$BASE" HEAD`, qui exige
+que **chaque sujet de commit de la branche** soit conventionnel et anglais. Sur
+la PR #8, 52 sujets sur 151 étaient refusés (18 non conventionnels, 34 non
+anglais), dont 32 hérités de la PR #7.
+
+**Le fait mesuré qui rend ce contrôle sans objet :**
+
+    gh api repos/nivuus/installer
+      allow_squash_merge:          true
+      allow_merge_commit:          false
+      allow_rebase_merge:          false
+      squash_merge_commit_title:   PR_TITLE
+      squash_merge_commit_message: COMMIT_MESSAGES
+
+Le dépôt est **squash-only**. Le commit qui atterrit sur `main` porte pour sujet
+**le titre de la PR** — que l'étape suivante, `Enforce the pull request title`,
+vérifie déjà, séparément et correctement. Les sujets individuels de la branche
+finissent dans le **corps** de ce commit unique : ils ne sont jamais des sujets.
+
+**Le contrôle vérifie donc le format conventionnel de lignes qui ne seront
+jamais des sujets de commit.** Et il fait payer ce format à des branches longues
+en exigeant une réécriture d'historique — qui, ici, aurait cassé l'ascendance de
+la PR #7 et l'aurait empêchée de se fermer d'elle-même à la fusion.
+
+**Ce qu'il faudrait à la place**, et c'est au propriétaire de trancher puisque
+ça touche un dépôt partagé :
+
+- sur un dépôt squash-only, ne vérifier que le **titre de la PR** (l'étape
+  existe déjà) ;
+- ou n'exiger le format par commit que là où `allow_merge_commit` ou
+  `allow_rebase_merge` est vrai — la donnée est lisible depuis l'API, comme
+  ci-dessus ;
+- ou garder le contrôle en **avertissement** sur les commits, sans faire échouer
+  le job.
+
+**En attendant :** aucune réécriture d'historique n'a été faite. `policy` reste
+rouge sur cette seule étape.
+
+---
+
+## Ce que la protection de `main` exige vraiment
+
+Relevé le 2026-09-05, parce que trois contrôles rouges donnaient à croire que
+trois contrôles bloquaient :
+
+    gh api repos/nivuus/installer/branches/main/protection
+      contexts:        ["policy / Coding rules",
+                        "security / Secrets and dependencies"]
+      enforce_admins:  true
+      required_approving_review_count: 0
+
+**Seuls `policy` et `security` tiennent la porte.** `python`, `shell` et
+`codeql` tournent et doivent être réparés — un contrôle rouge qu'on prend
+l'habitude de ne pas lire cesse d'être un contrôle — mais ils ne bloquent pas la
+fusion. Le savoir change l'ordre dans lequel on répare, pas le fait qu'on répare.

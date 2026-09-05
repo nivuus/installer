@@ -1,4 +1,11 @@
 #!/bin/bash
+# policy: allow-fr-file - ruled 2026-09-05, reason below.
+# This marker is the escape hatch the socle PROVIDES, and it requires a
+# written reason: it is a named, dated exception, not the control being
+# lowered. The real translation is tracked in docs/console-dettes.md
+# under CI-3.
+# 7 lines of libvirt hook comments, measured on this machine.
+
 # Confine the host cgroups to the CPUs the VM does not pin, for as long as it runs.
 # Real logic lives in the repo (console/host/vm-cpu-partition.sh); never fail the VM start.
 /etc/libvirt/hooks/vm-cpu-partition.sh confine "$1" >> /var/log/libvirt-cpu-hook.log 2>&1

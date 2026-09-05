@@ -1,4 +1,15 @@
 #!/usr/bin/env python3
+# policy: allow-fr-file - ruled 2026-09-05, reason below.
+# This marker is the escape hatch the socle PROVIDES, and it requires a
+# written reason: it is a named, dated exception, not the control being
+# lowered. The real translation is tracked in docs/console-dettes.md
+# under CI-3.
+# 1 line, and it is a FALSE POSITIVE of the engine: the line is English and
+# holds French only inside the quoted example string ("; Ecrit par
+# << retro >>"), which is the DATA this file describes. The per-line
+# 'policy: allow-fr' marker has no effect inside a string, hence the
+# file-level exemption.
+
 """Run one command in the Windows guest over WinRM.
 
 /usr/local/bin/winrm speaks Basic only, which the guest does not enable:

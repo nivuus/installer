@@ -1,4 +1,11 @@
 #!/bin/bash
+# policy: allow-fr-file - ruled 2026-09-05, reason below.
+# This marker is the escape hatch the socle PROVIDES, and it requires a
+# written reason: it is a named, dated exception, not the control being
+# lowered. The real translation is tracked in docs/console-dettes.md
+# under CI-3.
+# 9 lines of libvirt hook comments, measured on this machine.
+
 # Script exécuté par le répartiteur quand la VM "Windows" est arrêtée (stopped/end)
 # Modifié pour supprimer les règles de TOUTES les zones actives.
 

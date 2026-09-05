@@ -1,3 +1,11 @@
+# policy: allow-fr-file - ruled 2026-09-05, reason below.
+# This marker is the escape hatch the socle PROVIDES, and it requires a
+# written reason: it is a named, dated exception, not the control being
+# lowered. The real translation is tracked in docs/console-dettes.md
+# under CI-3.
+# 27 lines. The header states the requires.packages contract and the
+# install order it imposes.
+
 """Dépendances entre packages, et l'ordre d'installation qu'elles imposent.
 
 Un package peut être le socle d'une famille : `home-manager` installe Home

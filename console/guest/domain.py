@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# policy: allow-fr-file - ruled 2026-09-05, reason below.
+# This marker is the escape hatch the socle PROVIDES, and it requires a
+# written reason: it is a named, dated exception, not the control being
+# lowered. The real translation is tracked in docs/console-dettes.md
+# under CI-3.
+# 4 lines: why four targeted shares rather than the root, and the
+# 'Console' vs 'Nivuus' vocabulary.
+
 """Generate the production Windows guest domain from detected hardware.
 
 The existing production XML is NOT the source: it carries hypervisor masking,

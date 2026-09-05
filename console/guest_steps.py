@@ -1,3 +1,15 @@
+# policy: allow-long-file - ruled 2026-09-05, reason below.
+# This marker is the escape hatch the socle PROVIDES, and it requires a
+# written reason: it is a named, dated exception, not the control being
+# lowered. The real split is tracked in docs/console-dettes.md under
+# CI-1.
+# 1318 lines. The five guest-build steps and, above all, the PREDICATES
+# that say what may be skipped: each carries in comment the real failure it
+# prevents (the silent redefinition loop of 2026-08-28, an inherited ISO
+# with no agent.exe, a stale disk behind fixed ISO paths). Splitting them
+# would separate the predicates from the steps they guard, which is exactly
+# the coupling this file makes readable in one piece.
+
 """The five steps that build the console's Windows guest, and what lets them skip.
 
 This module DECIDES: what to launch, in which order, and what may be skipped.

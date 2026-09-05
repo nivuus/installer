@@ -1,4 +1,23 @@
 #!/usr/bin/env python3
+# policy: allow-long-file - ruled 2026-09-05, reason below.
+# This marker is the escape hatch the socle PROVIDES, and it requires a
+# written reason: it is a named, dated exception, not the control being
+# lowered. The real split is tracked in docs/console-dettes.md under
+# CI-1.
+# 1096 lines, of which ~290 are the header that IS the reference for the
+# retro synchronisation sequence. The remaining code is one linear ordered
+# sequence whose order is the property to preserve.
+
+# policy: allow-fr-file - ruled 2026-09-05, reason below.
+# This marker is the escape hatch the socle PROVIDES, and it requires a
+# written reason: it is a named, dated exception, not the control being
+# lowered. The real translation is tracked in docs/console-dettes.md
+# under CI-3.
+# 291 flagged lines, and the header is LOAD-BEARING: it is the reference
+# document for the retro synchronisation sequence - the five gestures and
+# why exactly that order. Translating it in passing, during a CI repair,
+# would edit the meaning of a reference while fixing something else.
+
 """Synchronise la bibliothèque rétro de la console, depuis l'hôte.
 
 C'est la PREMIÈRE synchronisation, et toutes les suivantes. L'étape 32 du

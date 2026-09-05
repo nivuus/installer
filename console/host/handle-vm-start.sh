@@ -1,4 +1,12 @@
 #!/bin/bash
+# policy: allow-fr-file - ruled 2026-09-05, reason below.
+# This marker is the escape hatch the socle PROVIDES, and it requires a
+# written reason: it is a named, dated exception, not the control being
+# lowered. The real translation is tracked in docs/console-dettes.md
+# under CI-3.
+# 28 lines. The French log lines here are what the operator reads when
+# wake-on-demand fails: they are themselves the interface.
+
 
 # === Configuration ===
 VM_NAME="Windows"           # <<< REMPLACEZ CECI

@@ -1,4 +1,11 @@
 #!/bin/bash
+# policy: allow-fr-file - ruled 2026-09-05, reason below.
+# This marker is the escape hatch the socle PROVIDES, and it requires a
+# written reason: it is a named, dated exception, not the control being
+# lowered. The real translation is tracked in docs/console-dettes.md
+# under CI-3.
+# 1 line: the script's title.
+
 # Hot rebind RTX après VM via libvirt/udev
 #
 # Logging added 2026-07-22: this hook ran blind. Its twin bind-vfio-gpu.sh

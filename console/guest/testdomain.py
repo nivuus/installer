@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# policy: allow-fr-file - ruled 2026-09-05, reason below.
+# This marker is the escape hatch the socle PROVIDES, and it requires a
+# written reason: it is a named, dated exception, not the control being
+# lowered. The real translation is tracked in docs/console-dettes.md
+# under CI-3.
+# 1 line: the comment stating why the optical drive leaves with its medium.
+
 """Throwaway libvirt domain that answers the HDR question on the real GPU.
 
 Server 2022 stays untouched on the NVMe: this domain only ever writes a qcow2

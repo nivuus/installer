@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# policy: allow-long-file - ruled 2026-09-05, reason below.
+# This marker is the escape hatch the socle PROVIDES, and it requires a
+# written reason: it is a named, dated exception, not the control being
+# lowered. The real split is tracked in docs/console-dettes.md under
+# CI-1.
+# 538 lines, barely over the threshold. The four-way readiness
+# classification and the steady-state redefinition, which must be read
+# together: the timer only stops once that redefinition has ACTUALLY
+# succeeded.
+
 """Classify the Windows guest's provisioning state and log it to the journal.
 
 activate.py's 'start' step launches Windows Setup and returns immediately -

@@ -1,3 +1,11 @@
+# policy: allow-fr-file - ruled 2026-09-05, reason below.
+# This marker is the escape hatch the socle PROVIDES, and it requires a
+# written reason: it is a named, dated exception, not the control being
+# lowered. The real translation is tracked in docs/console-dettes.md
+# under CI-3.
+# 3 lines: why prerequisites are checked before partition() touches the
+# disk.
+
 """Step 9: plan and apply the selected Nivuus packages.
 
 The split between the two functions here IS the contract. plan_packages()

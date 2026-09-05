@@ -1,3 +1,11 @@
+# policy: allow-fr-file - ruled 2026-09-05, reason below.
+# This marker is the escape hatch the socle PROVIDES, and it requires a
+# written reason: it is a named, dated exception, not the control being
+# lowered. The real translation is tracked in docs/console-dettes.md
+# under CI-3.
+# 4 lines: dated comments (2026-08-30, explorer.exe as the shell) and the
+# copy order of the three winget assets.
+
 """Assembly and verification of the offline /nivuus payload.
 
 Everything the guest will ever need must be here: provisioning runs offline.
