@@ -7,18 +7,17 @@ const STEP_LABELS = {
   wifi: "WiFi", features: "Options", review: "Récap",
 };
 
-// Feature catalogue: key -> {label, desc, default}. gpu-passthrough is toggled
-// automatically when a discrete GPU is detected.
+// Feature catalogue: key -> {label, desc, default}. The VM (kvm-vfio,
+// gpu-passthrough, retro) is gone from this list: it is the console package
+// now, and the wizard does not render packages yet (see /api/packages) -
+// deliberately deferred, not forgotten.
 const FEATURES = [
-  { key: "kvm-vfio", label: "KVM / VFIO", desc: "QEMU/KVM, libvirt, IOMMU, hugepages (cloud gaming)", def: true },
   { key: "thermal", label: "Optimisation thermique", desc: "Gestion fréquences P/E-cores + ventilateurs", def: true },
   { key: "networking", label: "Réseau (bridges + WAN)", desc: "Bridges NetworkManager + PPPoE/DHCP", def: true },
   { key: "wifi-ap", label: "Point d'accès WiFi", desc: "hostapd dual-band (lié à l'étape WiFi)", def: false },
   { key: "firewall", label: "Pare-feu", desc: "firewalld + fail2ban + nftables", def: true },
   { key: "docker", label: "Docker", desc: "Moteur Docker + docker compose", def: false },
   { key: "home-assistant", label: "Home Assistant + MQTT", desc: "Domotique + agent système MQTT", def: false },
-  { key: "gpu-passthrough", label: "GPU passthrough", desc: "Liaison vfio-pci (auto-détecté)", def: false, auto: true },
-  { key: "retro", label: "Rétrogaming (VM Windows)", desc: "RetroArch + bibliothèque de jeux rétro dans Steam (nécessite KVM / VFIO)", def: false },
 ];
 
 let hw = null;          // detected hardware snapshot
@@ -35,7 +34,6 @@ async function init() {
   buildFeatureList();
   wireNav();
   wireConditionalFields();
-  wireRetroDependency();
   await loadHardware();
   showStep(0);
 }
@@ -60,12 +58,11 @@ async function loadHardware() {
     const res = await fetch("/api/hardware");
     hw = await res.json();
   } catch (e) {
-    hw = { disks: [], ethernet: [], wifi: [], gpus: [], cpu: {}, passthrough_candidates: [] };
+    hw = { disks: [], ethernet: [], wifi: [], gpus: [] };
   }
   renderDisks();
   renderWan();
   renderWifi();
-  renderGpu();
 }
 
 function renderDisks() {
@@ -104,21 +101,6 @@ function renderWifi() {
   }
 }
 
-function renderGpu() {
-  const candidates = hw.passthrough_candidates || [];
-  const cb = $('input[data-feature="gpu-passthrough"]');
-  const wrap = cb.closest(".feature");
-  if (candidates.length) {
-    cb.checked = true;
-    const ids = candidates.flatMap(g => g.ids).join(", ");
-    wrap.querySelector(".fdesc").textContent =
-      `Détecté : ${candidates.map(g => g.description).join("; ")} (${ids})`;
-  } else {
-    cb.checked = false; cb.disabled = true;
-    wrap.querySelector(".fdesc").textContent = "Aucun GPU dédié détecté.";
-  }
-}
-
 function wireNav() {
   $("#nextBtn").addEventListener("click", () => move(1));
   $("#prevBtn").addEventListener("click", () => move(-1));
@@ -137,29 +119,6 @@ function wireConditionalFields() {
     const f = $('input[data-feature="wifi-ap"]');
     if (f) f.checked = e.target.checked;
   });
-}
-
-// retro (RetroArch, via the `retro` package, provisioned on the Windows
-// guest VM) makes no sense without the VM itself: say so at the moment of
-// the choice, not as a submit-time error (the backend still refuses the
-// combination too - see models.py).
-function wireRetroDependency() {
-  const vm = $('input[data-feature="kvm-vfio"]');
-  const retro = $('input[data-feature="retro"]');
-  if (!vm || !retro) return;
-  // The catalogue entry already carries the "on" description; no need for
-  // a second, hand-copied literal that could drift from it.
-  const defaultDesc = FEATURES.find(f => f.key === "retro").desc;
-  const sync = () => {
-    retro.disabled = !vm.checked;
-    if (!vm.checked) retro.checked = false;
-    const wrap = retro.closest(".feature");
-    wrap.querySelector(".fdesc").textContent = vm.checked
-      ? defaultDesc
-      : "Nécessite la VM Windows (KVM / VFIO) : cochez-la d'abord.";
-  };
-  vm.addEventListener("change", sync);
-  sync();
 }
 
 function move(delta) {
@@ -204,7 +163,6 @@ function buildConfig() {
     .filter(c => c.checked).map(c => c.dataset.feature);
   features.unshift("os-base");
 
-  const candidates = hw && hw.passthrough_candidates || [];
   const cfg = {
     disk: { path: selectedDisk, use_lvm: $("#use_lvm").checked },
     hostname: val("hostname") || "nivuus",
@@ -226,11 +184,6 @@ function buildConfig() {
       pppoe_password: val("pppoe_password"),
     },
     wifi_ap: buildWifi(),
-    gpu_passthrough: {
-      enabled: features.includes("gpu-passthrough") && candidates.length > 0,
-      ids: candidates.flatMap(g => g.ids),
-    },
-    cpu: { isolcpus: (hw && hw.cpu && hw.cpu.isolcpus) || "" },
     features: Array.from(new Set(features)),
   };
   return cfg;

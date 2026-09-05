@@ -1,0 +1,9 @@
+[Unit]
+Description=Gated VM wake for port 47989 (only Moonlight-speaking clients)
+Requires=vm-trigger-47989.socket
+After=vm-trigger-47989.socket
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vm-wake-gate.py 47989
+TimeoutStartSec=300

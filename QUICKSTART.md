@@ -48,13 +48,24 @@ GRUB_CMDLINE_LINUX_DEFAULT="quiet splash isolcpus=0-15 intel_iommu=on iommu=pt v
 
 ### Étape 4: Lancer l'Installation
 
-```bash
-# Installer Nivuus
-sudo ./install.sh
+`install.sh` n'existe plus (2026-08-27) : l'installation passe désormais par
+l'ISO bootable et son assistant web, ou par le moteur d'installation en
+ligne de commande — voir `installer/README.md`.
 
-# Redémarrer (REQUIS pour appliquer isolcpus et IOMMU)
-sudo reboot
+```bash
+# Voie normale : construire l'ISO puis suivre l'assistant web au boot
+cd installer && sudo make build-iso
+
+# Essai sans toucher au disque : moteur en ligne de commande, arrêté avant
+# les étapes destructives (partition/format/mount)
+sudo python3 installer/install-engine/run.py --stop-after partition \
+  --config /path/to/config.json
 ```
+
+Le paramétrage manuel de GRUB décrit à l'étape 3 (`isolcpus`, IOMMU,
+`vfio-pci.ids`) est désormais calculé par l'assistant/le moteur à partir du
+matériel détecté — voir `installer/common/hardware.py` et, pour la console
+de jeu Windows, `console/hardware.py`.
 
 ## Post-Installation
 
@@ -77,19 +88,9 @@ Vous devriez voir:
 ### Créer la VM Windows
 
 ```bash
-# 1. Créer le disque virtuel (100GB example)
-sudo qemu-img create -f qcow2 /var/lib/libvirt/images/Windows.qcow2 100G
-
-# 2. Éditer le template VM
-sudo nano configs/vm-template.xml
-
-# 3. Ajuster:
-#    - GPU PCI addresses (voir ci-dessous)
-#    - Taille RAM (si besoin)
-#    - Chemin disque
-
-# 4. Importer la VM
-sudo virsh define configs/vm-template.xml
+# Générer et définir le domaine depuis le matériel détecté
+python3 console/guest/domain.py xml     # inspecter
+sudo python3 console/guest/domain.py define
 ```
 
 #### Trouver les Adresses PCI du GPU
@@ -183,10 +184,10 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 ```bash
 # Installer winrm-cli
 cd /home/mallanic/Projects/Nivuus
-sudo ./scripts/install-winrm-cli.sh
+sudo ./console/host/install-winrm-cli.sh
 
 # Installer wrapper winvm
-sudo install -m 755 scripts/winvm /usr/local/bin/winvm
+sudo install -m 755 console/host/winvm /usr/local/bin/winvm
 
 # Configurer credentials
 mkdir -p ~/.config/nivuus

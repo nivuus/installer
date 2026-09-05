@@ -34,7 +34,7 @@ Linux Host                    Windows VM
 
 ```bash
 cd /home/mallanic/Projects/Nivuus
-sudo ./scripts/install-winrm-cli.sh
+sudo ./console/host/install-winrm-cli.sh
 ```
 
 Ce script:
@@ -52,7 +52,7 @@ winrm --version
 #### Étape 2: Installer le wrapper winvm
 
 ```bash
-sudo install -m 755 /home/mallanic/Projects/Nivuus/scripts/winvm /usr/local/bin/winvm
+sudo install -m 755 console/host/winvm /usr/local/bin/winvm
 ```
 
 #### Étape 3: Configurer les credentials
@@ -188,7 +188,7 @@ cat ~/.config/nivuus/winvm.conf
 
 **Solution:**
 ```bash
-sudo /home/mallanic/Projects/Nivuus/scripts/install-winrm-cli.sh
+sudo console/host/install-winrm-cli.sh
 ```
 
 #### Connexion lente

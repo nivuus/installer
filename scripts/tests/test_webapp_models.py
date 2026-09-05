@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Tests for the wizard's Pydantic config models (webapp/models.py).
 
-Focus: the "retro" feature declared in task 3 of the console-provisioning
-sub-project. retro (RetroArch, via the `retro` package, on the Windows guest
-VM) is OPTIONAL like every
-other feature (docker, wifi-ap, home-assistant...) and depends on the guest
-VM itself (the "kvm-vfio" feature): checking retro without it must be
-refused at submit time, not discovered later as a failed step on a headless
-machine.
+Task 6 of the console-provisioning sub-project removed the VM features
+(kvm-vfio, gpu-passthrough, retro) from the wizard's vocabulary: they are the
+`console` package now, and console passes through the same door a third
+party would - its own manifest and wizard.yaml, resolved by the engine, not
+InstallConfig. This file used to pin the "retro requires kvm-vfio" submit-
+time refusal; that constraint moved with retro, into the package's resolve
+hook (see console/hooks/resolve.py), so it is gone from here too.
 
 Run: python3 scripts/tests/test_webapp_models.py
 """
@@ -45,35 +45,60 @@ def check_raises(label, fn):
     failures.append(f"{label}: raised nothing, want ValidationError")
 
 
-check("retro is a known feature (declared, like docker/wifi-ap)",
-      "retro" in models.KNOWN_FEATURES, True)
+# --- les features VM ont quitte le wizard -------------------------------- #
+for parti in ("kvm-vfio", "gpu-passthrough", "retro"):
+    check(f"{parti} n est plus une feature",
+          parti in models.KNOWN_FEATURES, False)
+    check_raises(
+        f"{parti} est refuse comme feature inconnue",
+        lambda p=parti: models.InstallConfig(**base_kwargs(["os-base", p])),
+    )
 
-# The core contract: retro cannot make sense without the VM it runs on.
-check_raises(
-    "retro without kvm-vfio is refused",
-    lambda: models.InstallConfig(**base_kwargs(["retro"])),
-)
+# retro se coche desormais comme reponse du package console
+cfg_console = models.InstallConfig(
+    **base_kwargs(["os-base", "networking"]),
+    packages={"console": {"retro": True, "dedicated_nvme": "/dev/nvme1n1"}})
+check("retro voyage dans les reponses du package",
+      cfg_console.packages["console"]["retro"], True)
 
-# The same request, with kvm-vfio also checked, must be accepted.
-cfg = models.InstallConfig(**base_kwargs(["kvm-vfio", "retro"]))
-check("retro survives validation alongside kvm-vfio",
-      set(cfg.features) >= {"kvm-vfio", "retro"}, True)
+# --- Requirement: an install with no VM features checked must behave
+# exactly as it did before "retro" existed. A plain feature list (docker
+# checked, nothing VM-related) must validate exactly like before - no new
+# error, no feature silently added.
+cfg_no_vm = models.InstallConfig(**base_kwargs(["docker"]))
+check("features are unaffected without any VM feature",
+      "retro" not in cfg_no_vm.features and "kvm-vfio" not in cfg_no_vm.features,
+      True)
+check("os-base is still auto-added",
+      "os-base" in cfg_no_vm.features, True)
 
-# --- Requirement: an install that does NOT check retro must behave exactly
-# as it did before this option existed. A config with no "retro" at all
-# (docker checked, nothing else touching retro) must validate exactly like
-# before - no new error, no feature silently added.
-cfg_no_retro = models.InstallConfig(**base_kwargs(["docker"]))
-check("features are unaffected when retro is not requested",
-      "retro" not in cfg_no_retro.features, True)
-check("os-base is still auto-added, same as before retro existed",
-      "os-base" in cfg_no_retro.features, True)
-
-# An empty feature list (the wizard's own default) must still validate with
-# no mention of retro anywhere - the option is invisible unless checked.
+# An empty feature list (the wizard's own default) must still validate.
 cfg_default = models.InstallConfig(**base_kwargs([]))
-check("the default feature list carries no retro",
-      "retro" not in cfg_default.features, True)
+check("the default feature list carries no VM feature",
+      not ({"kvm-vfio", "gpu-passthrough", "retro"} & set(cfg_default.features)),
+      True)
+
+# --- packages ------------------------------------------------------------- #
+# The wizard carries package answers as an opaque mapping: validating them
+# against each package's own question vocabulary is the engine's job - it is
+# the only side that can read the manifests - so the model checks the shape
+# and nothing else.
+cfg_pkg = models.InstallConfig(**base_kwargs(["os-base"]),
+                               packages={"console": {"retro": True}})
+check("packages are carried through", cfg_pkg.packages["console"]["retro"], True)
+check("packages default to empty",
+      models.InstallConfig(**base_kwargs(["os-base"])).packages, {})
+
+check_raises(
+    "an invalid package name is refused",
+    lambda: models.InstallConfig(**base_kwargs(["os-base"]),
+                                 packages={"Console!": {}}),
+)
+check_raises(
+    "a non-mapping answer set is refused",
+    lambda: models.InstallConfig(**base_kwargs(["os-base"]),
+                                 packages={"console": "oui"}),
+)
 
 if failures:
     print(f"FAIL ({len(failures)})")

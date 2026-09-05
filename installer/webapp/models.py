@@ -5,15 +5,20 @@ to the install engine. Field names mirror the JSON keys the engine reads.
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
 # Feature keys the wizard offers; the engine gates each step on these.
+#
+# The VM features are gone: kvm-vfio, gpu-passthrough and retro are the
+# `console` package and two of its questions. The engine no longer knows
+# "the VM" - it knows packages, and console goes through the same door a
+# third party would.
 KNOWN_FEATURES = {
-    "os-base", "kvm-vfio", "thermal", "networking", "wifi-ap",
-    "firewall", "docker", "home-assistant", "mqtt", "gpu-passthrough",
-    "retro",
+    "os-base", "thermal", "networking", "wifi-ap",
+    "firewall", "docker", "home-assistant", "mqtt",
 }
 
 
@@ -79,15 +84,6 @@ class WifiApConfig(BaseModel):
         return v
 
 
-class GpuPassthrough(BaseModel):
-    enabled: bool = False
-    ids: list[str] = Field(default_factory=list)
-
-
-class CpuConfig(BaseModel):
-    isolcpus: str = ""
-
-
 class InstallConfig(BaseModel):
     disk: DiskConfig
     hostname: str = "nivuus"
@@ -97,9 +93,12 @@ class InstallConfig(BaseModel):
     timezone: str = "Europe/Paris"
     wan: WanConfig = Field(default_factory=WanConfig)
     wifi_ap: WifiApConfig = Field(default_factory=WifiApConfig)
-    gpu_passthrough: GpuPassthrough = Field(default_factory=GpuPassthrough)
-    cpu: CpuConfig = Field(default_factory=CpuConfig)
     features: list[str] = Field(default_factory=lambda: ["os-base"])
+    # Package name -> raw answers. Deliberately opaque here: the answers are
+    # validated against each package's own question vocabulary by the engine,
+    # which is the only side that can read the manifests. Pydantic checks the
+    # shape; packages/wizard.py checks the meaning.
+    packages: dict[str, dict] = Field(default_factory=dict)
     suite: str = "bookworm"
     mirror: str = "http://deb.debian.org/debian"
 
@@ -119,12 +118,14 @@ class InstallConfig(BaseModel):
         # os-base is always required.
         if "os-base" not in v:
             v = ["os-base", *v]
-        # retro (RetroArch, via the `retro` package) runs on the Windows
-        # guest VM; checking it without also checking kvm-vfio (the VM
-        # itself) cannot work. Refuse it here, at submit time, rather than
-        # let it surface later as a failed step on a machine with no screen.
-        if "retro" in v and "kvm-vfio" not in v:
-            raise ValueError(
-                "'retro' requires 'kvm-vfio' (the Windows guest VM)"
-            )
+        return v
+
+    @field_validator("packages")
+    @classmethod
+    def _packages(cls, v: dict) -> dict:
+        for name, answers in v.items():
+            if not re.match(r"^[a-z][a-z0-9-]{0,31}$", name):
+                raise ValueError(f"invalid package name: {name!r}")
+            if not isinstance(answers, dict):
+                raise ValueError(f"answers for {name!r} must be a mapping")
         return v

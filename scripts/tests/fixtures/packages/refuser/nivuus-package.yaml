@@ -1,0 +1,8 @@
+apiVersion: nivuus.dev/v1
+name: refuser
+version: 1.0.0
+label: "Package qui refuse"
+tier: userspace
+
+hooks:
+  resolve: hooks/resolve.py

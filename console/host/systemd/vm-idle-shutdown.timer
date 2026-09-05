@@ -1,0 +1,7 @@
+[Unit]
+Description=Periodic Windows VM idle check (energy saving)
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=10min
+[Install]
+WantedBy=timers.target

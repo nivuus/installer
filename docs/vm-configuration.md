@@ -459,7 +459,9 @@ lspci -nnk -d 10de:2786
 
 Pour une nouvelle installation Nivuus, utilisez ce template minimal:
 
-**Fichier:** `/home/mallanic/Projects/Nivuus/configs/vm-template.xml`
+**Généré par:** `console/guest/domain.py` depuis
+`console/guest/templates/domain.xml.j2` — il n'existe plus de XML
+de référence à recopier, le domaine est construit depuis le matériel détecté.
 
 ```xml
 <domain type='kvm'>

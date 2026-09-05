@@ -1,0 +1,34 @@
+- key: dedicated_nvme
+  type: disque
+  label: "NVMe dédié à la console (il sera donné entièrement à la VM)"
+  required: true
+
+- key: retro
+  type: bool
+  label: "Installer le retrogaming (RetroArch et émulateurs)"
+  default: false
+
+- key: admin_password
+  type: secret
+  label: "Mot de passe administrateur Windows"
+  required: true
+
+- key: windows_iso
+  type: texte
+  label: "Media Windows 11 IoT Enterprise LTSC : chemin local de l'ISO"
+  required: true
+
+- key: ltsc_key
+  type: secret
+  label: "Clé produit Windows LTSC"
+  required: true
+
+- key: apollo_password
+  type: secret
+  label: "Mot de passe de l'interface Apollo"
+  required: true
+
+- key: guest_workdir
+  type: texte
+  label: "Répertoire de travail pour la construction de l'invité"
+  default: "/var/lib/nivuus/guest"

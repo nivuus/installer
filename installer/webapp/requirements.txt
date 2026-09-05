@@ -1,7 +1,11 @@
 # Nivuus installer Python runtime dependencies — the single manifest for all installer
-# consumers: web portal, install engine, and windows-guest (via import autounattend).
+# consumers: the web portal (pydantic) and the install engine (jinja2, via
+# install-engine/steps/features.py). The Windows guest left with the console
+# package: nothing under installer/ imports autounattend any more, and
+# console/nivuus-package.yaml declares its own python3-jinja2.
 # On the live ISO these come from Debian packages; this file documents versions for dev.
 fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.5
 jinja2>=3.1
+pyyaml>=6.0

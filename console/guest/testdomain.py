@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+# policy: allow-fr-file - ruled 2026-09-05, reason below.
+# This marker is the escape hatch the socle PROVIDES, and it requires a
+# written reason: it is a named, dated exception, not the control being
+# lowered. The real translation is tracked in docs/console-dettes.md
+# under CI-3.
+# 1 line: the comment stating why the optical drive leaves with its medium.
+
+"""Throwaway libvirt domain that answers the HDR question on the real GPU.
+
+Server 2022 stays untouched on the NVMe: this domain only ever writes a qcow2
+on /media/data, and never receives the Samsung NVMe hostdev.
+
+OPERATIONAL TRAPS:
+- assert_gpu_free() guards the `define` action only, not manual `virsh start`;
+  protection at start time relies on libvirt/vfio refusing a second GPU attach.
+- Domain name is Windows-LTSC-test, so none of
+  /etc/libvirt/hooks/qemu.d/Windows-LTSC-test/** runs: unlike production,
+  nothing here stops nvidia-persistenced/ollama/Tdarr for you. assert_gpu_free()
+  refuses the define instead when gpu_holders() finds one; a manual
+  `virsh start` is not covered by that guard.
+- Only domain_xml(), assert_gpu_free() and gpu_holders() are tested.
+
+Usage:
+    python3 testdomain.py xml
+    sudo python3 testdomain.py define --windows-iso ... --unattend-iso ...
+    python3 testdomain.py wait-ready
+    sudo python3 testdomain.py teardown
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import glob
+import os
+import socket
+import subprocess
+import payload
+import sys
+import time
+from pathlib import Path
+
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+HERE = Path(__file__).resolve().parent
+TEMPLATES_DIR = HERE / "templates"
+
+DOMAIN_NAME = "Windows-LTSC-test"
+DISK_PATH = "/media/data/vm/windows-ltsc-test.qcow2"
+NVRAM_PATH = "/var/lib/libvirt/qemu/nvram/Windows-LTSC-test_VARS.fd"
+BRIDGE = "internalBridge"
+# Locally administered MAC, distinct from the production VM's.
+MAC = "52:54:00:4c:54:53"
+# virtio-net has no in-box driver on the LTSC medium: the guest only gets a
+# working NIC once 15-virtio.ps1 installs NetKVM, which exists in sub-project
+# B's payload and NOT in A's. An A-era answer ISO on a virtio NIC produces a
+# guest that installs and provisions correctly but never obtains an address -
+# 5985 never opens, wait_ready() burns its full 90 minutes, and the only
+# visible symptoms are a black screen (the NVIDIA driver took the display) and
+# an empty DHCP lease file. Pass --nic-model e1000e for such a medium.
+NIC_MODEL = "virtio"
+# Les memes partages que la production (domain.py SHARES), pour que le banc
+# exerce 35-shares.ps1 au lieu de le decouvrir a la bascule.
+SHARES = (
+    {"source": "/media/data/Downloads", "tag": "Downloads"},
+    {"source": "/media/data/Games", "tag": "Games"},
+    {"source": "/media/data/Console", "tag": "Console"},
+    {"source": "/media/backup/Console", "tag": "ConsoleSave"},
+)
+WINRM_PORT = 5985
+
+
+class DomainError(RuntimeError):
+    """Raised when the test domain cannot be created or does not come up."""
+
+
+def _virsh(*args: str) -> subprocess.CompletedProcess:
+    # virsh output is localized; LC_ALL=C keeps state strings parseable.
+    return subprocess.run(["virsh", *args], text=True, capture_output=True,
+                          env={**os.environ, "LC_ALL": "C"})
+
+
+def existing_uuid(name: str = DOMAIN_NAME) -> str | None:
+    """UUID of the domain if it is already defined, else None.
+
+    Without it, `testdomain.py xml | virsh define` fails with "domain already
+    exists with uuid ..." - libvirt mints a fresh UUID for a UUID-less XML and
+    refuses to attach it to an existing name. The failure is quiet in a
+    pipeline (define prints to stderr, the domain simply keeps its OLD
+    definition) and the next `virsh start` then boots the PREVIOUS answer
+    medium. That is how a rebuild ran the wipe ISO twice on 2026-08-25 and
+    erased the games partition it was meant to preserve.
+    """
+    out = _virsh("dumpxml", "--inactive", name)
+    if out.returncode != 0:
+        return None
+    match = re.search(r"<uuid>([0-9a-fA-F-]{36})</uuid>", out.stdout)
+    return match.group(1) if match else None
+
+
+def domain_xml(*, disk_path: str = DISK_PATH, windows_iso: str,
+               unattend_iso: str, name: str = DOMAIN_NAME,
+               nvram_path: str = NVRAM_PATH, bridge: str = BRIDGE,
+               mac: str = MAC, memory_gib: int = 16, vcpus: int = 8,
+               nic_model: str = NIC_MODEL,
+               uuid: str | None = None,
+               shares: tuple = SHARES) -> str:
+    env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)),
+                      autoescape=select_autoescape(enabled_extensions=("j2",),
+                                                   default=True),
+                      keep_trailing_newline=True)
+    return env.get_template("domain-test.xml.j2").render(
+        name=name, disk_path=disk_path, windows_iso=windows_iso,
+        unattend_iso=unattend_iso, nvram_path=nvram_path, bridge=bridge,
+        mac=mac, memory_gib=memory_gib, vcpus=vcpus, nic_model=nic_model,
+        uuid=uuid, shares=shares,
+    )
+
+
+def gpu_holders() -> list[str]:
+    """PIDs with an open fd on /dev/nvidia*, enumerated in pure Python: a
+    find(1) subprocess has no reliable exit-code signal on this host (it was
+    measured exiting 1 on every run regardless of any real failure - see
+    CLAUDE.md). A per-entry race/permission error is normal, swallowed, never
+    raised; only /proc itself being unlistable is a genuine scan failure."""
+    try:
+        os.listdir("/proc")
+    except OSError as exc:
+        raise DomainError(f"GPU holder scan failed: /proc unreadable: {exc}")
+    pids = set()
+    for fd_path in glob.glob("/proc/[0-9]*/fd/*"):
+        try:
+            target = os.readlink(fd_path)
+        except OSError:
+            continue
+        if target.startswith("/dev/nvidia"):
+            pids.add(fd_path.split("/")[2])
+    return sorted(pids, key=int)
+
+
+def assert_gpu_free() -> None:
+    """The production VM owns the GPU while it runs; refuse rather than fight."""
+    proc = _virsh("domstate", "Windows")
+    if proc.returncode != 0:
+        raise DomainError(f"could not determine Windows domain state: {proc.stderr.strip()}")
+    state = proc.stdout.strip()
+    if not state:
+        raise DomainError("could not determine Windows domain state: domstate returned empty")
+    if state != "shut off":
+        raise DomainError(f"the Windows domain is {state!r}: shut it down first, "
+                          "the GPU cannot be assigned to two domains")
+    holders = gpu_holders()
+    if holders:
+        raise DomainError("process(es) still hold /dev/nvidia*: PID " + ", ".join(holders) +
+                          " - no libvirt hooks stop them for you here (nvidia-persistenced, "
+                          "nivuus-ollama, Tdarr are the usual suspects); stop them by hand")
+
+
+def create_disk(path: str = DISK_PATH, size_gib: int = 120) -> None:
+    # qemu runs as libvirt-qemu and must traverse this directory; libvirt's
+    # dynamic ownership fixes the image file but never its parent.
+    Path(path).parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    if Path(path).exists():
+        raise DomainError(f"{path} already exists; run teardown first")
+    subprocess.run(["qemu-img", "create", "-f", "qcow2", path, f"{size_gib}G"],
+                   check=True, capture_output=True)
+
+
+def define(xml: str) -> None:
+    path = Path("/run") / f"{DOMAIN_NAME}.xml"
+    path.write_text(xml)
+    proc = _virsh("define", str(path))
+    if proc.returncode != 0:
+        raise DomainError(f"virsh define failed: {proc.stderr.strip()}")
+
+
+def guest_ip(domain: str = DOMAIN_NAME) -> str | None:
+    proc = _virsh("domifaddr", domain, "--source", "arp")
+    for line in proc.stdout.splitlines():
+        for field in line.split():
+            if "/" in field and field.count(".") == 3:
+                return field.split("/")[0]
+    return None
+
+
+def wait_ready(domain: str = DOMAIN_NAME, timeout_s: int = 5400) -> str:
+    """Wait for provisioning to finish, by reading the MARKER.
+
+    A reachable 5985 used to be the signal, because 99-marker.ps1 opened the
+    firewall rule as its last gesture. That was a proxy for readiness and it
+    lied in the one case worth catching: when a stage throws, 99-marker is
+    never reached, the port never opens, and the wait burns its whole budget
+    before reporting "not ready" - saying nothing about WHY, and leaving no way
+    in, since the appliance has neither a Run box (no explorer) nor a usable
+    console (Apollo owns the display).
+
+    WinRM is now reachable from stage 00 onwards, so this reads
+    C:\\nivuus\\state\\PROVISION.done - which IS the truth about readiness.
+    A guest that answers but has no marker is a guest still working, or a guest
+    that failed; either way it can be asked.
+    """
+    deadline = time.time() + timeout_s
+    reachable = False
+    while time.time() < deadline:
+        ip = guest_ip(domain)
+        if ip:
+            with socket.socket() as sock:
+                sock.settimeout(2)
+                if sock.connect_ex((ip, WINRM_PORT)) == 0:
+                    reachable = True
+                    if _marker_present(ip):
+                        return ip
+        time.sleep(15)
+    hint = ("it answers on WinRM but never wrote the marker: read "
+            "C:\\nivuus\\provision.log over WinRM, the last line names the "
+            "stage that threw") if reachable else (
+            "it never answered on WinRM at all: check the domain started and "
+            "obtained an address")
+    raise DomainError(f"{domain} is not provisioned after {timeout_s}s - {hint}")
+
+
+def _marker_present(ip: str) -> bool:
+    """True when the guest carries a provisioning marker for THIS payload.
+
+    Version-checked on purpose: a rebuild boots a disk that already holds the
+    PREVIOUS run's marker, so its mere presence proves nothing.
+    """
+    script = str(HERE / "winrm_exec.py")
+    out = subprocess.run(
+        [sys.executable, script, "cmd", r"type C:\nivuus\state\PROVISION.done"],
+        capture_output=True, text=True,
+        env={**os.environ, "GUEST_IP": ip, "LC_ALL": "C"},
+    )
+    return f"provision_version={payload.PROVISION_VERSION}" in out.stdout
+
+
+def teardown(domain: str = DOMAIN_NAME, disk_path: str = DISK_PATH) -> None:
+    _virsh("destroy", domain)
+    _virsh("undefine", domain, "--nvram")
+    Path(disk_path).unlink(missing_ok=True)
+
+
+def eject_media(domain: str = DOMAIN_NAME) -> list[str]:
+    """Detach both optical media once provisioning is done.
+
+    This is not tidying. The answer ISO carries the product key, the
+    administrator password and the Apollo web password IN CLEARTEXT - that is
+    the whole reason build.py writes it mode 0600 - and while it stays attached
+    anything running in the guest can read them straight off the drive.
+    Measured on 2026-08-26: `findstr Key F:\autounattend.xml` from inside the
+    guest returns the product key.
+
+    The Windows medium goes too: it has served its purpose, and leaving a
+    bootable installer attached to an appliance is one stray boot order away
+    from reinstalling it.
+    """
+    ejected = []
+    for target in ("sdb", "sdc"):
+        for scope in ("--live", "--config"):
+            _virsh("change-media", domain, target, "--eject", scope)
+        # Ejecter ne suffit pas : le LECTEUR garde sa lettre meme vide, et ce
+        # sont precisement les lettres que 35-shares.ps1 veut pour E: et F:.
+        # Mesure du 2026-08-26 : apres ejection, E: et F: restaient occupes par
+        # deux volumes de 0 Go et les partages ne pouvaient pas monter. Le
+        # lecteur part donc avec son media - une appliance n'a rien a lire sur
+        # un CD, et le domaine de production n'en declare aucun.
+        _virsh("detach-disk", domain, target, "--config")
+        ejected.append(target)
+    return ejected
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="Throwaway LTSC test domain")
+    ap.add_argument("action",
+                    choices=["xml", "define", "wait-ready", "eject-media", "teardown"])
+    ap.add_argument("--windows-iso", default="/media/backup/en-us_windows_11_iot_enterprise_ltsc_2024_x64_dvd_f6b14814.iso")
+    ap.add_argument("--unattend-iso", default="/media/data/iso/nivuus-unattend.iso")
+    ap.add_argument("--disk-size", type=int, default=120)
+    ap.add_argument("--nic-model", default=NIC_MODEL,
+                    choices=["virtio", "e1000e"],
+                    help="virtio needs NetKVM from sub-project B's payload; "
+                         "use e1000e with an answer ISO that lacks it")
+    args = ap.parse_args(argv)
+
+    if args.action == "xml":
+        print(domain_xml(windows_iso=args.windows_iso,
+                         unattend_iso=args.unattend_iso,
+                         nic_model=args.nic_model,
+                         uuid=existing_uuid()))
+        return 0
+    if args.action == "define":
+        assert_gpu_free()
+        create_disk(size_gib=args.disk_size)
+        define(domain_xml(windows_iso=args.windows_iso,
+                          unattend_iso=args.unattend_iso,
+                          nic_model=args.nic_model))
+        print(f"defined {DOMAIN_NAME}; start it with: virsh start {DOMAIN_NAME}")
+        return 0
+    if args.action == "wait-ready":
+        ip = wait_ready()
+        print(f"guest ready at {ip}", file=sys.stderr)
+        print(ip)
+        return 0
+    if args.action == "eject-media":
+        for t in eject_media():
+            print(f"ejected {t}")
+        print("the answer ISO carried three cleartext secrets; the guest can no "
+              "longer read them")
+        return 0
+    teardown()
+    print(f"{DOMAIN_NAME} removed")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except DomainError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)

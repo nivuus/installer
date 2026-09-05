@@ -1,0 +1,8 @@
+- key: greeting
+  type: texte
+  label: "Message"
+  default: "bonjour"
+
+- key: dedicated_disk
+  type: disque
+  label: "Disque dédié au package"

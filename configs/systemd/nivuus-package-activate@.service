@@ -1,0 +1,24 @@
+[Unit]
+Description=Nivuus package activation: %i
+# The activate phase is the one that needs the network: it downloads what
+# could not travel in the ISO. Ordering after network-online is not a nicety.
+After=network-online.target
+Wants=network-online.target
+# A stamp rather than a self-disabling unit: if activation is interrupted
+# halfway, the unit must run again at the next boot rather than believe it
+# succeeded. systemctl disable inside ExecStartPost cannot tell the difference.
+ConditionPathExists=!/var/lib/nivuus/packages/%i.activated
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Run straight from the payload the installer copied to /opt/nivuus.
+# activate_cli.py derives its own sys.path from __file__, so copying it
+# to /usr/local/sbin would break its imports; pointing at it where it
+# already lives removes a moving part instead of adding one.
+ExecStart=/opt/nivuus/installer/packages/activate_cli.py %i
+# Third-party code on first boot must never wedge the boot itself.
+TimeoutStartSec=7200
+
+[Install]
+WantedBy=multi-user.target

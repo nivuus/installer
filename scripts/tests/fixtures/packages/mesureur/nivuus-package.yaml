@@ -1,0 +1,12 @@
+apiVersion: nivuus.dev/v1
+name: mesureur
+version: 1.0.0
+label: "Package qui mesure avant le redémarrage"
+# userspace ON PURPOSE: facts are not gated on tier. kernel-cmdline, modules
+# and hugepages-mib are refused at this tier because they reach the boot
+# chain; a fact reaches nothing but the package's own activate phase.
+tier: userspace
+
+hooks:
+  resolve: hooks/resolve.py
+  activate: hooks/activate.py

@@ -1,0 +1,5 @@
+[Unit]
+Description=Shut down Windows VM after sustained inactivity
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vm-idle-shutdown.sh

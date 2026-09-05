@@ -1,0 +1,175 @@
+<domain type='kvm'>
+  <name>{{ name }}</name>
+{%- if uuid %}
+  <uuid>{{ uuid }}</uuid>
+{%- endif %}
+  <memory unit='KiB'>{{ memory_kib }}</memory>
+  <currentMemory unit='KiB'>{{ memory_kib }}</currentMemory>
+  <memoryBacking>
+    <hugepages/>
+    <locked/>
+    <access mode='shared'/>
+  </memoryBacking>
+  <vcpu placement='static'>{{ plan.vcpus }}</vcpu>
+  <iothreads>2</iothreads>
+  <cputune>
+{%- for vcpu, host_cpu in plan.vcpupin %}
+    <vcpupin vcpu='{{ vcpu }}' cpuset='{{ host_cpu }}'/>
+{%- endfor %}
+    <emulatorpin cpuset='{{ plan.emulator_cpuset }}'/>
+    <iothreadpin iothread='1' cpuset='{{ plan.emulator_cpuset }}'/>
+    <iothreadpin iothread='2' cpuset='{{ plan.emulator_cpuset }}'/>
+  </cputune>
+{%- if smbios %}
+  <sysinfo type='smbios'>
+{%- for table, entries in smbios.items() %}
+    <{{ table }}>
+{%- for key, value in entries.items() %}
+      <entry name='{{ key }}'>{{ value }}</entry>
+{%- endfor %}
+    </{{ table }}>
+{%- endfor %}
+  </sysinfo>
+{%- endif %}
+  <os>
+    <type arch='x86_64' machine='pc-q35-9.2'>hvm</type>
+    <loader readonly='yes' secure='yes' type='pflash' format='raw'>/usr/share/OVMF/OVMF_CODE_4M.secboot.fd</loader>
+    <nvram template='/usr/share/OVMF/OVMF_VARS_4M.ms.fd' templateFormat='raw' format='raw'>{{ nvram_path }}</nvram>
+{%- if smbios %}
+    <smbios mode='sysinfo'/>
+{%- endif %}
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+    <hyperv mode='custom'>
+      <relaxed state='on'/>
+      <vapic state='on'/>
+      <spinlocks state='on' retries='8191'/>
+      <vpindex state='on'/>
+      <runtime state='on'/>
+      <synic state='on'/>
+      <stimer state='on'><direct state='on'/></stimer>
+      <reset state='on'/>
+      <frequencies state='on'/>
+      <tlbflush state='on'/>
+      <ipi state='on'/>
+      <evmcs state='on'/>
+    </hyperv>
+    <vmport state='off'/>
+    <smm state='on'/>
+    <ioapic driver='kvm'/>
+  </features>
+  <cpu mode='host-passthrough' check='none' migratable='off'>
+    <topology sockets='1' dies='1' clusters='1' cores='{{ plan.cores }}' threads='{{ plan.threads }}'/>
+    <cache mode='passthrough'/>
+    <maxphysaddr mode='emulate' bits='39'/>
+    <feature policy='require' name='topoext'/>
+    <feature policy='require' name='hypervisor'/>
+    <feature policy='require' name='invtsc'/>
+    <feature policy='disable' name='split-lock-detect'/>
+  </cpu>
+  <clock offset='localtime'>
+    <timer name='rtc' tickpolicy='catchup'/>
+    <timer name='pit' tickpolicy='delay'/>
+    <timer name='hpet' present='no'/>
+    <timer name='kvmclock' present='no'/>
+    <timer name='hypervclock' present='yes'/>
+    <timer name='tsc' present='yes' mode='native'/>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <!-- destroy, not the libvirt default coredump-destroy: a 16 GiB guest RAM
+       core dump onto a host / already alarmed at 85% disk usage is worse
+       than losing the crash diagnostics. -->
+  <on_crash>destroy</on_crash>
+  <pm>
+    <suspend-to-mem enabled='no'/>
+    <suspend-to-disk enabled='yes'/>
+  </pm>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <controller type='usb' index='0' model='qemu-xhci'/>
+    <controller type='sata' index='0'/>
+{%- if install_media %}
+    <!-- INSTALL MEDIA. Attached only while Windows Setup has not yet run; the
+         domain is redefined without them once the guest is provisioned.
+
+         TWO media, never one. The ISO build.py produces is NOT bootable: it
+         carries the answer file and the offline payload, which Windows Setup
+         reads once it has ALREADY booted from the official Windows medium.
+         That is why only the Windows medium takes a boot order, and why the
+         NVMe hostdev below gives its own up while these are attached - a
+         single-drive install domain boots straight into a blank NVMe and
+         Setup never starts.
+
+         Form copied verbatim from templates/domain-test.xml.j2 (bus, targets,
+         readonly, boot order): that one has driven real installations. -->
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='{{ install_media.windows_iso }}'/>
+      <target dev='sdb' bus='sata'/>
+      <readonly/>
+      <boot order='1'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='{{ install_media.unattend_iso }}'/>
+      <target dev='sdc' bus='sata'/>
+      <readonly/>
+    </disk>
+{%- endif %}
+{%- for s in shares %}
+    <filesystem type='mount' accessmode='passthrough'>
+      <driver type='virtiofs' queue='1024'/>
+      <binary path='/usr/libexec/virtiofsd'/>
+      <source dir='{{ s.source }}'/>
+      <target dir='{{ s.tag }}'/>
+    </filesystem>
+{%- endfor %}
+    <interface type='bridge'>
+      <mac address='{{ mac }}'/>
+      <source bridge='{{ bridge }}'/>
+      <model type='virtio'/>
+      <driver name='vhost' queues='8'/>
+      <link state='up'/>
+    </interface>
+    <input type='mouse' bus='ps2'/>
+    <input type='keyboard' bus='ps2'/>
+    <input type='tablet' bus='usb'/>
+    <audio id='1' type='none'/>
+    <graphics type='vnc' port='-1' listen='127.0.0.1'/>
+    <video>
+      <model type='vga' vram='16384' heads='1'/>
+    </video>
+    <tpm model='tpm-crb'>
+      <backend type='emulator' version='2.0'/>
+    </tpm>
+    <hostdev mode='subsystem' type='pci' managed='yes'>
+      <driver name='vfio'/>
+      <source>
+        <address domain='{{ nvme.domain }}' bus='{{ nvme.bus }}' slot='{{ nvme.slot }}' function='{{ nvme.function }}'/>
+      </source>
+{#- Steady state only: the NVMe is what boots. While the install media are
+    attached the Windows medium takes this order instead, exactly as
+    domain-test.xml.j2 does - its system disk carries no boot element either.
+    Windows Setup writes its own UEFI boot entry, so the guest still comes
+    back on the NVMe at every reboot of the install. A Jinja comment, not an
+    XML one: this explains an ABSENCE in the install domain, which is a
+    template concern and has no business in every emitted steady-state XML. #}
+{%- if not install_media %}
+      <boot order='1'/>
+{%- endif %}
+    </hostdev>
+{%- for fn in gpu_functions %}
+    <hostdev mode='subsystem' type='pci' managed='yes'>
+      <driver name='vfio'/>
+      <source>
+        <address domain='{{ fn.domain }}' bus='{{ fn.bus }}' slot='{{ fn.slot }}' function='{{ fn.function }}'/>
+      </source>
+    </hostdev>
+{%- endfor %}
+    <watchdog model='itco' action='reset'/>
+    <memballoon model='none'/>
+  </devices>
+</domain>

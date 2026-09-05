@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Nivuus** is a cloud gaming server infrastructure with comprehensive system monitoring integration. The project consists of:
 
-1. **Installer** (`installer/`): Bootable ISO that installs Nivuus via a web wizard served over a WiFi setup hotspot, plus `windows-guest/` (unattended Windows LTSC guest build for GPU passthrough)
+1. **Installer** (`installer/`): Bootable ISO that installs Nivuus via a web wizard served over a WiFi setup hotspot. The unattended Windows LTSC guest build for GPU passthrough now lives at `console/guest/` (moved out of `installer/windows-guest/`, which no longer exists) — see "Installer Architecture" below.
 2. **Infrastructure Configuration** (`scripts/`, `configs/`): thermal/RAPL policy, VM CPU partitioning, GPU passthrough hooks, PCIe guard, disk maintenance, VM wake-on-demand
 3. **Host documentation** (`docs/`): system audit, VM configuration, thermal campaign, and the superpowers specs/plans
 
@@ -32,6 +32,7 @@ as `~/Projects/Nivuus/packages/<name>`.
 | `nivuus/home-stock` | Garde-manger — household stock as an HA integration |
 | `nivuus/shell` | ZSH environment |
 | `nivuus/design` | Brand identity, mockups and design tokens |
+| `nivuus/media-manager` | Médiathèque (Plex, *arr, Tdarr) — package `nivuus.dev/v1`, tier `userspace` |
 | `nivuus/home-agent` | **archived** — autonomous AI agent (Gemini + ChromaDB) |
 | `nivuus/voice-agent` | **archived** — OpenAI-compatible shim adding HA tool-calling to ollama |
 
@@ -67,14 +68,539 @@ the live image to disk. Full docs: `installer/README.md`.
 - `installer/iso-build/` — live-build config; hook `0500-nivuus-venv` builds a
   pydantic-v2 venv (bookworm ships v1), hook `9000` enables the services.
 
-**Reuse, don't duplicate:** the engine copies the whole repo to `/opt/nivuus` in
-the target and **calls** `install.sh` inside the chroot. `install.sh` was made
-installer-aware (backward-compatible): `NIVUUS_DIR` now resolves to the script's
-own dir; env hooks `NIVUUS_ASSUME_YES`/`--non-interactive`, `NIVUUS_IN_CHROOT`
-(skip runtime thermal apply), `NIVUUS_ISOLCPUS`, `NIVUUS_IOMMU`, `NIVUUS_VFIO_IDS`
-(generic kernel params instead of the hardcoded `isolcpus=0-15`). `NIVUUS_ISOLCPUS`
-now names the CPUs the VM will pin and is emitted as **`nohz_full=` only, never
-`isolcpus=`** — see "Dynamic host/VM CPU partitioning" below.
+**`install.sh` is gone (2026-08-27).** Five of its seven blocks were VM
+setup and now live in the `console` package (`console/nivuus-package.yaml`
+plus `console/hooks/`); the thermal block became an ordinary
+`install-engine` feature. The `NIVUUS_DIR` / `NIVUUS_IN_CHROOT` /
+`NIVUUS_ISOLCPUS` / `NIVUUS_VFIO_IDS` env plumbing existed only to make that
+script runnable inside a chroot and went with it.
+
+**`console/` is the first Nivuus package, and it is deliberately ordinary.**
+It declares `tier: platform`, claims `gpu` and `nvme` exclusively, and
+requires the `iommu`, `gpu-discrete` and `nvme-dedicated` capabilities. Two
+things about it are easy to break:
+
+* **`vm-cpu-partition.sh` MUST be deployed under `/etc/libvirt/hooks/`**, and
+  `console/hooks/install.py` does so. The libvirtd AppArmor profile grants
+  `/etc/libvirt/hooks/** rmix`, so hooks run *inheriting* that profile, which
+  allows exec of `/bin`, `/sbin`, `/usr/bin` and `/usr/sbin` — but **not**
+  `/usr/local/sbin`. Installed there instead it dies at VM start with a
+  misleading `bad interpreter: Permission denied` and no DENIED line in dmesg.
+* **`nivuus-cpu-mode@{gaming,idle}.service` is a public contract of this
+  repository.** The thermal policy stays here (it is a host policy), but its
+  modes are driven by the package's libvirt hooks. The package calls the unit
+  if it exists and does nothing if it does not — which is what lets it install
+  on a Debian that has never seen this installer.
+* **The `dedicated_nvme` ANSWER chooses the passthrough disk; the host-root
+  exclusion is only an assertion on that choice.** Getting this backwards
+  broke the package's primary path outright: a selector that picks "the NVMe
+  not backing the host root" has nothing to work with on a live ISO — the
+  root is the live image, `findmnt -no SOURCE /` says `overlay`, no PCI disk
+  backs it — so it refused on *every* machine with `host root not
+  identified`. Hardware checks run on an already-installed host pass happily
+  and prove nothing about it. `select_passthrough_nvme()` therefore takes
+  `host_addresses=None` as "the assertion does not apply", never as a
+  refusal, and only falls back to auto-selection when no answer was given.
+  The engine adds the one check the package structurally cannot make —
+  `plan_packages()` refuses a `disque` answer naming the **install target**,
+  because a hook receives `hw` and its own answers but never the install
+  config.
+* **`console/hooks/install.py` now places the whole host-side lifecycle**
+  (2026-08-28, tasks 1-4 of `2026-08-28-console-cablage-hote`): the libvirt
+  dispatcher, the two GPU hooks, the `rules.sh` pair, `vm-cpu-partition.sh`,
+  the two versioned CPU wrappers (copied, never generated: the heredocs they
+  replaced dropped `systemctl start nivuus-cpu-mode@{gaming,idle}.service`,
+  which this file calls a public contract two paragraphs up, leaving it
+  honoured by nobody), four host scripts (`vm-wake-gate.py`,
+  `handle-vm-start.sh`, `winvm`, and `vm-idle-shutdown.sh`), six systemd
+  units plus their shared no-start-limit drop-in copied into two `.d/`
+  directories, and `retro.json`. `console/hooks/activate.py` is no longer a
+  stub: it arms three of those six units (the two wake sockets and the
+  idle-shutdown timer) with a symlink into their `.wants/` directory, then
+  — only when `--root` is `/` — reloads systemd and starts them, tolerating
+  failure. **That start is not a nicety**: the activation unit is
+  `WantedBy=multi-user.target`, so it runs after `sockets.target` and
+  `timers.target` are already reached; the links alone would leave the wake
+  sockets silent and the timer stopped until a *second* reboot, with the
+  stamp file already claiming success. The
+  three hugepage hooks (`00-set-hugepages.sh`, `00-hugepages-fix.sh`,
+  `hugepages-reset.sh`) were **deleted**, not deployed — the hugepage pool is
+  already set declaratively: `console/hooks/resolve.py` computes it from host
+  RAM and returns it as the `platform` event's `hugepages-mib` (the manifest
+  declares no such key), and `install-engine/steps/packages.py` writes
+  `vm.nr_hugepages` into `/etc/sysctl.d/60-nivuus-packages.conf`. So
+  deploying them would have done nothing; documenting
+  them as "to be wired" had already misled the README once. The one thing
+  still missing: **`vm-idle-shutdown.sh` was never versioned anywhere before
+  this plan** — same class of gap as `handle-vm-start.sh` before
+  2026-08-24, a script that existed only deployed on the production host.
+  Both are now source in `console/host/`. **At that point (tasks 1-4) the
+  console was still not functional from an install alone**: `activate`
+  armed only the wake/idle units and could manage a `Windows` domain if one
+  already existed, not create one.
+
+* **`activate` now builds and starts the guest too — phase 2d, plan
+  `2026-08-28-console-activate-invite`, done 2026-08-28.** `install` places
+  two more units (`nivuus-guest-ready.service`+`.timer`, eight total) and a
+  new script, `guest-ready-watch.py`; `activate` arms four of the eight
+  (adding the guest-readiness timer to the three above), then runs
+  `console/guest_steps.py`'s five ordered steps — write the three 0600
+  secrets, fetch the offline payload, build the unattended ISO, `domain.py
+  define` with **both** install media (the official Windows medium, which
+  boots, plus the just-built answer ISO, which does not), and one `virsh
+  start` — each skippable on its own `already_done()` observation, and each
+  failure classified into one of three causes (a refused input, a libvirt
+  hook refusal at `start`, or an unnamed command failure) by
+  `console/hooks/activate.py`'s `classify()`. **`activate` returns as soon
+  as `start` succeeds — it does not wait for Windows Setup to finish.**
+  `nivuus-guest-ready.timer` (2-minute period, self-stopping) is what says
+  the real outcome: it polls `virsh domstate` and reads a version-stamped
+  marker file over WinRM (`C:\nivuus\state\PROVISION.done`, written by
+  `provision/99-marker.ps1` as its last act, checked against `payload.py`'s
+  `PROVISION_VERSION` so a rebuilt disk's PREVIOUS run's marker never reads
+  as ready). **A reachable WinRM port (5985) is NOT the readiness signal —
+  this file said so until 2026-08-28, and that stale claim caused the whole
+  redesign this bullet documents**: since 2026-08-26 `provision/00-bootstrap.ps1`
+  opens 5985 at the FIRST provisioning stage, deliberately, so a reachable
+  port only ever proves the guest is alive enough to accept a command, never
+  that provisioning finished. The timer logs
+  `not_started`/`installing`/`failed` (2h timeout)/`ready`. On `ready` it
+  redefines the domain **without** either install medium
+  (`domain.py define --replace --keyed-varstore`), stopping the timer only
+  once that redefinition itself has actually succeeded, so a transient
+  failure there is retried rather than leaving the media attached forever.
+  `console/guest/` and `domain.py` are no longer merely "already inside the
+  package" — `activate` now drives both.
+  **Named residuals, not silently accepted**: (1) `--replace` on `define`
+  is a real risk on a host where `Windows` is already the production VM —
+  `guard_replace()`/`guard_fresh_varstore()` remain the backstop, not a
+  substitute for an operator's own judgment; (2) the first reboot inside
+  Setup on this exact domain shape (both media, then redefined without
+  them) is unmeasured — the bench ran two full LTSC installs this way, but
+  the only guard against a boot loop is the "Press any key" prompt on the
+  operator's own medium, and the bench never installed onto an NVMe passed
+  through as PCI; (3) a `windows_iso` answer given as a URL is never
+  fetched — `media_identity()` only `stat()`s a local path, the wizard's own
+  label still says otherwise, and downloading 5 GB with resume/integrity
+  was deliberately left out of scope; (4) the `payload` step's
+  `already_done()` is shallow — an interrupted fetch still counts as done,
+  and it is the `build` step re-running against it that repairs the gap;
+  (5) `retro: true` cannot succeed on a target even though the wizard
+  offers it — `fetch_payload.py`'s `RETRO_SRC` default resolves to
+  `/opt/retro` once this package is copied to `/opt/nivuus-packages/console/`,
+  and nothing creates that directory there, so `build_retro_wheels()`
+  refuses by name the moment `payload` runs with retro on; (6) the WinRM
+  password-file path `guest-ready-watch.py` passes to `winrm_exec.py`
+  (`GUEST_PASS_FILE`) is deduced from reading `guest_steps.py`'s own
+  `secrets` step side by side with it, never measured against a real guest
+  — running one is exactly what this whole chain is forbidden from doing.
+  **None of this chain has ever run for real** — every step is proven
+  against a fake `virsh`/filesystem, never on the reference host, because
+  starting `Windows` there detaches the GPU from the host. The host-specific
+  constants this paragraph does NOT re-litigate (hard-coded GPU PCI address,
+  the wake path's wrong bridge, `/opt/nivuus/…` paths, the missing `winrm`
+  client) are unchanged and stay documented in `console/README.md`'s
+  **Limites connues** — a separate, still-open item.
+
+* **Gaming Services (the Store's `9MWPM2CQNLHN`) is installed by default, and
+  kept current, by `provision/33-winget.ps1` + `34-gaming-services.ps1` —
+  added 2026-08-30.** IoT Enterprise LTSC ships **no Microsoft Store**, and
+  GDK titles (including Steam's Forza/Sea of Thieves/Halo MCC) refuse to
+  launch without this package. Measured on the production guest that day:
+  winget installed offline (bundle + `License1.xml` + the three x64
+  frameworks, all pinned to `fetch_payload.WINGET_VERSION`) reaches the
+  Store through its `msstore` source on this SKU — `winget install --id
+  9MWPM2CQNLHN --source msstore` succeeded and left
+  `Microsoft.GamingServices 38.116.6003.0` with `GamingServices` and
+  `GamingServicesNet` both Running. Re-measured end to end on 2026-09-04 with
+  the split assets deployed: all four Store packages resolve, the services are
+  re-asserted and read back, and a second immediate run skips the Store
+  (`Store non interroge : dernier controle il y a 0,0 h`) while still redoing
+  the services. **Bumping `WINGET_VERSION` alone used to change nothing**:
+  `fetch()` keeps whatever already exists and all three winget artefacts land
+  on version-free paths, so a populated `drivers/` shipped the OLD winget in
+  silence and the TOFU manifest could not see it (same path, same digest).
+  `prune_stale_winget()`/`stamp_winget()` close that, mirroring
+  `prune_stale_retro`. Three things that are not obvious:
+  (1) **`Add-AppxPackage` returns `0x80070005` over WinRM** — the network
+  logon lacks the AppX deployment service's rights, so replaying either
+  stage from the host needs `schtasks /it` in session 1, exactly like the
+  screenshot trick; provisioning itself is unaffected, it already runs in
+  session 1. (2) **An App Installer bundle laid down without its frameworks
+  installs with NO error and leaves no `winget.exe`** — hence the ordering
+  and the "run `winget --version`" check in stage 33, both test-guarded.
+  (3) **`winget install` IS the update path** (it upgrades a package already
+  present) and returns `0x8A15002B` / `-1978335189` when already current —
+  the normal case, not a failure. Nothing on a Store-less SKU ever updates
+  this package on its own, so the `gaming-services-refresh` scheduled task
+  (logon +2 min, daily 04:00, one real check per 20 h) replays that single
+  command; **stage 34 never fails provisioning** — same arbitration as
+  ViGEmBus and the retro emulators, and the task repairs a bad day by
+  itself. Durable witness: `D:\state\gaming-services.txt`.
+
+* **`explorer.exe` is the session shell again, and Gaming Services alone was
+  never enough — both settled 2026-08-30 on the production guest.** Forza
+  Horizon 6 (Steam) hung on its splash for 15 min, **black screen with no
+  message at all**, `UI_SCENE=Splash`, working set pinned at ~2.2 GB,
+  `TOTAL_LAUNCHES=0` — with `Microsoft.GamingServices` installed and both its
+  services Running. Two causes, and the second is the one that mattered:
+  1. **The chain, not the component.** `XboxIdentityProvider` (which *displays*
+     the Xbox sign-in dialog), `GamingApp` and `WindowsStore` were all absent.
+     `assets/xbox-stack.ps1` (dot-sourced by `gaming-services.ps1`, which kept
+     the throttle/log/witness) now installs all four Store ids and puts
+     `wlidsvc`/`XblAuthManager`/`XboxNetApiSvc`/`XblGameSave`/`LicenseManager`
+     in **`Automatic`** — LTSC ships them `Manual` and their demand-start
+     triggers do not fire here, so they were `Stopped` after every reboot.
+     `ClipSVC` is handled apart: it is started, never reconfigured.
+     **Two corrections, measured on the guest 2026-09-04.** (a) The claim that
+     `Set-Service` on `ClipSVC` returns `Access is denied` **was not
+     reproduced** — it simply was not reconfigured, and no error was seen; the
+     handling is still right (protected service, and it does not need
+     `Automatic`), but the reason written here was not the measured one.
+     (b) **`XblGameSave` is no longer forced to `Automatic` at all** — it is
+     started and left alone, exactly like `ClipSVC`. `Set-Service` does not
+     throw and the start type goes back to `Manual` (registry `Start` = 3),
+     seen on three of four runs; `sc qtriggerinfo XblGameSave` shows a
+     `NETWORK EVENT / RPC INTERFACE EVENT`, so **Windows re-manages this
+     service and that is it working as designed, not a fault**. Forcing it
+     meant fighting the OS for a witness that would read `chaine-incomplete`
+     **permanently** — and a witness that is always red stops being read, so
+     the next real defect in the chain would go unnoticed. `Manual` +
+     trigger-start is now recorded in the code as the **expected** state for
+     those two; what is verified is that they are `Running`. Measured after the
+     change, with `XblGameSave` forced back to `Manual` first: witness
+     `status=ok`, `Start=3`, `Status=Running`. The four services that *do* hold
+     `Automatic` are still set and **re-read** — before that, a setting that
+     stuck and one that did not wrote the exact same log line, because the line
+     was the *intended* list, which is the textbook false oracle. And the 20 h throttle no longer covers the services
+     at all — only the Store: `Set-Service` is local and free, and the stamp
+     being written only on complete success meant one service refusing to hold
+     blocked it **forever**, so the four winget calls ran at every logon and
+     daily, indefinitely.
+  2. **The kiosk shell blocked ALL UWP activation — the real blocker.** With
+     `Winlogon\Shell` pointing at `steam-shell.ps1`, *every* UWP app failed to
+     activate: Settings, Windows Security, Store, Xbox, all `Class not
+     registered`. The Microsoft-account sign-in form **is** a UWP app
+     (`Microsoft.AAD.BrokerPlugin`), so Xbox Live sign-in died with
+     **`0x80040154` = `REGDB_E_CLASSNOTREG`**, surfaced through the game as
+     "We couldn't sign you in to Xbox Live", with no button to click. Stage 30
+     now sets `Shell = explorer.exe`; `assets/desktop-chrome.ps1` (AtLogOn task)
+     restores the bare look (wallpaper via registry, `HideIcons`, taskbar
+     auto-hide) and `assets/steam-hold-notice.ps1` (AtLogOn task) keeps the
+     STEAM.HOLD warning the old shell carried. Both tasks are independent of the
+     shell — that is the point.
+  **`HKCU\...\Run\Steam` MUST be removed, and stage 30 does it.** Under the
+  kiosk that key was never executed (only Explorer processes `Run`) and slept
+  harmlessly; with Explorer it relaunches Steam in duplicate, Apollo finds Steam
+  already there, and `steam-session.ps1` — *whose exit closes the session* —
+  returns at once: **"La connexion a ete interrompue" on every Moonlight
+  attempt**, measured. Restoring the kiosk without restoring that key is the
+  safe rollback; the reverse loses remote access.
+  **Two execution traps paid on 2026-09-04, both measured on the guest, both
+  test-guarded now.** (1) **`ExecutionTimeLimit` is a `System.String`, not a
+  `TimeSpan`**: `(New-ScheduledTaskSettingsSet).ExecutionTimeLimit` is `PT72H`,
+  and it is the *cmdlet parameter* that converts a `TimeSpan` to ISO-8601 — an
+  assignment to the property deposits `00:05:00`, which
+  `Register-ScheduledTask` rejects (`The task XML contains a value which is
+  incorrectly formatted or out of range. (37,36):ExecutionTimeLimit:00:05:00`).
+  Under `$ErrorActionPreference = 'Stop'` that killed stage 30, and with it the
+  whole provisioning run. Write it as `New-ScheduledTaskSettingsSet
+  -ExecutionTimeLimit …`, the way `40-agent.ps1` always did. (2)
+  **`$ErrorActionPreference` is dynamically scoped, so a dot-sourced asset
+  inherits the stage's `Stop`** — `gaming-services.ps1`'s "never throws"
+  contract was false purely by being called from stage 34, where
+  `& $winget … 2>&1` turned any native stderr line into a terminating error;
+  and since the scheduled task runs under the default `Continue`, the two entry
+  paths did **not** behave the same on failure, which is the opposite of what
+  the file's header claims. It is restored **inside the function**, never at
+  file level (that would disarm the `Stop` the rest of stage 34 relies on).
+  Dead ends worth not repeating: `DISM /RestoreHealth` + `sfc /scannow` both
+  succeed and report **no integrity violation** (nothing is corrupt);
+  `FilterAdministratorToken=1` changes nothing (the built-in `-500` account is
+  not the obstacle — AppX installs and activates fine under it); and **`winget`
+  proves nothing about UWP health**, since it runs as a *Desktop AppX* (full
+  trust), never in an AppContainer. To launch a UWP app with no shell, use
+  `IApplicationActivationManager.ActivateApplication` (CLSID
+  `45BA127D-10A8-46EA-8AB7-56EA9078943C`, `[PreserveSig]`) — but it *activates*
+  without *displaying*: `ApplicationFrameHost` never starts without a shell, so
+  no window is ever created.
+
+* **`PROVISION_VERSION` must move whenever the SEQUENCE moves — B3 → B4 on
+  2026-09-04, and the guest was measured at B1.** `guest-ready-watch.py`
+  compares the marker's `provision_version` against `payload.PROVISION_VERSION`
+  to decide whether a guest is current, so a constant that stays put while the
+  sequence changes makes a guest provisioned *before* the change read as up to
+  date. The winget chain added two stages, changed the session shell and three
+  assets, and left the constant at `B3` — a console that had never seen winget
+  would have passed for one that had. Measured the same day on the production
+  guest: `C:\nivuus\state\PROVISION.done` says `provision_version=B1`,
+  `completed=2026-08-26`, and `C:\nivuus\state` holds only the twelve
+  `*.ps1.done` of that run — no `32-retro`, no `33-winget`, no
+  `34-gaming-services`. **Everything committed here since 2026-08-26 exists on
+  that console only because someone put it there by hand.** Written up as debt
+  **C7** in `docs/console-dettes.md`, with the standing rule: *before
+  concluding anything from an absence in a guest log, read
+  `PROVISION.done` and compare it to `PROVISION_VERSION`* — a stage that never
+  ran leaves no trace, and that absence reads exactly like a failure.
+
+* **Three run-time-only defects fixed 2026-08-28, task 4 of
+  `2026-08-28-console-observabilite`** — none visible from reading either
+  file alone, all found by tracing what the OTHER phase's own code does to
+  this one's state:
+  1. **The regime domain used to feed a silent, permanent replay loop.**
+     Once `guest-ready-watch.py` redefines the domain without install media
+     (see the `activate` bullet above), `guest_steps.domain_defined()` used
+     to look only for the two install-media ISO paths — absent on a regime
+     domain — so it read "not done" and replayed `domain.py define`
+     *without* `--keyed-varstore` (that flag is `guest-ready-watch.py`'s own
+     escape hatch, never this step's), which hit `guard_fresh_varstore()`
+     forever (the varstore the earlier media-carrying `define` already
+     created never goes away) and refused with a remedy —
+     `virsh undefine Windows --nvram` — that would have **reinstalled
+     Windows over a console that already works**. `domain_defined()` now
+     also checks the passthrough disk's own PCI address, read from the
+     `<hostdev>`'s `<source>` element (`hostdev_source_addresses()`,
+     measured 2026-08-28 against `virsh dumpxml Windows` on the real
+     production domain: the source address is exactly
+     `domain='0x0000' bus='0x03' slot='0x00' function='0x0'`, matching
+     `lspci`'s `144d:a808` at `0000:03:00.0`, and libvirt never touches its
+     attribute order the way it does the SIBLING guest-side `<address
+     type='pci' .../>` a few lines below, which is not this identity and is
+     deliberately never read as it) — and treats a media-less domain
+     already carrying the right disk as a **terminal, legitimate** outcome.
+  2. **The same predicate never noticed a changed `dedicated_nvme`.**
+     `source_iso`/`iso_out` are FIXED paths under the guest workdir,
+     unrelated to which physical disk was chosen — build reruns, `define`
+     silently didn't. The PCI-address check above fixes both defects at
+     once: media match alone is no longer sufficient, the disk must also
+     agree.
+  3. **`guest-ready-watch.py` logged "installation non demarree" every 2
+     minutes forever, on a console that was simply resting** (most of a
+     console's life, between sessions) — the timer never distinguished "just
+     went not-running" from "still not running, same as last tick". It now
+     logs the transition once, via a `not_started_reported` flag in its own
+     persisted state, and stays silent until a genuine transition (running,
+     then not-running again) clears it.
+  Tests: `test_console_guest_steps.py` (regime-domain and changed-disk
+  cases, plus `hostdev_source_addresses()`/`domain_matches_disk()` directly)
+  and `test_console_guest_ready.py` (silence across repeated ticks, a
+  resumed message after a genuine transition) — both proven to fail against
+  the pre-fix code (`git stash` the two implementation files, rerun) before
+  being proven to pass against it, `__pycache__` purged, `python -B`.
+
+`hardware.py` is now split by that same principle: `installer/common/hardware.py`
+detects **capabilities** (coarse: is there an IOMMU, a discrete GPU, a spare
+NVMe — `list_gpus` no longer carries `ids`, `cpu_topology` no longer carries
+`isolcpus`), and `console/hardware.py` detects the **details** in its resolve
+phase.
+
+**`domain.py` is REPAIRED, dated 2026-08-28 — measured, not inferred.**
+`python3 domain.py xml`, run from `console/guest/`, now produces real domain
+XML on this hardware (`main()` returns 0 and 5402 characters of XML — see
+`test_windows_guest_production_domain.py`, which calls `main()` for real
+instead of stubbing it out). The break this paragraph used to describe (an
+`ImportError` at `main()`'s entry, because `HardwareError` had moved to
+`console/hardware.py` without `domain.py` following) is fixed: `HardwareError`,
+`passthrough_nvme()` and `pci_slot_functions()` live in `console/hardware.py`,
+and `domain.py` reaches them with `sys.path.insert(0, str(HERE.parent))`
+followed by `from hardware import HardwareError` (`domain.py:262-263`).
+
+**The lesson that outlives the bug: that import is lazy on purpose — written
+inside `main()`, not at module scope — and a lazy import lets `import
+domain.py` succeed while calling `domain.main()` still fails.** That is
+exactly why the break was invisible for a whole phase: every suite in the
+aggregator imported the module (which worked) and called `domain_xml()`
+directly with explicit keyword arguments (which never touches hardware
+detection), so a green run said nothing about whether `main()` itself could
+run. `test_windows_guest_production_domain.py` now closes that gap with one
+assertion that actually calls `main()` end-to-end — the only one in the
+suite that does. Keep the import lazy (the comment at `domain.py:259-261`
+explains why: the test's own `sys.path` only carries `console/guest`, and a
+module-scope `import hardware` would break every other test in the file) —
+but never again let "imports cleanly" stand in for "runs cleanly" when a
+lazy import is involved; a suite that only imports proves nothing about the
+function that does the importing.
+
+**A test double MORE PERMISSIVE than production hides the disagreement it
+should reveal (2026-08-28, third occurrence on this project).** `build_run()`
+started calling `runner(build_cmd, env=env)`; `guest_steps.default_runner`
+grew the parameter, and so did the bench double (`FakeBuildRunner.__call__(self,
+argv, *, env=None)`) — but `console/hooks/activate.py`'s `classifying_runner`,
+**the only runner production ever uses**, did not. Measured: `TypeError`,
+classified as a "panne" at the `build` step, so `activate` died at the third of
+its five steps and neither the `TMPDIR` fix nor the qemu `chown` ever ran —
+with all 33 suites green. Two rules came out of it. (1) `classifying_runner`
+now forwards `**kwargs` blind: it adds nothing to the call, it only re-labels
+the exception, so the next parameter cannot reproduce this. (2) The corpus now
+drives the **production runner itself** through the `build` step
+(`test_console_activate.py`, with a fake *interpreter* standing in for
+`python`, never a fake runner) — that seam had no assertion at all, which is
+exactly how the defect crossed it.
+
+**A HIBERNATED CONSOLE IS `shut off` — `domain_up()` cannot tell it from a
+machine that never booted (2026-08-28).** The whole energy strategy rests on S4
+(`vm-idle-shutdown.sh` runs `shutdown /h /f`), and `virsh start` *resumes* that
+session. So the `start` step's boot-key assist (12 `KEY_ENTER` past the LTSC
+"Press any key to boot from CD or DVD......" prompt) was one `virsh domstate`
+away from typing into a live desktop, and the activation unit re-runs at every
+boot until the stamp exists. The discriminant that does hold is **what the
+domain is wired to**: keys are sent only while it carries BOTH installation
+media — the shape the `define` step produces and `redefine_steady_state()`
+removes once the guest is provisioned.
+
+**Package engine (2026-08-27)**: `installer/packages/` implements the
+`nivuus.dev/v1` contract — a declarative `nivuus-package.yaml` plus three hooks
+(`resolve`/`install`/`activate`). Packages are sibling repositories embedded
+into the ISO via `PACKAGE_REPOS=… make build-iso` and discovered at
+`/opt/nivuus-packages/*/` (override with `NIVUUS_PACKAGES_DIR`).
+
+Three properties carry the design and are easy to break by accident:
+* **`resolve` is read-only and runs before `partition`.** That is the only
+  reason `bootloader` can stay where it is in `run.py`: the kernel cmdline is
+  known before the disk is touched. Moving a package's cmdline contribution
+  later would force the whole pipeline to be reordered.
+* **`iommu` is read from the ACPI tables (`DMAR`/`IVRS`), never from
+  `/sys/kernel/iommu_groups`.** The live ISO boots *without* `intel_iommu=on` —
+  adding it is exactly what a passthrough package asks for — so a check on the
+  active state would answer "no" on every capable machine and no such package
+  would ever be offered.
+* **The engine detects capabilities, the package detects details.** The engine
+  must answer `requires.capabilities` before running any hook, so it cannot
+  delegate. It stays coarse (`iommu`, `gpu-discrete`, `nvme-dedicated`,
+  `cpu-hybrid`); the precise work — PCI functions, IOMMU groups, `vfio-pci.ids`
+  — belongs to `resolve`.
+* **A fourth event carries what `resolve` measured across the reboot
+  (`installer/packages/facts.py`, 2026-08-28).** `{"event":"facts","facts":{…}}`
+  — `resolve` **returns** facts, the engine persists them into
+  `etc/nivuus/packages.json` (same 0600 file as the answers, mode unchanged),
+  and `activate_cli.py` merges them into the `hw` it hands the activate hook.
+  It exists because a `platform` package routinely measures something the
+  install itself destroys — the console's dedicated NVMe is bound to
+  `vfio-pci` by the very cmdline this installer writes, so at first boot
+  `/sys/block` no longer lists it. **Precedence is settled and enforced in
+  code: the fresh snapshot wins, a fact only fills a key detection did not
+  produce** — a fact describes the world *before* the reboot, so it may never
+  mask a measurement that can still be taken; a package wanting the
+  pre-reboot value of something still observable must name its fact
+  distinctly (`dedicated_nvme_size_bytes`, not `size_bytes`). A dropped fact
+  is warned about, never silent. Facts are **not** gated on tier: unlike
+  `kernel-cmdline`/`modules`/`hugepages-mib` they reach no boot chain, only
+  the activate phase of the package that produced them. The channel has three
+  links (runner → state file → activate_cli) and each has its own named
+  assertion in the suites: cutting one names it.
+
+Two more findings from implementing the engine, both worth knowing before
+touching it:
+* **`resolve` being read-only is a CONVENTION, not a sandbox.** Tested
+  directly: a `resolve` hook that writes to disk succeeds, and the write
+  persists — nothing chroots or restricts the subprocess. What the pipeline
+  ordering actually depends on is that the engine never *asks* `resolve` to
+  write and never *uses* anything it wrote, not that `resolve` is incapable. A
+  malicious package owns the machine from the `install` phase onward
+  regardless, since that runs as root. The rule protects against accident and
+  ordering mistakes — real, worth having — but must be described as that, not
+  as a security boundary. Real sandboxing would be its own project.
+* **`chroot_base.py:9` imports `crypt`, removed from the Python stdlib in 3.13
+  (PEP 594).** Used for exactly one thing (line 98): hashing the user
+  account's password. The live ISO builds on **bookworm**
+  (`iso-build/auto/config --distribution bookworm`), Python 3.11, so
+  production is unaffected today — but `run.py` cannot even be imported on a
+  Python 3.13 host, and the day the ISO base moves to trixie the installer
+  breaks at the step that creates the user account, at the very end of an
+  otherwise successful install. Remedies: `passlib`, `openssl passwd -6`, or
+  `chpasswd -e` inside the chroot. Dated technical debt, not a bug to fix now
+  — out of the package-engine plan's scope.
+
+Activation uses a stamp (`/var/lib/nivuus/packages/<name>.activated`), not a
+self-disabling unit: an interrupted activation must retry at the next boot
+rather than believe it succeeded.
+
+**Arming `activate` takes three copies onto the target, and the whole phase is
+dead if any is missed** (it was, on the first cut of this branch, while the
+install still reported success — `systemctl enable` ran with `check=False`).
+`apply_packages()` does all three: it copies
+`configs/systemd/nivuus-package-activate@.service` out of the payload into
+`{target}/etc/systemd/system/`, chmods `activate_cli.py` executable **in
+place** at `/opt/nivuus/installer/packages/` — the unit's `ExecStart` points
+there, *not* at `/usr/local/sbin`, because the script computes its own
+`sys.path` from `__file__` and a copy elsewhere cannot import `common`/`packages` —
+and copies each **selected** package's directory to
+`{target}/opt/nivuus-packages/<name>/` (the live medium's copy is on the LIVE
+root and does not survive the reboot). Enablement is a **direct symlink** into
+`multi-user.target.wants/`, which is precisely what `systemctl enable` does for
+a `WantedBy=multi-user.target` template unit — chosen over shelling into the
+chroot because `systemctl` fails silently in constrained environments (see the
+PID-namespace note below) and a symlink either exists or raises.
+
+**A fourth broken link, found by re-review after the first three were fixed:
+`python3` itself was never guaranteed on the target.** `debootstrap.py`'s
+`BASE_INCLUDE` has no `python3`, and the only other installer of it
+(`install.sh`'s `python3-pip`) runs only behind the optional `kvm-vfio`/
+`thermal` features — so a minimal install that selects a package but neither
+feature reached first boot with no interpreter for the unit's own
+`ExecStart`, silently, forever (the apt call was `check=False`, and the
+stamp file is only written on success, so it retried every boot with no
+error surfaced anywhere). Fixed by splitting the one apt call into two:
+`ACTIVATE_APT = ["python3", "python3-yaml"]` (the activate phase's own hard
+requirements — `activate_cli.py` needs an interpreter to run at all and
+re-parses the manifest with PyYAML at first boot, and nothing else pulls
+either in) is installed in its own `apt-get` call whose failure raises
+`StepError` and stops the install; the packages' own declared `apt`
+(`manifest.apt`) stays a separate, deliberately lenient `check=False` call
+— a package may still be usable without an optional dependency, so only a
+warning is emitted. The two must never be merged back into one call: that
+is exactly the "armed, advertised, and silently inert" failure class this
+whole area exists to prevent.
+
+**Kernel parameters are validated in `plan_packages`, not in `bootloader`.**
+The allowlist lives in `bootloader.py::grub_defaults`, which runs at step 7 —
+after `partition` has wiped the disk. `plan_packages` now calls it purely for
+its validation, so `vfio-pci.ids=$(x)` is refused while the target is still
+untouched. Same reason the package state file (`etc/nivuus/packages.json`) is
+written **after each package**, not once at the end: a residue that describes
+itself beats a partially applied install with no record.
+
+**The wizard does not offer packages yet (2026-08-27, a named gap, not a footnote).**
+`webapp/static/js/app.js` and `webapp/templates/wizard.html` call no
+`/api/packages` route — packages exist in the engine and in `discover()`, but
+nothing renders them for a human to pick. The only way to install one today is
+a config carrying `packages: {"console": {...}}` directly (the engine path,
+exercised by `test_install_engine_packages.py` and the end-to-end proof in the
+console-package-hote plan's Task 7), never through the portal. Wiring the
+wizard is deliberately deferred, not forgotten.
+
+Tests: `cd installer && make test-packages` (needs a Python with `pydantic`
+and `jinja2` — not the Debian base — via `PYTHON=/path/to/venv/bin/python`).
+**39 suites, measured 2026-08-29 (after the `requires.packages` guards, the
+three host-script suites and `test_windows_guest_winrm_exec` were wired into
+the aggregator): 38 exit 0, and
+`test_webapp_models` could not be run on a python3.13-only base, where the
+installed `pydantic` belongs to a python3.11 that no longer has a binary.**
+13 run directly by `installer/Makefile` (the engine/webapp/packages suites that
+stay outside `console/`), 3 shell suites delegated to its `test-scripts`
+prerequisite (`test_hw_blackbox`, `test_net_rps_ecores`,
+`test_pcie_wifi_link_guard` — they guard hardware-facing scripts but build fake
+trees under `mktemp`, so they need no hardware and no Python; they are a
+prerequisite rather than a trailing call so a base without `pydantic` cannot
+mask them), and 23 delegated to `console/Makefile`'s own `test` target —
+the 8 `test_console_*` suites (`test_console_guest_steps` and
+`test_console_guest_ready` are phase 2d's own), `test_vm_wake_gate`,
+`test_retro_marker_bridge`, the 12 `test_windows_guest_*` suites and the
+shell suite `test_handle_vm_start.sh`, all of them living under
+`console/tests/`. That last one was wired up on 2026-08-28 (it has its own
+loop in `console/Makefile`, since the Python loop only runs `.py` files): it
+is the only guard on the 2026-08-24 infinite-wake bug, and reintroducing
+that bug was measured to leave every Python suite green. No file under
+`console/` **source** imports from `installer/common` or anywhere else in
+`installer/` — verified with `grep -rn 'from common\|import common' console/`,
+which returns nothing. **That grep is too narrow to prove the whole
+boundary, and does not**: `console/tests/test_console_resolve.py` puts
+`installer/` on `sys.path` and imports `packages.manifest`/`packages.runner`/
+`packages.wizard` to exercise `resolve` through the real engine contract —
+a real, dated blocker for the day this package is extracted with
+`git filter-repo`, not a source-code exception.
+Spec: `docs/superpowers/specs/2026-08-27-decoupage-installer-console-design.md`,
+phase 2d's own design: `docs/superpowers/specs/2026-08-28-console-activate-invite-design.md`.
 
 **Build & test:** `cd installer && sudo make build-iso` (needs `live-build`).
 `make test-portal` (portal on :8080), `make test-vm` (QEMU UEFI, portal via
@@ -94,10 +620,11 @@ make test-vm                            # QEMU UEFI boot; portal via Ethernet fa
 # install engine, staged — stops before the destructive steps
 sudo python3 installer/install-engine/run.py --stop-after partition
 
-# ── Windows guest ──────────────────────────────────────────────────────────
-python3 installer/windows-guest/build.py    # unattended LTSC ISO
-python3 installer/windows-guest/domain.py   # define + start the libvirt domain
-python3 installer/windows-guest/retro_sync.py   # retrogaming (OPTIONAL): replay
+# ── Windows guest (console/guest/, moved out of installer/windows-guest/) ──
+python3 console/guest/build.py    # unattended LTSC ISO
+python3 console/guest/domain.py xml   # inspect the generated domain XML;
+# works today (measured 2026-08-28) - see "domain.py is REPAIRED" plus haut.
+python3 console/guest/retro_sync.py   # retrogaming (OPTIONAL): replay
 # `retro install` with the owner's manifest, refresh the durable witness on
 # D:\state\retro.status, then hold Steam and sync the library. It REFUSES to
 # sync unless that witness says `ok` for the current provisioning run: `retro
@@ -107,12 +634,35 @@ python3 installer/windows-guest/retro_sync.py   # retrogaming (OPTIONAL): replay
 # refuses (exit 7) while a streaming session is live - stopping Steam would cut
 # the game being played, and nothing restarts it before the next Moonlight
 # connection; --force overrides, loudly.
+#
+# It ALSO refuses (exit 8) when the console is not running the wheel this host
+# built. Why that guard exists (retro's debt D6, fixed 2026-08-29): both wheels
+# carried `0.1.0`, so `pip install --no-index --upgrade retro` answered
+# "Requirement already satisfied" and installed NOTHING - a fix committed in
+# nivuus/retro could stay inert on the console while the error it produced
+# still described the original symptom. The wheel now carries a version that
+# MOVES (`0.1.0+<timestamp>.<digest>[.g<sha>]`, burned in by an in-tree PEP 517
+# backend), `retro identite` prints it, and the durable witness gained a
+# `package=` key between `emulation_root=` and `report:`. That key is written by
+# BOTH writers - Write-RetroStatus (retro-status.ps1) and format_witness
+# (retro_sync.py) - and test_windows_guest_retro_sync.py compares the two key
+# lists, so renaming it on one side alone fails a test. The host reference is
+# read from the wheel's METADATA (never its filename: pip escapes the `+` to
+# `_`) at /var/lib/nivuus/guest/payload/retro/wheels/. No reference wheel is NOT
+# a mismatch - it warns and lets through. The remedy is `--reinstaller-le-paquet`
+# (copies the wheelhouse to /media/data/Console/retro/wheels, which the guest
+# reads as G:\retro\wheels, re-runs pip, re-reads the identity, still exits 8 if
+# the gap persists) - a refusal without a remedy would leave a couch console
+# unsyncable. NOT measured against the real console yet (task 6 of the plan).
 
 # ── Host scripts ───────────────────────────────────────────────────────────
+# The three below also run as `cd installer && make test-scripts`, and as a
+# prerequisite of `make test-packages` - they were hand-run only until 2026-08-29.
 scripts/tests/test_pcie_wifi_link_guard.sh  # 16 assertions on a fake sysfs tree
-scripts/tests/test_hw_blackbox.sh           # 26 assertions
-scripts/tests/test_vm_wake_gate.py
-scripts/tests/test_handle_vm_start.sh       # 10 assertions on a fake virsh
+scripts/tests/test_hw_blackbox.sh           # 27 assertions on a fake hwmon tree
+scripts/tests/test_net_rps_ecores.sh        # 20 assertions on a fake hybrid CPU
+console/tests/test_vm_wake_gate.py
+console/tests/test_handle_vm_start.sh       # 10 assertions on a fake virsh
 scripts/disk-maintenance.sh --dry-run       # ALWAYS this first when / fills up
 ```
 
@@ -120,7 +670,7 @@ scripts/disk-maintenance.sh --dry-run       # ALWAYS this first when / fills up
 
 ### Host Shell Gotchas (sessions run as root on the live server)
 
-- The interactive zsh profile fetches the public IP at startup and ships broken `localip`/`grep`/`ip` shell functions (`FUNCNEST` errors): shell commands intermittently hang ~2 min, get killed (exit 137/143), or have their output silently eaten. **Workaround: wrap commands in `bash -c '...'`** (bash doesn't inherit the zsh functions), or read `/sys`/files directly (e.g. bridge members via `/sys/class/net/<bridge>/brif/`).
+- The interactive zsh profile fetches the public IP at startup and ships broken `localip`/`grep`/`ip` shell functions (`FUNCNEST` errors): shell commands intermittently hang ~2 min, get killed (exit 137/143), or have their output silently eaten. **Workaround: wrap commands in `bash -c '...'`** (bash doesn't inherit the zsh functions), or read `/sys`/files directly (e.g. bridge members via `/sys/class/net/<bridge>/brif/`). **The `grep` function's precise failure mode: it does NOT prefix recursive matches with `./`** the way real `grep -r`/`grep -rn` does. Any exclusion filter written as `grep -v '^./…'` therefore matches nothing and silently passes everything through unfiltered, and any count derived from its output (`wc -l` on filtered results) comes out wrong in the same silent way — there is no error, just a clean-looking result that is not clean. This produced a false "no dead references" verification in an earlier phase and two wrong suite counts during the console-package-hote plan. **Use `command grep`, or wrap the whole pipeline in `bash -c '...'`** — the zsh function only shadows the bare `grep` invocation.
 - `ot-ctl` (OTBR) output lines end with `\r` (CRLF) — strip it before string comparisons in scripts, or `case "leader"` never matches.
 - **`systemctl` does NOT work from a Claude session (found 2026-08-05).** The session runs in its own **PID namespace** (`readlink /proc/self/ns/pid` ≠ `/proc/1/ns/pid`; `systemd-detect-virt` → `container-other`) while sharing the host mount namespace. systemd authenticates peers with `SO_PEERCRED`, which is meaningless across PID namespaces, so every call fails with **`Failed to connect to system scope bus via local transport: No data available`** — including `env -i` and with the sandbox disabled. **This fails silently for query subcommands** (`systemctl show -p X` just prints nothing), so a check that "returns empty" may mean *unreachable*, not *unset*. Everything else is the real host: `journalctl`, `/sys`, `/proc`, `/dev/mem`, `lspci`, and **writes to `/sys` all work**.
 
@@ -239,7 +789,7 @@ The Nivuus server runs:
 - **RAPL raised 50→65 then settled at 60 W (2026-07-23), validated by stress campaign + a real gaming session.** **CRITICAL sensor gotcha found doing this: `coretemp` on this box only exposes 8 DTS sensors labelled `Core 32-39` and they are NOT the loaded P-cores** — under a concentrated P-core load they read ~65-71 °C while the CPU was actually at its thermal limit. **The only trustworthy CPU temp is `PECI Agent 0` (nct6798 `temp8`) = the package Tj the CPU throttles on.** Any thermal script/monitor MUST use PECI, never a `coretemp` max, or it will silently under-read by ~25-30 °C. Measured under **concentrated gaming load (few P-cores @5.1 GHz), fans at 100%**: PL1 50 W→PECI 78-84 °C, **65 W→82-86 °C**, 80 W→89-95 °C, 95 W→99 °C (TjMax, throttling). Synthetic worst-case 65 W CPU + GPU at 199 W (stock fans auto) peaked PECI 89 °C. **Then a REAL CPU-heavy game at 65 W peaked PECI 93 °C / sustained 91-92 °C — only 2 °C under the 95 °C ceiling, too thin for heat-soak + summer ambient, so PL1 was dialed back to 60 W** (est. ~90 °C peak, ~5 °C margin; negligible in-game loss since the CPU is burst-bound — a GPU-bound game only used 13-26 W). fan2 (chassis) hit ~2560 RPM in that session — the box is fully cooling-bound under load, no fan headroom left. All-core stress is thermally much easier (heat diluted across 24 threads → PECI only ~70-77 °C at 50 W) and is NOT a valid proxy for the gaming envelope. The real limit is physical cooling (repaste/better cooler); **do not raise PL1 past 60 W without re-running a real CPU-heavy game session** (synthetic stress under-predicted the real peak by ~4 °C because it can't reproduce the in-case GPU heat + game CPU pattern together). Turbostat/RAPL package power read from `/sys/class/powercap/intel-rapl:0/energy_uj` (delta/interval).
 - **Silence-first fan curve (2026-07-23, in `optimize-cpu-thermal.sh`, full-apply only so mode switches don't touch it).** Both nct6798 fans were driven by the BIOS default temp source **9 = "PECI Agent 0 Calibration"**, a bogus +20 °C-offset reading that idles at ~63 °C → both fans over-spun to ~1450/1770 RPM at idle for no thermal reason. Script now sets `pwmN_temp_sel=8` (**real PECI Tj**) + a silence curve → **idle drops to fan1 ~300 RPM / fan2 ~910 RPM** (near-silent), ramping to 100 % by 88 °C (so under gaming load PECI ~86-89 °C they still hit max automatically — silence is only an idle/light-load gain, the box stays cooling-bound under load). **fan2 (chassis) NEVER stops — point1 pwm=58 (~950 RPM):** it cools the UNMONITORED VRM/M.2/GPU-intake air, and fully stopping it (a silence-max experiment) is the **prime suspect of a hard crash on 2026-07-23** (instant power-cut, no journal/thermal/pstore trace — signature of a protection shutdown on an unmonitored rail; RAPL protects the CPU but not the VRM). fan1 (CPU header) can idle very low; fan4/6/7 headers have nothing connected. Manual PWM test (`pwmN_enable=1`): both stop at pwm≤10, min spin ~250-360 RPM at pwm20. The GPU (RTX 4070) manages its own fan (zero-RPM idle, ~40 % at 199 W/68 °C) — no host-side control (no Coolbits, would break passthrough).
 - **CPU policy consolidation + VM-aware power modes (2026-07-22, two specs in `docs/superpowers/specs/`)**. Five units used to claim CPU policy; only `optimize-cpu-thermal.sh` did real work. **Removed**: `tuned`/`tuned-utils`/`tuned-utils-systemtap` purged (failed every boot since trixie — a start race lost to `power-profiles-daemon`, plus a self-defeating hand-written `/etc/systemd/system/tuned.service` override with `PrivateNetwork`/`ProtectSystem=full`), `cpufrequtils`+`loadcpufreq` purged (config was empty), `watchdog` package purged (never opened `/dev/watchdog`; the hardware watchdog is PID 1's via `RuntimeWatchdogSec=30` in `/etc/systemd/system.conf.d/10-nivuus-watchdog.conf`). **`power-profiles-daemon` is `mask`ed** (`--now`), not disabled: it is `Type=dbus` **and** `WantedBy=graphical.target`, so disabling leaves both activation paths open — masking is the only way to stop it overwriting EPP on all 24 threads every boot (the regression both specs exist to fix). `set-default multi-user.target` (GNOME startable on demand with `systemctl start gdm`; PPD masked so a hand-started session can't resurrect it). **`optimize-cpu-thermal.sh` is now mode-aware**: no arg = full apply (RAPL + fan + policy), mode auto-detected from `virsh domstate Windows` (`running`→gaming, else→idle, fallback idle); `gaming`/`idle` = policy only. **gaming** = P-cores 5100 MHz/EPP `performance` + `nivuus-cpu-latency.service` holding `/dev/cpu_dma_latency` at 250 µs (recreates today's C6 ceiling the VFIO guest needs); **idle** = P-cores 3600 MHz/EPP `power` + latency service stopped (deep C-states allowed). RAPL 50/58 W and the fan curve are **mode-agnostic**, applied on full apply only. The two libvirt CPU hooks (`10-cpu-confine.sh`/`10-cpu-release.sh`) call `systemctl start nivuus-cpu-mode@{gaming,idle}.service` — **via systemctl, never the /usr/local script directly** (the libvirtd AppArmor profile's `PUx` covers `/usr/bin/*` but not `/usr/local/*`); `nivuus-cpu-mode@.service` (`Type=oneshot`) runs the script outside the confinement. **C-state cmdline change**: `intel_idle.max_cstate=3` **removed from the default BLS entry** (`…6.12.95…conf`) — it capped idle at C6 and blocked package PC2/PC6 (the real Alder Lake idle savings) for the whole uptime to serve a condition that only holds while the VM runs (same mistake as the retired `isolcpus`); the dynamic PM QoS constraint replaces it. The 6.12.43 BLS entry keeps `max_cstate=3`+`isolcpus` as rollback. **Verified post-reboot 2026-07-23**: EPP race gone (`cpu0` EPP=`power` at boot and unchanged after 5 s, PPD masked), boot resolves to idle, cmdline free of `max_cstate` (`nohz_full=0-15` kept), `multi-user.target` default with gdm inactive, `--failed` empty, RAPL 50/58 W, hardware watchdog re-armed (`bootstatus=0`). **C8/C10 now real**: `cpu0/cpuidle` shows 5 states (C8 lat 280 µs, C10 lat 680 µs, hidden before) and their usage counters climb (`CPU%c7`≈16 % vs 0.00 with `max_cstate=3`). **Idle power measured 2026-07-23** (VM off, idle mode, host at its permanent floor — HA ~17 %, Tdarr_Server polling ~21 %, 32 containers, `Busy%`≈9.6 %): **package 8.6 W vs the 12.7 W baseline — −4.1 W / −32 %**, stable across two windows (8.62/8.61 W). `CPU%c7` 0.00 → ~35 %, and the **package now enters PC2** (`Pkg%pc2` 0.00 → 1.75-3.37 %). `Pkg%pc6` stays 0.00: the always-on services (HA/Tdarr/container heartbeats) never let all cores idle simultaneously long enough for the deepest package state — that is the always-on-server ceiling, not a limit of the change, and the per-core C7/C8/C10 savings already deliver the −32 %. The **mode-switch hooks are verified end-to-end** (real VM start→gaming/EPP performance/PM QoS 250 µs, stop→idle, no AppArmor error). The **250 µs gaming latency figure is validated**: with the states now visible (C6=220, C8=280, C10=680 µs) 250 sits between C6 and C8, correctly keeping C6 as the gaming ceiling. gotcha: **turbostat writes its table to stderr** (v2024.07.26) — capture `2>file`, a `2>/dev/null` swallows it. Both specs are now fully verified; only thermald remains as a separate follow-up. thermald remains a justified but separate follow-up (needs its own campaign; must drive `rapl_controller` only or it becomes a second frequency writer).
-- **Dynamic host/VM CPU partitioning (replaced `isolcpus`, 2026-07-22)**: `isolcpus=0-15` is a *boot-time* parameter — it kept the 8 P-cores out of the scheduler for the whole uptime, so the host ran on the 8 E-cores (3.9 GHz) even with the VM shut off (measured: 6-8 kthreads per P-core vs 87-126 tasks per E-core, VM off). Now **removed from the default BLS entry** (`nohz_full=0-15` kept — tickless while the VM owns them, free otherwise) and replaced by cgroup-v2 cpuset partitioning: `scripts/vm-cpu-partition.sh` (deployed **`/etc/libvirt/hooks/vm-cpu-partition.sh`** — see the AppArmor trap below) sets `AllowedCPUs` on `system.slice`/`user.slice`/`init.scope` — **`confine`** (host → CPUs the VM does not pin) from hook `prepare/begin/10-cpu-confine.sh`, **`release`** (host → all CPUs) from `release/end/10-cpu-release.sh`; `status` shows the split. The VM lives in `machine.slice`, never touched; kthreads are outside the cgroup tree and stay global. Docker uses the **systemd** cgroup driver so its 36 containers sit under `system.slice` and are covered. The split is **derived from the VM XML** (`cputune` vcpupin+emulatorpin) minus the online set — no hardcoded core numbers; **fail-open** (unparseable XML or <4 host CPUs → cpusets untouched) and `--runtime` only, so a reboot always returns to the unrestricted state. `vm-idle-shutdown.sh` re-asserts `release` when the VM is off, because the dispatcher runs hooks in unordered `find(1)` order alongside the deadlock-prone `rebind-host-gpu.sh`. **AppArmor trap (cost a full VM-start cycle to find, 2026-07-22)**: `/etc/apparmor.d/usr.sbin.libvirtd` grants `/etc/libvirt/hooks/** rmix` — `ix` means hooks run *inheriting the libvirtd profile*, which allows exec of `/bin/*`, `/sbin/*`, `/usr/bin/*`, `/usr/sbin/*` (all `PUx`) **but not `/usr/local/sbin/*`**. A hook calling a script there dies with the misleading `/bin/bash: bad interpreter: Permission denied` and **no AppArmor DENIED line in dmesg**. Anything a libvirt hook executes must live under `/etc/libvirt/hooks/` or one of the `PUx` dirs. Corollary: the hook wrappers `exit 0` so they can never block a VM start, which also *masks* such failures — the dispatcher logs `code 0`; the real error only surfaces in `/var/log/libvirt-cpu-hook.log`, so check that file, not the journal, when a hook silently does nothing. Also removed `systemd.unified_cgroup_hierarchy=false` from the kernelstub config (cgroup v1 would break this). The 6.12.43 BLS entry deliberately **keeps `isolcpus`** as a rollback path.
+- **Dynamic host/VM CPU partitioning (replaced `isolcpus`, 2026-07-22)**: `isolcpus=0-15` is a *boot-time* parameter — it kept the 8 P-cores out of the scheduler for the whole uptime, so the host ran on the 8 E-cores (3.9 GHz) even with the VM shut off (measured: 6-8 kthreads per P-core vs 87-126 tasks per E-core, VM off). Now **removed from the default BLS entry** (`nohz_full=0-15` kept — tickless while the VM owns them, free otherwise) and replaced by cgroup-v2 cpuset partitioning: `console/host/vm-cpu-partition.sh` (deployed **`/etc/libvirt/hooks/vm-cpu-partition.sh`** — see the AppArmor trap below) sets `AllowedCPUs` on `system.slice`/`user.slice`/`init.scope` — **`confine`** (host → CPUs the VM does not pin) from hook `prepare/begin/10-cpu-confine.sh`, **`release`** (host → all CPUs) from `release/end/10-cpu-release.sh`; `status` shows the split. The VM lives in `machine.slice`, never touched; kthreads are outside the cgroup tree and stay global. Docker uses the **systemd** cgroup driver so its 36 containers sit under `system.slice` and are covered. The split is **derived from the VM XML** (`cputune` vcpupin+emulatorpin) minus the online set — no hardcoded core numbers; **fail-open** (unparseable XML or <4 host CPUs → cpusets untouched) and `--runtime` only, so a reboot always returns to the unrestricted state. `vm-idle-shutdown.sh` re-asserts `release` when the VM is off, because the dispatcher runs hooks in unordered `find(1)` order alongside the deadlock-prone `rebind-host-gpu.sh`. **AppArmor trap (cost a full VM-start cycle to find, 2026-07-22)**: `/etc/apparmor.d/usr.sbin.libvirtd` grants `/etc/libvirt/hooks/** rmix` — `ix` means hooks run *inheriting the libvirtd profile*, which allows exec of `/bin/*`, `/sbin/*`, `/usr/bin/*`, `/usr/sbin/*` (all `PUx`) **but not `/usr/local/sbin/*`**. A hook calling a script there dies with the misleading `/bin/bash: bad interpreter: Permission denied` and **no AppArmor DENIED line in dmesg**. Anything a libvirt hook executes must live under `/etc/libvirt/hooks/` or one of the `PUx` dirs. Corollary: the hook wrappers `exit 0` so they can never block a VM start, which also *masks* such failures — the dispatcher logs `code 0`; the real error only surfaces in `/var/log/libvirt-cpu-hook.log`, so check that file, not the journal, when a hook silently does nothing. Also removed `systemd.unified_cgroup_hierarchy=false` from the kernelstub config (cgroup v1 would break this). The 6.12.43 BLS entry deliberately **keeps `isolcpus`** as a rollback path.
 - **GPU**: NVIDIA RTX 4070 (VFIO passthrough). PCIe link capped at **Gen3 x16** by the platform (ASUS ROG STRIX B660-G: root port `00:01.0` LnkCap2 max 8GT/s while the card supports 16GT/s; measured ~12 GB/s host→device in-VM, Gen4 would give ~25 GB/s). Check BIOS PCIEX16 Link Speed (Auto/Gen4) to lift it. Idle `LnkSta 2.5GT/s (downgraded)` is normal power management.
 - **GPU ownership: host by default, VM on demand (changed 2026-07-22)**: `/etc/modprobe.d/vfio.conf` used to list the RTX 4070 in `options vfio-pci ids=10de:2786,10de:22bc,144d:a808`, which — combined with `softdep nvme pre: vfio-pci` — captured the card from the **initramfs** onwards. A cold boot therefore left the host with no NVIDIA driver at all: `systemd-modules-load` failed (`nvidia-drm` → `could not insert nvidia_current: No such device`), `nvidia-persistenced` failed behind it, and `nivuus-ollama` exited `rc=128` (`nvml error: driver not loaded`) until a VM start/stop cycle handed the card back. The `ids=` list is now **`144d:a808` only** (the Samsung NVMe, passed to the same VM but never touched by the hooks — it must stay statically bound). The GPU is owned by the host at boot (`nouveau` is blacklisted twice, so `nvidia` wins) and moved on demand by the already-existing hooks: `bind-vfio-gpu.sh` detaches it at VM start, `rebind-host-gpu.sh` returns it at VM stop. **This requires regenerating the initramfs AND getting it into the ESP** — `update-initramfs` triggers kernelstub, which does the ESP copy and rewrites its own entries (verify with `unmkinitramfs` + `bootctl list`). ESP is chronically tight (511M): `initrd.img-previous` was moved to `/media/backup/esp-20260722/` to make room; kernelstub recreated it. **The display stack must never see the card (CRITICAL)**: the host boots to `graphical.target` with **gdm running GNOME/Wayland on the Intel iGPU** (`00:02.0`, single DRM node `card0`). If the NVIDIA card exposes a DRM node, mutter/gdm opens and holds it, and `bind-vfio-gpu.sh`'s `modprobe -r nvidia` then fails at VM start — the VM would boot without its GPU. So the host loads **`nvidia` alone, never `nvidia-drm`**: `/etc/modules-load.d/nivuus-nvidia.conf` lists `nvidia` (it has **no PCI modalias**, so nothing autoloads it), and the alternatives-managed `nvidia-drm` entry is neutralised in `/etc/nvidia/nvidia-load.conf` — deleting the `/etc/modules-load.d/nvidia.conf` symlink is useless, any `update-alternatives` run on the `glx` group recreates it (verified). This mirrors the state `rebind-host-gpu.sh` already produces (`modprobe nvidia` only), in which ollama works. Also removed: `/etc/X11/xorg.conf.d/99-nvidia-headless.conf` (local file, 2025-05-02, no package, no other `Coolbits` consumer) which pinned Xorg to `BusID "PCI:1:0:0"` — a landmine now that the card must stay releasable; backed up to `/media/backup/xorg-20260722/`. **Trade-off**: VM start now depends on a successful detach from nvidia (the bind hook already stops persistenced/ollama/tdarr and waits for `/dev/nvidia*` holders — a production-proven path, since it already ran on every VM start following a VM stop). **Installer divergence**: `install.sh` still puts `vfio-pci.ids=<gpu>` on the kernel cmdline, because it does **not** deploy the GPU bind/rebind hooks — a fresh install has no other way to make passthrough work. Aligning it means shipping those hooks first.
 - **VM start / GPU rebind — six traps found and fixed 2026-07-22 (evening)**. The VM could not start *at all* and CUDA died after every gaming session; both are fixed, and all causes are invisible from their symptoms.
@@ -425,7 +975,7 @@ Also stuck: 5 orphaned `tdarr-ffmpeg` running **40 h** with their output files a
 
 **Aggravators found in the same window (Sunday 23/08):** `clamav_targeted_scan.sh` (cron `30 4 1 * 0` = every **Sunday 04:30** *and* the 1st of the month; it has **no flock guard**) was caught in the saturation and ran 29 h in D state; and root's crontab runs **`e4defrag /dev/sda1 /dev/sdb1` every Sunday 06:00** — a defrag on the SMR drive, which is actively counterproductive there (band rewrite amplification for no gain). Both were victims/amplifiers, not causes.
 
-**`handle-vm-start.sh`: an unreachable hypervisor was read as a transitional state (fixed 2026-08-24).** `VM_STATE=$(LANG=C virsh domstate "$VM_NAME" 2>/dev/null)` discards stderr, so a dead libvirtd yields `""`, which fell through to the "transitional state" branch → **90 s wait → exit 1 → re-triggered by the next Moonlight probe, forever** (observed: a wake every 91 s from 00:33 to 09:44). The script now has `query_vm_state()` which propagates virsh's exit code and aborts immediately with the real cause. Source is now **versioned in `scripts/handle-vm-start.sh`** (it previously existed only as a deployed file) with `scripts/tests/test_handle_vm_start.sh` (10 assertions against a fake `virsh`; the script honours `VM_TRIGGER_LOCK` so tests don't touch the production lock). Note `VM_PORT` is still hardcoded to 47984 even when invoked for a 47989 wake — harmless today because the libvirt `started/begin/rules.sh` hook installs all forward-ports anyway.
+**`handle-vm-start.sh`: an unreachable hypervisor was read as a transitional state (fixed 2026-08-24).** `VM_STATE=$(LANG=C virsh domstate "$VM_NAME" 2>/dev/null)` discards stderr, so a dead libvirtd yields `""`, which fell through to the "transitional state" branch → **90 s wait → exit 1 → re-triggered by the next Moonlight probe, forever** (observed: a wake every 91 s from 00:33 to 09:44). The script now has `query_vm_state()` which propagates virsh's exit code and aborts immediately with the real cause. Source is now **versioned in `console/host/handle-vm-start.sh`** (it previously existed only as a deployed file) with `console/tests/test_handle_vm_start.sh` (10 assertions against a fake `virsh`; the script honours `VM_TRIGGER_LOCK` so tests don't touch the production lock). Note `VM_PORT` is still hardcoded to 47984 even when invoked for a 47989 wake — harmless today because the libvirt `started/begin/rules.sh` hook installs all forward-ports anyway.
 
 **libvirtd died in the same cascade** and could not restart: `Impossible d'acquérir le fichier pid '/run/libvirtd.pid'` + `Found left-over process … (virtiofsd) in control group`. Four **orphaned `virtiofsd`** from VMs dead 3.3 days were still in libvirtd's cgroup. Kill them (no qemu alive ⇒ they are orphans), then `ResetFailedUnit` + `StartUnit` over D-Bus. Recovery took seconds — do not reach for the flock/`mv the pid files` procedure until you have confirmed a *live* zombie still holds them.
 
@@ -443,11 +993,11 @@ Audited 2026-07-16 — current layout has **zero overlap**, preserve it:
 
 ### VM Wake-on-Demand (cloud gaming)
 
-`vm-trigger-47984.socket` **and `vm-trigger-47989.socket`** (added 2026-07-17 so that merely *opening* Moonlight — which polls serverinfo on 47989 HTTP and/or 47984 HTTPS — wakes the VM; clients must target the HOST LAN IP `192.168.0.1`, not the VM IP, and re-pair once against that entry) (systemd socket-activation, host `0.0.0.0`, `Accept=false`) trigger the oneshot `vm-trigger-{port}.service` → `/usr/local/sbin/vm-wake-gate.py` (**wake gate**, 2026-07-17, source of truth now `scripts/vm-wake-gate.py` + `scripts/tests/test_vm_wake_gate.py`: accepts the pending connection, reads the first bytes, only chains to the wake script if the client speaks Moonlight; port scans/mute connections are logged `wake REJECTED from <ip>` and ignored; syslog tags `vm-wake-gate-{port}`) → `/usr/local/sbin/handle-vm-start.sh`: starts the Windows VM if shut off, waits for its IP (agent then DHCP lease, 180s max), then adds a **runtime** forward-port in the **default** firewalld zone.
+`vm-trigger-47984.socket` **and `vm-trigger-47989.socket`** (added 2026-07-17 so that merely *opening* Moonlight — which polls serverinfo on 47989 HTTP and/or 47984 HTTPS — wakes the VM; clients must target the HOST LAN IP `192.168.0.1`, not the VM IP, and re-pair once against that entry) (systemd socket-activation, host `0.0.0.0`, `Accept=false`) trigger the oneshot `vm-trigger-{port}.service` → `/usr/local/sbin/vm-wake-gate.py` (**wake gate**, 2026-07-17, source of truth now `console/host/vm-wake-gate.py` + `console/tests/test_vm_wake_gate.py`: accepts the pending connection, reads the first bytes, only chains to the wake script if the client speaks Moonlight; port scans/mute connections are logged `wake REJECTED from <ip>` and ignored; syslog tags `vm-wake-gate-{port}`) → `/usr/local/sbin/handle-vm-start.sh`: starts the Windows VM if shut off, waits for its IP (agent then DHCP lease, 180s max), then adds a **runtime** forward-port in the **default** firewalld zone.
 
 **The wake sockets ARE internet-exposed while the VM is off (CRITICAL, found 2026-07-24 — the opposite of what this file claimed).** The belief that "the permanent `external` DNAT `47984/47989→192.168.3.2` means WAN traffic never reaches the host socket" is **wrong**: the libvirt hook `qemu.d/Windows/stopped/end/rules.sh` deletes those forward-ports **from every active zone** when the VM stops (they are re-added by `started/begin/rules.sh`). So exactly when the wake path is armed, the DNAT is gone and the whole internet can reach `0.0.0.0:47984/47989` on `ppp0`. Consequence: **the 47984 test (`data[0] == 0x16`, i.e. "client speaks TLS") matched every mass scanner on the internet.** Over the 30 days to 2026-07-24, *all* wakes it produced were false positives (Driftnet, Linode, Akamai, Datacamp, …) and *zero* came from a real client; the only genuine wakes came from 47989 with `GET /serverinfo`. **Fix: 47984 is out of the wake path** (probes still logged); 47989's HTTP signature is the only wake trigger — proven discriminator, 42 scanner probes rejected, 0 false positive. Remote (off-LAN) wake still works because Moonlight also probes 47989. Residual risk: a scanner that deliberately speaks Sunshine/Moonlight HTTP would still wake the VM — for strict control add a firewalld source-IP allowlist (breaks roaming clients). Diagnostic reflex: `journalctl -t vm-wake-gate-47984 -t vm-wake-gate-47989 | grep accepted` shows the source IP of every wake; `grep dport=4798 /proc/net/nf_conntrack` shows the live scan traffic. `Type=oneshot` + repeated triggering (even *successful* runs — systemd counts starts, not failures: ≥5 Moonlight polls in 10 s during a VM boot window trip it) killed the socket via `service-start-limit-hit` (2026-07-13, again 2026-07-17). **Fixed permanently 2026-07-17**: drop-ins `no-start-limit.conf` (`StartLimitIntervalSec=0`) on both trigger services, `flock` single-instance guard in `handle-vm-start.sh`, and transitional-state handling (waits up to 90 s for `in shutdown`/hibernation to settle instead of exit 1). The idle-check timer also self-heals both sockets every 10 min whenever the VM is off. Manual recovery if ever needed: `systemctl reset-failed vm-trigger-{47984,47989}.{service,socket} && systemctl start vm-trigger-{47984,47989}.socket`.
 
-**`headless_mode` est INTERDIT dans la config Apollo (tranche le 2026-08-27).** Il fait taire un « Fatal: Unable to find display or encoder during startup » qui est une FAUSSE alarme — au repos aucun ecran ne vit sur la 4070 que `adapter_name` epingle, la sonde d'encodeurs echoue donc sur les quatre encodeurs *y compris le logiciel*, ce qui prouve que le GPU n'est pas en cause ; les encodeurs sont re-enumeres des qu'un ecran parait. Mais **il casse le streaming vers le telephone** : avec un ecran deja present, Apollo reconfigure le mode d'un ecran existant au lieu d'en creer un a la resolution demandee, et le client Android sort 0,5 s apres `CLIENT CONNECTED`. Cote telephone le logcat dit `IllegalArgumentException: The surface has been released` dans `MediaCodec.configure()`, quatre tentatives, puis `Video stream start failed: -5` — et Moonlight ferme *proprement*, donc **sans aucun message d'erreur a l'ecran**, ce qui rend le symptome muet. Chronologie : activé 22:20:16 le 26/08, premier echec 22:25:02, le 2410x1080 refonctionne des le retrait. **Le Chromebook et la TV (3840x2160x60) n'ont jamais bronche** — c'est ce qui a fait chercher la cause cote client pendant des heures. Bilan retenu : on garde la banniere cosmetique plutot que le bug. Diagnostic si elle revient : si l'encodeur LOGICIEL echoue lui aussi dans `sunshine.log`, il manque un ecran, pas un GPU. Le test `scripts/tests/test_windows_guest_apollo.py` verrouille l'absence de la cle.
+**`headless_mode` est INTERDIT dans la config Apollo (tranche le 2026-08-27).** Il fait taire un « Fatal: Unable to find display or encoder during startup » qui est une FAUSSE alarme — au repos aucun ecran ne vit sur la 4070 que `adapter_name` epingle, la sonde d'encodeurs echoue donc sur les quatre encodeurs *y compris le logiciel*, ce qui prouve que le GPU n'est pas en cause ; les encodeurs sont re-enumeres des qu'un ecran parait. Mais **il casse le streaming vers le telephone** : avec un ecran deja present, Apollo reconfigure le mode d'un ecran existant au lieu d'en creer un a la resolution demandee, et le client Android sort 0,5 s apres `CLIENT CONNECTED`. Cote telephone le logcat dit `IllegalArgumentException: The surface has been released` dans `MediaCodec.configure()`, quatre tentatives, puis `Video stream start failed: -5` — et Moonlight ferme *proprement*, donc **sans aucun message d'erreur a l'ecran**, ce qui rend le symptome muet. Chronologie : activé 22:20:16 le 26/08, premier echec 22:25:02, le 2410x1080 refonctionne des le retrait. **Le Chromebook et la TV (3840x2160x60) n'ont jamais bronche** — c'est ce qui a fait chercher la cause cote client pendant des heures. Bilan retenu : on garde la banniere cosmetique plutot que le bug. Diagnostic si elle revient : si l'encodeur LOGICIEL echoue lui aussi dans `sunshine.log`, il manque un ecran, pas un GPU. Le test `console/tests/test_windows_guest_apollo.py` verrouille l'absence de la cle.
 
 **Piste voisine, non elucidee** : bug amont ouvert [moonlight-android#1589](https://github.com/moonlight-stream/moonlight-android/issues/1589), meme exception pour toutes les resolutions non-16:9 sur Pixel. Il decrit le meme symptome mais n'etait pas la cause ici.
 
@@ -481,4 +1031,8 @@ The WAN is a PPPoE session over VLAN 835. **The physical WAN port is now `enp5s0
 - **Firewall Config**: `/configs/firewall/` - firewalld and nftables rules
 - **VM Config**: `/docs/vm-configuration.md` - QEMU/KVM setup with GPU passthrough
 - **Specs & plans**: `/docs/superpowers/` - design documents and implementation plans
+- **Console debts**: `/docs/console-dettes.md` - known gaps on the Windows guest
+  (gamepad rumble, X360-only pad so no motion sensor, off-brand wallpaper). Its
+  counterpart is `docs/dettes.md` in `nivuus/retro`; three of those debts cross
+  the repo boundary, the pad being created here and consumed there.
 - **MQTT agent**: now `nivuus/mqtt` - its CLAUDE.md holds the agent-side documentation

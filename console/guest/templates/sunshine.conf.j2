@@ -1,0 +1,134 @@
+# Nivuus appliance - generated, do not edit in place.
+# Every key here was verified present in Apollo 0.4.6 (2026-08-22).
+
+# Deactivate every other display and stream the virtual one alone. Measured:
+# paths=1, enabled=1, bpc=10 on the SudoVDA target. With ensure_primary the
+# dummy plug stayed primary at (0,0) and fullscreen games opened on IT while
+# Apollo captured the virtual display - the 2026-07-23 "only the desktop
+# streams" bug.
+dd_configuration_option = ensure_only_display
+
+# The isolated option pushes the virtual display into a corner and KEEPS the
+# physical ones active. Wrong for a headless box.
+isolated_virtual_display_option = disabled
+
+# Follow the client's request. On Server 2022 this was decorative - the
+# Advanced Color API failed in both directions. On build 26100 it is real.
+dd_hdr_option = auto
+
+# No output_name: the HDMI dummy plug is physically removed, and pinning a
+# display that does not exist would strand every session.
+
+# Apollo restores the display layout this long after a client disconnects.
+dd_config_revert_delay = 3000
+
+# Un ecran, en permanence, sur la carte que la capture vise.
+#
+# PAS de headless_mode ici, et c'est une decision prise CONTRE une correction
+# qui marchait — voici pourquoi, pour que personne ne la refasse.
+#
+# Cette machine n'a aucun ecran physique, et l'ecran virtuel de SudoVDA n'existe
+# que pendant une session. Au repos, la RTX 4070 ne pilote donc rien du tout
+# (mesure du 2026-08-26 : VideoModeDescription vide sur la 4070, le bureau
+# vivant sur la VGA emulee en 1280x800 a 1 Hz). Or adapter_name epingle la
+# capture sur la 4070 : la sonde d'encodeurs du demarrage ne trouve aucun
+# peripherique de sortie, echoue sur les quatre encodeurs — y compris le
+# LOGICIEL, ce qui prouve que le GPU n'y est pour rien — et Apollo affiche
+# « Fatal: Unable to find display or encoder during startup » dans son
+# interface, en recommandant de ne pas streamer. L'alarme est FAUSSE : les
+# encodeurs sont re-enumeres des qu'un ecran parait, et NVENC est bien utilise.
+#
+# « headless_mode = true » fait taire cette banniere en tenant un ecran virtuel
+# en permanence, et cela fonctionne. Applique le 2026-08-26 a 22:20:16, retire
+# le 2026-08-27 : il CASSE LE STREAMING VERS LE TELEPHONE. Avec un ecran deja
+# la, Apollo doit reconfigurer le mode d'un ecran existant au lieu d'en creer un
+# a la resolution demandee, et le client sort 0,5 s apres s'etre connecte —
+# MediaCodec.configure() leve « The surface has been released », quatre
+# tentatives, puis « Video stream start failed: -5 ». Premier echec enregistre a
+# 22:25:02, soit cinq minutes apres l'activation ; le 2410x1080 refonctionne des
+# le retrait. Le Chromebook et la TV n'ont jamais bronche, ce qui a longtemps
+# masque la cause.
+#
+# Le bilan est donc : une banniere cosmetique, fausse, au demarrage du service,
+# contre un client qui ne peut plus streamer du tout. On garde la banniere.
+# Diagnostic si elle revient : lire les quatre « Failed to locate an output
+# device » dans sunshine.log — si l'encodeur LOGICIEL echoue lui aussi, il
+# manque un ecran, pas un GPU.
+
+# Le niveau de journal, et pourquoi il ne descend pas.
+#
+# Aucune manette ne vibre nulle part — ni dans les jeux Steam, ni dans les
+# emulateurs, ni depuis le client Moonlight (dette C1, docs/console-dettes.md).
+# Le maillon qui appartient a ce depot est le retour Apollo -> client: le
+# rumble voyage a CONTRESENS du reste du flux, et c'est le seul chemin de la
+# chaine qui remonte. Il ne se mesure nulle part ailleurs que dans
+# sunshine.log — ni ViGEmBus ni le client n'en disent rien.
+#
+# « info » est donc le niveau dont depend l'etape 2 de C1. L'abaisser
+# n'afficherait aucun symptome: le flux marcherait toujours, et la seule chose
+# perdue serait la capacite de savoir POURQUOI la manette est muette.
+#
+# NON MESURE, et a ne pas supposer: que l'evenement de rumble soit journalise
+# a « info » plutot qu'a « debug ». Personne ne l'a lu dans sunshine.log. Si
+# l'etape 2 de C1 ne trouve rien a ce niveau, l'absence de ligne ne prouve PAS
+# qu'Apollo n'emet rien — elle peut ne prouver que la verbosite. Passer a
+# « debug » le temps d'une session tranche, et c'est le premier geste a faire
+# avant de conclure quoi que ce soit sur ce maillon.
+min_log_level = info
+
+# Le nom que les clients Moonlight affichent. Sans lui, Apollo annonce le nom
+# NetBIOS de la machine (NIVUUS-WIN) : correct pour le DNS et le bail DHCP,
+# mais ce n'est pas un nom d'appareil qu'on veut lire sur une TV. Poser
+# sunshine_name ne renomme PAS l'ordinateur Windows — c'est deliberement plus
+# cible, le nom reseau reste celui que l'unattend a fixe.
+sunshine_name = Nivuus
+
+# LE TYPE DE MANETTE VIRTUELLE, EPINGLE — et c'est ce qui rend l'assignation
+# des manettes automatique, pour quatre pads a la fois qui ne se ressemblent
+# pas.
+#
+# Ce que la console voit n'est JAMAIS la manette du joueur. Moonlight envoie
+# des etats abstraits, et Apollo recree un peripherique par ViGEmBus. Sans
+# cette cle, « gamepad » vaut « auto », et alloc_gamepad (src/platform/windows/
+# input.cpp, v0.4.6, lignes 1183-1205) choisit le type A CHAQUE CONNEXION, par
+# cinq branches dans cet ordre :
+#   1. le client annonce PlayStation      -> DualShock 4
+#   2. le client annonce Xbox             -> Xbox 360
+#   3. motion_as_ds4 et le pad a un gyro  -> DualShock 4
+#   4. touchpad_as_ds4 et un pave tactile -> DualShock 4
+#   5. sinon                              -> Xbox 360
+# Quatre manettes differentes branchees ensemble donnent donc quatre
+# peripheriques de types MELANGES, dans un ordre qui depend de qui se connecte.
+# Aucun emulateur ne peut nommer ses quatre ports de facon stable la-dessus :
+# Dolphin identifie un peripherique par (source, index, NOM), et l'index se
+# compte PAR NOM — deux types melanges donnent deux « index 0 ».
+#
+# Mesure du 2026-08-30 dans sunshine.log : « Gamepad 0 will be DualShock 4
+# controller (auto-selected by motion sensor presence) », alors que le releve
+# du 2026-08-29 avait ete fait sous « Xbox 360 controller (default) ». Le type
+# avait donc deja change tout seul, sans un mot, entre deux sessions.
+#
+# « x360 » fige la branche 1 de alloc_gamepad pour tout le monde : quatre
+# manettes Xbox 360 filaires identiques, indexees 0 a 3 par XInput, quelle que
+# soit la manette que le joueur tient. C'est le seul des trois choix qu'XInput
+# enumere — les emulateurs de cette console sont tous configures en XInput —
+# et l'index XInput EST le numero de port, ce qui rend l'ordre deterministe.
+#
+# CE QUE CA COUTE, dit par Apollo lui-meme (memes lignes, 1207-1218) : sur un
+# Xbox 360 emule, le gyroscope, le pave tactile et la LED du pad client
+# deviennent inutilisables — dans les jeux Steam comme dans les emulateurs.
+# Reculer tient en une ligne : « gamepad = ds4 » garde le mouvement et le
+# pave, au prix de l'enumeration XInput, qu'un peripherique DualShock 4 ViGEm
+# n'a pas. Les trois seules valeurs acceptees sont « auto », « x360 » et
+# « ds4 » (supported_gamepads, meme fichier, lignes 1728-1747).
+gamepad = x360
+
+# LE TACTILE NATIF, et il etait pose A LA MAIN sur la console — donc perdu au
+# prochain rebuild, sans qu'aucun test ne le dise.
+#
+# « disabled » fait traduire les evenements tactiles du client en evenements
+# de SOURIS. Steam s'en accommode ; l'ecran tactile de l'emulateur DS, non :
+# melonDS attend de vrais evenements de pointeur (WM_POINTER, que le pilote
+# dinput de RetroArch traite). Mesure du 2026-08-29 : le tactile de la DS ne
+# repondait pas, et le propriétaire a confirme qu'il repond avec « enabled ».
+native_pen_touch = enabled

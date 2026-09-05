@@ -33,7 +33,7 @@ def _install_core_packages(target: str, emit) -> None:
     code = chroot_stream(
         target,
         ["apt-get", "install", "-y", "--no-install-recommends", *CORE_PACKAGES],
-        on_line=lambda l: emit.info("base", 61, l[:120]),
+        on_line=lambda line: emit.info("base", 61, line[:120]),
     )
     if code != 0:
         raise StepError("failed to install core packages in the chroot")

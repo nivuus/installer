@@ -1,0 +1,502 @@
+#!/usr/bin/env python3
+"""Tests for the PCI/NVMe/CPU-isolation helpers used by the console package.
+
+The parsers are pure: they take captured `lspci` text. `_whole_disk_name` is
+exercised against a fake sysfs tree built in a temp dir. So these tests run
+anywhere and do not depend on the machine they execute on.
+
+Run: python3 console/tests/test_console_hardware.py
+"""
+import os
+import pathlib
+import sys
+import tempfile
+
+REPO = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "console"))
+
+import hardware  # noqa: E402
+
+failures = []
+
+
+def check(label, got, want):
+    if got != want:
+        failures.append(f"{label}: got {got!r}, want {want!r}")
+
+
+def check_raises(label, exc_type, fn):
+    try:
+        fn()
+    except exc_type:
+        return
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"{label}: raised {type(exc).__name__}, want {exc_type.__name__}")
+        return
+    failures.append(f"{label}: did not raise {exc_type.__name__}")
+
+
+# Captured from the Nivuus host on 2026-08-22 (`lspci -nn -D`).
+LSPCI = """\
+0000:00:02.0 VGA compatible controller [0300]: Intel Corporation AlderLake-S GT1 [8086:4680] (rev 0c)
+0000:01:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD104 [GeForce RTX 4070] [10de:2786] (rev a1)
+0000:01:00.1 Audio device [0403]: NVIDIA Corporation AD104 High Definition Audio Controller [10de:22bc] (rev a1)
+0000:02:00.0 Non-Volatile memory controller [0108]: Samsung Electronics Co Ltd NVMe SSD Controller 980 (DRAM-less) [144d:a809]
+0000:03:00.0 Non-Volatile memory controller [0108]: Samsung Electronics Co Ltd NVMe SSD Controller SM981/PM981/PM983 [144d:a808]
+"""
+
+fns = hardware.parse_pci_functions(LSPCI, "01:00.0")
+check("two functions in the GPU slot", len(fns), 2)
+check("first function address", fns[0]["address"], "0000:01:00.0")
+check("first function id", fns[0]["id"], "10de:2786")
+check("first function number", fns[0]["function"], "0x0")
+check("second function number", fns[1]["function"], "0x1")
+check("bus is hex-prefixed", fns[0]["bus"], "0x01")
+check("slot is hex-prefixed", fns[0]["slot"], "0x00")
+check("domain is hex-prefixed", fns[0]["domain"], "0x0000")
+
+# A fully-qualified slot must behave identically to a short one: callers get
+# the address from either form depending on which lspci flags they used.
+check(
+    "qualified slot matches short slot",
+    hardware.parse_pci_functions(LSPCI, "0000:01:00.0"),
+    fns,
+)
+
+check("unknown slot yields nothing", hardware.parse_pci_functions(LSPCI, "09:00.0"), [])
+check("empty input yields nothing", hardware.parse_pci_functions("", "01:00.0"), [])
+
+# --- list_gpus/cpu_topology : ce que domain.py appelle apres le reboot ---- #
+# domain.py calls these two directly, and it runs after the reboot on a host
+# where installer/ may never have existed. They are copied, not imported:
+# console/ importing installer/ is what this whole split exists to prevent.
+check("console.hardware expose list_gpus",
+      callable(getattr(hardware, "list_gpus", None)), True)
+check("console.hardware expose cpu_topology",
+      callable(getattr(hardware, "cpu_topology", None)), True)
+
+# Parsing is what can be tested without hardware; detection itself cannot.
+# Feed the parser the same shape `lspci -nn` produces. The first two lines
+# are captured verbatim from the Nivuus host on 2026-08-27
+# (`lspci -nn | grep -iE 'vga|3d|display'`) - it has exactly the targeted
+# layout: an Intel iGPU plus a discrete NVIDIA. This host has no class-[0302]
+# "3D controller" card (a compute/second GPU, exactly what a passthrough
+# console can meet), so the third line is not captured here - it is built in
+# the real `lspci -nn` shape around the well-known real device id 10de:102d
+# (NVIDIA GK210GL "Tesla K80", confirmed present in this machine's own
+# /usr/share/misc/pci.ids), not invented text.
+SAMPLE_LSPCI_VGA = """\
+00:02.0 VGA compatible controller [0300]: Intel Corporation AlderLake-S GT1 [8086:4680] (rev 0c)
+01:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD104 [GeForce RTX 4070] [10de:2786] (rev a1)
+02:00.0 3D controller [0302]: NVIDIA Corporation GK210GL [Tesla K80] [10de:102d] (rev a1)
+"""
+
+gpus = hardware.parse_gpus(SAMPLE_LSPCI_VGA)
+check("un GPU discret est reconnu", [g["slot"] for g in gpus if g["discrete"]],
+      ["01:00.0", "02:00.0"])
+check("l iGPU n est pas discret", [g["discrete"] for g in gpus if g["slot"] == "00:02.0"], [False])
+threed = [g for g in gpus if g["slot"] == "02:00.0"]
+check("la ligne « 3D controller » (classe 0302) est reconnue comme un GPU",
+      len(threed), 1)
+check("la carte 3D est classee nvidia et discrete",
+      [(g["vendor"], g["discrete"]) for g in threed], [("nvidia", True)])
+
+# cpu_topology() actually runs against this machine's real sysfs - there is
+# no captured-text form to feed it (unlike parse_gpus), so only its shape and
+# internal consistency can be checked without hardcoding a value specific to
+# whatever CPU happens to run the test suite.
+topo = hardware.cpu_topology()
+check("cpu_topology rend les cles attendues",
+      {"model", "total_cpus", "hybrid", "performance_cpus"} <= set(topo.keys()), True)
+
+total = topo["total_cpus"]
+performance = topo["performance_cpus"]
+check("performance_cpus ne contient pas de doublon",
+      len(performance), len(set(performance)))
+check("performance_cpus tient dans le nombre total de cpus en ligne",
+      all(0 <= c < total for c in performance), True)
+efficiency = set(range(total)) - set(performance)
+check("performance et le reste des coeurs ne se recoupent pas",
+      set(performance) & efficiency, set())
+check("leur reunion couvre tous les cpus en ligne",
+      set(performance) | efficiency, set(range(total)))
+check("le drapeau hybride s accorde avec l existence de deux classes de coeurs",
+      topo["hybrid"], 0 < len(performance) < total)
+
+# Test the whole-disk name extractor against a fake sysfs tree (same approach
+# as scripts/tests/test_pcie_wifi_link_guard.sh), so this does not depend on
+# what block devices happen to exist on the machine running the test.
+with tempfile.TemporaryDirectory() as fake_root:
+    def _make_partition(disk, part):
+        disk_dir = os.path.join(fake_root, disk)
+        part_dir = os.path.join(disk_dir, part)
+        os.makedirs(part_dir, exist_ok=True)
+        with open(os.path.join(part_dir, "partition"), "w") as fh:
+            fh.write("3\n")
+        os.symlink(os.path.join(disk, part), os.path.join(fake_root, part))
+
+    def _make_whole_disk(disk):
+        os.makedirs(os.path.join(fake_root, disk), exist_ok=True)
+
+    _make_partition("nvme0n1", "nvme0n1p3")
+    _make_whole_disk("sda")
+    _make_partition("mmcblk0", "mmcblk0p1")
+
+    check(
+        "partition name resolves to parent disk",
+        hardware._whole_disk_name("nvme0n1p3", sysfs_root=fake_root),
+        "nvme0n1",
+    )
+    check(
+        "whole-disk name unchanged",
+        hardware._whole_disk_name("sda", sysfs_root=fake_root),
+        "sda",
+    )
+    check(
+        "mmcblk-style partition resolves to parent disk",
+        hardware._whole_disk_name("mmcblk0p1", sysfs_root=fake_root),
+        "mmcblk0",
+    )
+    check(
+        "missing node falls back to the name unchanged",
+        hardware._whole_disk_name("nonexistent0", sysfs_root=fake_root),
+        "nonexistent0",
+    )
+
+ctrls = hardware.parse_nvme_controllers(LSPCI)
+check("two NVMe controllers", len(ctrls), 2)
+check("host controller listed", ctrls[0]["address"], "0000:02:00.0")
+check("guest controller listed", ctrls[1]["address"], "0000:03:00.0")
+
+picked = hardware.select_passthrough_nvme(ctrls, {"0000:02:00.0"})
+check("picks the controller that is not the host root", picked["address"], "0000:03:00.0")
+check("picked id", picked["id"], "144d:a808")
+
+# Refusing to guess is the whole point: this disk gets wiped.
+check_raises(
+    "host unknown is never a guess",
+    hardware.HardwareError,
+    lambda: hardware.select_passthrough_nvme(ctrls[:1], set()),
+)
+check_raises(
+    "no candidate left",
+    hardware.HardwareError,
+    lambda: hardware.select_passthrough_nvme(
+        ctrls, {"0000:02:00.0", "0000:03:00.0"}
+    ),
+)
+check_raises(
+    "no controller at all",
+    hardware.HardwareError,
+    lambda: hardware.select_passthrough_nvme([], {"0000:02:00.0"}),
+)
+
+# --- le cas ISO LIVE : la racine hote n est PAS identifiable -------------- #
+# C est le chemin PRINCIPAL du package, et l ancien selecteur y refusait sur
+# TOUTES les machines : sur un support live la racine est l image live, aucun
+# disque PCI ne la porte, donc host_root_pci_addresses() rend None et un
+# selecteur qui en derive n a jamais de quoi decider. La reponse de
+# l operateur (dedicated_nvme) est la seule information presente des deux
+# cotes : elle CHOISIT, et l exclusion de la racine hote devient une
+# assertion qui, faute de racine identifiable, ne s applique simplement pas.
+picked_live = hardware.select_passthrough_nvme(
+    ctrls, None, wanted_address="0000:03:00.0")
+check("ISO live : la reponse de l operateur choisit malgre une racine "
+      "inconnue", picked_live["address"], "0000:03:00.0")
+check("ISO live : et l id suit", picked_live["id"], "144d:a808")
+
+# Meme chose vue depuis la fonction pure qui decompose l adresse.
+resolved_live = hardware.resolve_passthrough_nvme(
+    LSPCI, None, wanted_address="0000:03:00.0")
+check("ISO live : l adresse est decomposee", resolved_live["bus"], "0x03")
+
+# Sans reponse ET sans racine identifiable, il ne reste rien pour decider :
+# le refus d origine tient, c est le seul cas ou il etait justifie.
+check_raises(
+    "ISO live sans reponse : plus rien pour decider, refus",
+    hardware.HardwareError,
+    lambda: hardware.select_passthrough_nvme(ctrls, None),
+)
+
+# Une reponse qui ne correspond a AUCUN controleur NVMe doit etre refusee, et
+# le refus doit nommer ce qui est attendu - sinon l operateur ne peut pas
+# corriger sa reponse.
+try:
+    hardware.select_passthrough_nvme(ctrls, None,
+                                     wanted_address="0000:00:02.0")
+    failures.append("une adresse qui n est pas un NVMe aurait du lever")
+except hardware.HardwareError as exc:
+    check("le refus nomme l adresse demandee", "0000:00:02.0" in str(exc), True)
+    check("le refus nomme les controleurs connus",
+          "0000:03:00.0" in str(exc), True)
+
+# L assertion de securite reste vraie quand la racine EST identifiable : une
+# reponse qui designe le disque de l hote est refusee, elle ne devient pas
+# une autorisation parce que l operateur l a ecrite.
+try:
+    hardware.select_passthrough_nvme(ctrls, {"0000:02:00.0"},
+                                     wanted_address="0000:02:00.0")
+    failures.append("le disque de la racine hote aurait du etre refuse")
+except hardware.HardwareError as exc:
+    check("le refus dit que le disque porte la racine hote",
+          "host root" in str(exc), True)
+
+# The template consumes nvme.bus / nvme.slot / nvme.function, so the resolved
+# record must be decomposed, not just {address, id}.
+resolved = hardware.resolve_passthrough_nvme(LSPCI, {"0000:02:00.0"})
+check("resolved address", resolved["address"], "0000:03:00.0")
+check("resolved bus", resolved["bus"], "0x03")
+check("resolved slot", resolved["slot"], "0x00")
+check("resolved function", resolved["function"], "0x0")
+check("resolved id", resolved["id"], "144d:a808")
+
+# --- isolation_plan: la derivation que le moteur ne fait plus ------------- #
+# Regression guard: les deux chemins heureux du brief doivent rester verts.
+check("hybrid: les P-cores sont isoles",
+      hardware.isolation_plan({"hybrid": True, "performance_cpus": [0, 1, 2, 3],
+                               "total_cpus": 8}),
+      {"isolcpus": "0-3", "nohz_full": "0-3"})
+check("uniforme: tout sauf cpu0",
+      hardware.isolation_plan({"hybrid": False, "performance_cpus": [],
+                               "total_cpus": 4}),
+      {"isolcpus": "1-3", "nohz_full": "1-3"})
+check("snapshot vide ne leve pas",
+      hardware.isolation_plan({}), {"isolcpus": "", "nohz_full": ""})
+check("un seul cpu: rien a isoler",
+      hardware.isolation_plan({"hybrid": False, "performance_cpus": [],
+                               "total_cpus": 1}),
+      {"isolcpus": "", "nohz_full": ""})
+check("cpu_ranges compresse", hardware.cpu_ranges([0, 1, 2, 3, 8]), "0-3,8")
+check("cpu_ranges vide", hardware.cpu_ranges([]), "")
+
+# ABSENT (rien a isoler) et MALFORME (snapshot qui ment) sont distingues.
+# isolation_plan() finit sur la ligne de commande noyau (nohz_full=...) et
+# la liste blanche GRUB en aval ne garde que l injection shell, pas la
+# validite semantique - donc filtrer les entrees fautives laisserait passer
+# une plage plausible tiree d un snapshot dont on vient de prouver qu il
+# est faux. Refuser est le seul comportement sur qui compter.
+check_raises(
+    "performance_cpus avec une chaine",
+    hardware.HardwareError,
+    lambda: hardware.isolation_plan(
+        {"hybrid": True, "performance_cpus": [0, "x"], "total_cpus": 8}
+    ),
+)
+check_raises(
+    "performance_cpus avec True (piege bool-est-un-int)",
+    hardware.HardwareError,
+    lambda: hardware.isolation_plan(
+        {"hybrid": True, "performance_cpus": [0, True], "total_cpus": 8}
+    ),
+)
+check_raises(
+    "performance_cpus avec un numero de cpu negatif",
+    hardware.HardwareError,
+    lambda: hardware.isolation_plan(
+        {"hybrid": True, "performance_cpus": [-1, 0, 1], "total_cpus": 8}
+    ),
+)
+check_raises(
+    "performance_cpus avec un numero de cpu >= total_cpus",
+    hardware.HardwareError,
+    lambda: hardware.isolation_plan(
+        {"hybrid": True, "performance_cpus": [0, 1, 8], "total_cpus": 8}
+    ),
+)
+
+# --- pci_address_for_device : le pont entre /dev/... et une adresse PCI --- #
+check("un chemin introuvable rend None",
+      hardware.pci_address_for_device("/dev/nexistepas0n1"), None)
+
+# Sur un arbre sysfs factice, pour que la traduction /dev/... -> adresse PCI
+# soit verifiee sans dependre des disques de la machine qui execute le test.
+with tempfile.TemporaryDirectory() as fake_block:
+    os.makedirs(os.path.join(fake_block, "nvme9n1", "device"))
+    os.makedirs(os.path.join(fake_block, "pci", "0000:03:00.0"))
+    os.symlink(os.path.join(fake_block, "pci", "0000:03:00.0"),
+               os.path.join(fake_block, "nvme9n1", "device", "device"))
+    check("un disque connu se traduit en adresse PCI",
+          hardware.pci_address_for_device("/dev/nvme9n1",
+                                          sysfs_root=fake_block),
+          "0000:03:00.0")
+    check("un disque absent de l arbre rend None",
+          hardware.pci_address_for_device("/dev/nvme8n1",
+                                          sysfs_root=fake_block),
+          None)
+
+    # --- block_device_for_pci_address : le sens inverse ------------------ #
+    # resolve.py en a besoin quand le NVMe a passer est choisi AUTOMATIQUEMENT
+    # (pas de reponse dedicated_nvme) : il n a alors qu une adresse PCI, et
+    # doit retrouver le /dev/... pour lire sa taille avant que vfio-pci ne
+    # fasse disparaitre le peripherique bloc.
+    check("une adresse connue rend son peripherique bloc",
+          hardware.block_device_for_pci_address("0000:03:00.0",
+                                                sysfs_root=fake_block),
+          "nvme9n1")
+    check("une adresse absente de l arbre rend None",
+          hardware.block_device_for_pci_address("0000:09:09.9",
+                                                sysfs_root=fake_block),
+          None)
+
+# Sans sysfs_root explicite, block_device_for_pci_address() doit honorer
+# NIVUUS_SYSFS_BLOCK comme _device_to_pci_address() - c est le meme seam,
+# et resolve.py l appelle sans jamais passer sysfs_root lui-meme.
+with tempfile.TemporaryDirectory() as fake_block:
+    os.makedirs(os.path.join(fake_block, "nvme9n1", "device"))
+    os.makedirs(os.path.join(fake_block, "pci", "0000:03:00.0"))
+    os.symlink(os.path.join(fake_block, "pci", "0000:03:00.0"),
+               os.path.join(fake_block, "nvme9n1", "device", "device"))
+    saved = os.environ.get("NIVUUS_SYSFS_BLOCK")
+    os.environ["NIVUUS_SYSFS_BLOCK"] = fake_block
+    try:
+        check("NIVUUS_SYSFS_BLOCK est honore sans sysfs_root explicite",
+              hardware.block_device_for_pci_address("0000:03:00.0"),
+              "nvme9n1")
+    finally:
+        if saved is None:
+            os.environ.pop("NIVUUS_SYSFS_BLOCK", None)
+        else:
+            os.environ["NIVUUS_SYSFS_BLOCK"] = saved
+
+# --- block_device_size_bytes : la taille reelle, pas une supposition ----- #
+# /sys/block/<name>/size is ALWAYS in 512-byte sectors, whatever the disk's
+# physical sector size. A 4 KiB-formatted NVMe still reports here in units of
+# 512; multiplying by the physical size would claim eight times the truth.
+#
+# TWO disks live in this fake tree on purpose: a tree with only one disk
+# cannot exercise the membership check at all (a "just take the first disk
+# found" mutant is indistinguishable from the real containment check when
+# there is only one disk to find). "nvme0n1" sorts alphabetically BEFORE
+# "nvme1n1", so for the nvme1n1 partition check below, the wrong disk is
+# the one os.listdir would likely see named first - a test that only passed
+# because the right disk happened to enumerate first would not prove
+# anything. Sizes are picked far apart so a mix-up shows up unmistakably in
+# the failure message rather than as a subtle off-by-one.
+with tempfile.TemporaryDirectory() as tmp:
+    fake = pathlib.Path(tmp) / "nvme1n1"
+    fake.mkdir()
+    (fake / "size").write_text("1953525168\n")      # 931.5 GiB in 512B sectors
+    got = hardware.block_device_size_bytes("/dev/nvme1n1", sysfs_root=tmp)
+    check("la taille vient des secteurs de 512 octets", got, 1953525168 * 512)
+
+    other = pathlib.Path(tmp) / "nvme0n1"
+    other.mkdir()
+    (other / "size").write_text("234441648\n")      # 111.8 GiB - clearly different
+
+    # A partition, not the whole disk: the passthrough hands over the entire
+    # PCI device, so sizing must resolve to the parent - and to the RIGHT
+    # parent, not merely to a disk that happens to exist in the tree.
+    part = fake / "nvme1n1p1"
+    part.mkdir()
+    (part / "size").write_text("2048\n")
+    check("une partition remonte au disque entier",
+          hardware.block_device_size_bytes("/dev/nvme1n1p1", sysfs_root=tmp),
+          1953525168 * 512)
+
+    # Same check, mirrored onto the other disk, so neither disk can be the
+    # one silently hardcoded as "the" answer regardless of which partition
+    # was actually asked for.
+    other_part = other / "nvme0n1p1"
+    other_part.mkdir()
+    (other_part / "size").write_text("4096\n")
+    check("une partition du second disque ne remonte pas au premier",
+          hardware.block_device_size_bytes("/dev/nvme0n1p1", sysfs_root=tmp),
+          234441648 * 512)
+
+check_raises("un peripherique inconnu est refuse", hardware.HardwareError,
+             lambda: hardware.block_device_size_bytes("/dev/nexistepas",
+                                                      sysfs_root="/nowhere"))
+
+# Sans sysfs_root explicite, block_device_size_bytes() doit honorer
+# NIVUUS_SYSFS_BLOCK - le meme seam que _device_to_pci_address(). Avant la
+# tache 1, sysfs_root valait le litteral "/sys/block" et ignorait la
+# variable d environnement : resolve.py, qui n en passe jamais, lisait alors
+# le VRAI /sys/block de la machine qui execute les tests au lieu du faux
+# arbre - c est exactement ce qui a fait echouer les premiers tests de
+# resolve ajoutes dans cette tache (voir le rapport).
+with tempfile.TemporaryDirectory() as tmp:
+    fake = pathlib.Path(tmp) / "nvme9n1"
+    fake.mkdir()
+    (fake / "size").write_text("2048\n")
+    saved = os.environ.get("NIVUUS_SYSFS_BLOCK")
+    os.environ["NIVUUS_SYSFS_BLOCK"] = tmp
+    try:
+        check("NIVUUS_SYSFS_BLOCK est honore sans sysfs_root explicite",
+              hardware.block_device_size_bytes("/dev/nvme9n1"), 2048 * 512)
+    finally:
+        if saved is None:
+            os.environ.pop("NIVUUS_SYSFS_BLOCK", None)
+        else:
+            os.environ["NIVUUS_SYSFS_BLOCK"] = saved
+
+# --- la selection du NVMe, de facon DETERMINISTE ------------------------- #
+# Sur du texte lspci capture, pas sur le materiel de cette machine : c est
+# ce qui rend ce test vrai partout. LSPCI est deja defini plus haut dans ce
+# fichier (repris de test_windows_guest_hardware.py).
+try:
+    hardware.select_passthrough_nvme(hardware.parse_nvme_controllers(LSPCI),
+                                     {"0000:02:00.0"})
+    picked = True
+except hardware.HardwareError:
+    picked = False
+check("un NVMe non possede par l hote est selectionnable", picked, True)
+
+try:
+    # Les deux controleurs appartiennent a l hote : plus aucun candidat.
+    hardware.select_passthrough_nvme(hardware.parse_nvme_controllers(LSPCI),
+                                     {"0000:02:00.0", "0000:03:00.0"})
+    failures.append("aucun candidat libre aurait du lever HardwareError")
+except hardware.HardwareError as exc:
+    check("le refus nomme la raison", bool(str(exc).strip()), True)
+
+try:
+    hardware.select_passthrough_nvme([], set())
+    failures.append("aucun controleur NVMe aurait du lever HardwareError")
+except hardware.HardwareError:
+    pass
+
+# --------------------------------------------------------------------------- #
+# host_smbios: lecture DMI                                                    #
+# --------------------------------------------------------------------------- #
+# On sert un faux /sys/class/dmi/id plutot que celui de la machine : le test
+# doit valider la mise en forme, pas la carte mere du builder.
+import tempfile  # noqa: E402
+
+with tempfile.TemporaryDirectory() as _dmi:
+    _d = pathlib.Path(_dmi)
+    (_d / "bios_vendor").write_text("American Megatrends Inc.\n")
+    (_d / "bios_version").write_text("2404\n")
+    (_d / "sys_vendor").write_text("ASUS\n")
+    (_d / "board_name").write_text("ROG STRIX B660-G GAMING WIFI\n")
+    # Present mais vide : doit disparaitre, pas rendre une entree vide.
+    (_d / "board_version").write_text("\n")
+    # chassis_* absent en entier : la table entiere doit sauter.
+    smb = hardware.host_smbios(root=str(_d))
+
+    check("table bios", smb["bios"],
+          {"vendor": "American Megatrends Inc.", "version": "2404"})
+    check("table system", smb["system"], {"manufacturer": "ASUS"})
+    check("table baseBoard", smb["baseBoard"],
+          {"product": "ROG STRIX B660-G GAMING WIFI"})
+    check("un champ vide ne rend pas d'entree",
+          "version" in smb.get("baseBoard", {}), False)
+    check("une table sans aucun champ lisible saute",
+          "chassis" in smb, False)
+
+# Un repertoire DMI inexistant rend {} : le template n'emet alors aucun
+# <sysinfo>, et le guest garde le SMBIOS de QEMU au lieu d'en annoncer un
+# tronque.
+check("pas de DMI du tout rend un dict vide",
+      hardware.host_smbios(root="/nonexistent/dmi"), {})
+
+# La lecture ne doit pas laisser DMI_ROOT deplace derriere elle.
+_avant = hardware.DMI_ROOT
+hardware.host_smbios(root="/nonexistent/dmi")
+check("DMI_ROOT restaure apres lecture", hardware.DMI_ROOT, _avant)
+
+if failures:
+    print(f"FAIL ({len(failures)})")
+    for f in failures:
+        print("  -", f)
+    sys.exit(1)
+print("OK - hardware detection checks passed")

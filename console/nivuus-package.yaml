@@ -1,0 +1,71 @@
+apiVersion: nivuus.dev/v1
+name: console
+version: 1.0.0
+label: "Console de jeu Windows"
+tier: platform
+
+requires:
+  capabilities: [iommu, gpu-discrete, nvme-dedicated]
+  features: [networking]
+
+claims:
+  gpu: exclusive
+  nvme: exclusive
+
+platform:
+  modules: [vfio, vfio_pci, vfio_iommu_type1]
+  kernel-cmdline: ["intel_iommu=on", "iommu=pt"]
+
+apt:
+  # firewalld: the wake path and both rules.sh hooks drive firewall-cmd, and
+  # without it no DNAT is ever installed - the VM wakes and nothing reaches
+  # it. It is declared HERE rather than in requires.features, where `firewall`
+  # is an OPTIONAL installer feature: a package declares its own dependencies,
+  # and coupling the console to the engine's feature list would break the
+  # standalone install on an ordinary Debian, which is what this package
+  # exists to allow.
+  - firewalld
+  - qemu-kvm
+  - libvirt-daemon-system
+  - libvirt-clients
+  - ovmf
+  # python3-jinja2: guest/domain.py renders the production libvirt domain from
+  # a Jinja template, and guest/autounattend.py, guest/apollo.py and
+  # guest/testdomain.py do the same for the Windows answer file, the Apollo
+  # config and the throwaway test domain. All four travel to the target with
+  # the package (packages.py copies the whole directory), so a standalone
+  # install on an ordinary Debian - which ships no jinja2 by default - could
+  # not generate its own domain without this. Declared here for the same
+  # reason as firewalld above: a package carries its own dependencies.
+  - python3-jinja2
+  # xorriso: guest/unattend_iso.py builds the unattended ISO by calling the
+  # `xorriso` BINARY directly (`xorriso -as mkisofs ...`, and `xorriso -indev`
+  # to verify what was staged). The `-as mkisofs` is xorriso's own emulation
+  # mode, NOT the separate mkisofs/genisoimage binary, so `xorriso` is the one
+  # and only package needed - and the Debian package is named `xorriso`
+  # (verified: dpkg -S /usr/bin/xorriso). Without it the activate phase gets
+  # all the way through fetching the payload before dying at image creation.
+  # Declared here for the same reason as firewalld and python3-jinja2 above:
+  # a package carries its own dependencies, so that a standalone install on
+  # an ordinary Debian works.
+  - xorriso
+  - virtiofsd
+  - bridge-utils
+  # python3-winrm: guest/winrm_exec.py imports it as `winrm` to run commands
+  # in the guest over WinRM with the ntlm transport (the guest only offers
+  # Negotiate, not Basic - measured 2026-08-22). host/guest-ready-watch.py
+  # depends on it too, to read the provisioning marker once the watch
+  # timer runs, and guest/testdomain.py's _marker_present() does the same
+  # for the same reason. Package name verified with `apt-cache show
+  # python3-winrm` (source: pywinrm). Declared here for the same reason as
+  # firewalld, python3-jinja2 and xorriso above: a package carries its own
+  # dependencies, so that a standalone install on an ordinary Debian works.
+  - python3-winrm
+
+wizard:
+  questions: wizard.yaml
+
+hooks:
+  resolve: hooks/resolve.py
+  install: hooks/install.py
+  activate: hooks/activate.py
