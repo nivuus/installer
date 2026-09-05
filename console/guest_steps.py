@@ -101,6 +101,38 @@ PAYLOAD_WITNESS = Path("agent") / "agent.exe"
 # which default_virsh forces.
 DOMAIN_UP_STATES = frozenset({"running", "idle", "paused", "pmsuspended"})
 
+# Where libvirt keeps a domain's PERSISTENT definition, for qemu:///system.
+# Measured on the production host 2026-09-05: `virsh uri` answers
+# qemu:///system (no LIBVIRT_DEFAULT_URI in the environment, no uri_default in
+# /etc/libvirt/libvirt.conf), and /etc/libvirt/qemu/Windows.xml is there,
+# 9188 bytes, 0600, carrying its <hostdev> elements. There is no session-scope
+# tree on this host (~/.config/libvirt/qemu does not exist).
+LIBVIRT_QEMU_CONFIG_DIR = "/etc/libvirt/qemu"
+
+
+def domain_definition_on_disk(config_dir: str | Path = LIBVIRT_QEMU_CONFIG_DIR,
+                              name: str = DOMAIN_NAME) -> bool:
+    """Is a persistent definition for `name` present on this host's disk?
+
+    THIS IS WHAT LETS A DEAD DAEMON STOP BEING AN ALIBI. Every other predicate
+    in this module reads the domain THROUGH libvirtd, so an unreachable
+    libvirtd makes them all answer "no" - and for most of them that is right,
+    because they ask "is this already done", where an unknown answer is
+    correctly not a "yes". refuse_implicit_wipe() asks "is there something to
+    lose", and there a dead informant must not read as "nothing to lose".
+
+    A definition does not need the daemon to exist: it is a file. So the
+    question "has a console ever been defined on this host" is answerable
+    while libvirtd is down, and that is exactly the question the guard needs.
+
+    EXACT NAME, never a prefix match. libvirt leaves siblings next to the real
+    file - `Windows.xml.backup-20251018-095837` is on the production host
+    right now - and a prefix test would read a backup as a definition. It
+    would err on the safe side here, but it would also refuse forever on a
+    host where the domain was properly undefined, which is a different bug.
+    """
+    return (Path(config_dir) / f"{name}.xml").is_file()
+
 # --- what actually identifies the domain: its hostdevs' HOST pci addresses -#
 # Matches the host address libvirt keeps verbatim inside <hostdev><source>
 # (measured on the running production domain, 2026-08-28: `virsh dumpxml
@@ -920,7 +952,8 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
                qemu_owner: Callable[[], tuple[int, int]] | None = None,
                chown: Callable[[str, int, int], None] | None = None,
                chmod: Callable[[str, int], None] | None = None,
-               sleep: Callable[[float], None] | None = None
+               sleep: Callable[[float], None] | None = None,
+               definition_on_disk: Callable[[], bool] | None = None
                ) -> list[Step]:
     """The five steps, in order, for this host's answers. Runs nothing.
 
@@ -939,6 +972,11 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
     chown = chown or os.chown
     chmod = chmod or os.chmod
     sleep = sleep or time.sleep
+    # Injectable like every other reader here, and for the same reason: the
+    # real one reads /etc/libvirt/qemu, so a test suite that did not replace
+    # it would conclude from whatever VMs happen to exist on the machine
+    # running the tests.
+    definition_on_disk = definition_on_disk or domain_definition_on_disk
     python = python or sys.executable or "python3"
 
     secrets = {key: _secret(answers, key) for key in SECRET_FILES}
@@ -1338,16 +1376,62 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         the single behavioural difference from the first cut, and it is the
         difference between a guard that mords and one that does not.
 
-        WHAT THIS STILL CANNOT DO. An unreachable libvirtd yields no XML and
-        therefore no refusal: that is the one direction this cannot fix -
-        it is the same limit every other predicate in this module carries,
-        and it is named here rather than hidden.
+        AN UNREACHABLE libvirtd IS NO LONGER AN ALIBI EITHER. The first cut
+        returned silently whenever defined_xml() answered None, on the
+        reasoning that a dead daemon proves nothing - true of the DAEMON,
+        false of the QUESTION. A domain's persistent definition is a FILE,
+        /etc/libvirt/qemu/<name>.xml, and it is there whether or not anything
+        is running to serve it (measured on the production host 2026-09-05,
+        see LIBVIRT_QEMU_CONFIG_DIR). So the doubt is settled by a fact, not
+        by a policy: a definition on disk with no daemon to read it means a
+        console IS there and we have merely lost the ability to look at it -
+        refuse. No definition at all means a plausibly fresh machine with
+        nothing to lose - pass, with the explicit-mode requirement unchanged.
+        That is what keeps this from blocking a first install on a host where
+        libvirt is not up yet, without letting a dead informant wave a wipe
+        through.
+
+        WHAT THIS STILL CANNOT DO, and it is named here rather than hidden -
+        the previous version's comment described the vfio trap and then walked
+        into it, so the limits of this one are worth stating exactly:
+
+          * It reads the SYSTEM scope only. A domain defined under
+            qemu:///session (~/.config/libvirt/qemu) is invisible to
+            domain_definition_on_disk(), so on a host driven that way a dead
+            daemon would once again let an implicit wipe through. This host is
+            qemu:///system and has no session tree at all; a host that is not
+            must pass its own `definition_on_disk`.
+          * It proves EXISTENCE, never IDENTITY. With the daemon down there is
+            no XML, so nothing says which disk that definition passes through
+            - the refusal is deliberately coarser in this branch, and it can
+            refuse a wipe of a disk that the defined console never used.
+            Refusing too much here costs an operator one explicit answer;
+            refusing too little costs the games partition.
+          * It cannot see a console that was installed and then UNDEFINED. The
+            disk would still be full and the file gone. Nothing host-side
+            survives that, and no guard in this module can.
         """
         if disk_mode_explicit or disk_mode != "wipe":
             return
         xml = defined_xml()
         if xml is None:
-            return
+            if not definition_on_disk():
+                return          # no daemon AND no definition: nothing to lose
+            raise GuestBuildError(
+                f"libvirt cannot be reached, but a persistent domain "
+                f"definition for '{DOMAIN_NAME}' is present on this host "
+                f"({LIBVIRT_QEMU_CONFIG_DIR}/{DOMAIN_NAME}.xml). A console "
+                "has been defined here; only the ability to read it has been "
+                "lost, and with libvirtd down there is no XML to say which "
+                "disk it uses - so this cannot even check whether "
+                f"{disk} is that disk. No --disk-mode was given, and the "
+                "default is 'wipe', which RECREATES THE WHOLE PARTITION "
+                "TABLE and would destroy the games partition D: along with "
+                "C:. Start libvirtd so this can be checked properly, or, if "
+                "you have confirmed which disk this is, say the mode in as "
+                "many words: '--disk-mode rebuild --target-disk-verified' to "
+                "keep the games partition, '--disk-mode wipe' to erase the "
+                "whole disk.")
         # NOT domain_matches_disk(): it folds "different disk" and "cannot
         # tell" into one False, and those are OPPOSITE answers to the
         # question asked here. See its docstring, and disk_pci_identity's.
