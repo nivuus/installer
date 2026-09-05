@@ -11,10 +11,22 @@
 # qu'en éditant le fichier de réponses à la main : un garde qui refuse en
 # nommant une sortie inaccessible n'enseigne qu'à le contourner.
 #
-# PAS DE DÉFAUT, délibérément. Un défaut n'est pas une phrase : « wipe » par
-# défaut rendrait la réponse explicite au sens de _disk_mode(), et ferait
-# donc taire le garde pour tout le monde — le défaut dirait, à la place de
-# l'opérateur, exactement ce que le garde exige qu'il dise lui-même.
+# PAS DE DÉFAUT, délibérément, et les DEUX valeurs ont été écartées pour des
+# raisons différentes — c'est un cas où le réglage sûr est l'absence de
+# réglage, et ça ne se devine pas :
+#
+#   « wipe » par défaut : `guest_steps._disk_mode()` traite TOUTE clé présente
+#   comme explicitement demandée. Un défaut aurait donc rendu la réponse
+#   « explicite » pour tout le monde et fait taire `refuse_implicit_wipe()`
+#   partout — le défaut aurait dit, à la place de l'opérateur, exactement ce
+#   que le garde exige qu'il dise lui-même. Un défaut n'est pas une phrase.
+#
+#   « rebuild » par défaut : injouable. Le gabarit `autounattend.xml.j2`
+#   n'émet qu'un `ModifyPartition` dans ce mode — il reformate une partition
+#   système déjà en place et ne sait pas installer sur un disque vierge, qui
+#   est précisément le cas nominal du wizard.
+#
+# Reste donc : la question est requise, et l'opérateur répond.
 - key: disk_mode
   type: choix
   label: >-

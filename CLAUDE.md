@@ -467,6 +467,28 @@ an erasing ISO and re-validates its own fingerprint. (3) **Every guard needs at
 least one test driving the REAL resolver**, not only the double that answers
 correctly; keep the double for the nominal case, never as the only path.
 
+**AND A DEAD INFORMANT IS NOT AN ALIBI — settle the doubt with a fact, not a
+policy (2026-09-05).** The same guard used to return silently whenever
+`defined_xml()` answered `None`, reasoning that an unreachable libvirtd proves
+nothing. True of the *daemon*, false of the *question*: a domain's persistent
+definition is a **file**, `/etc/libvirt/qemu/<name>.xml`, present whether or not
+anything is running to serve it (measured: `virsh uri` → `qemu:///system`, no
+`LIBVIRT_DEFAULT_URI`, no `uri_default`, no session tree; `Windows.xml` there at
+9188 B). So the choice was never binary between "refuse on a dead daemon" and
+"don't block a fresh install": **daemon mute + definition on disk → refuse**
+(a console is there, only the ability to read it is lost); **daemon mute + no
+definition → pass** (plausibly fresh machine). Match the name **exactly** — libvirt
+leaves `Windows.xml.backup-*` next to the real file, and a prefix test would
+read a backup as a definition. Three limits are now written **in the docstring**,
+which is what the previous version lacked: system scope only (a
+`qemu:///session` host must inject its own reader); it proves EXISTENCE, never
+IDENTITY (no daemon ⇒ no XML ⇒ it can refuse a disk the defined console never
+used — one explicit answer against a lost games partition); and a console
+installed then `undefine`d is invisible to it. Corollary for tests:
+`definition_on_disk` is injected everywhere as "absent", or the suite would
+conclude from whatever VMs exist on the machine running it — and would go red on
+the reference host itself.
+
 **A guard whose printed remedy is unreachable teaches people to bypass it
 (2026-09-05).** The same refusal told operators to answer `--disk-mode rebuild
 --target-disk-verified`, while `console/wizard.yaml` collected **neither** key

@@ -860,6 +860,40 @@ Les tests éprouvent désormais le **résolveur réel** rendant `None`, pas
 seulement le double qui répond juste. Le double reste pour le cas nominal — ce
 n'est pas lui le fautif, c'est qu'il ait été le seul.
 
+**Et un `libvirtd` injoignable n'est plus un alibi non plus.** La première
+version se taisait dès que `defined_xml()` rendait `None` — « un démon mort ne
+prouve rien ». C'est vrai du *démon*, faux de la *question* : une définition de
+domaine est un **fichier**, `/etc/libvirt/qemu/<nom>.xml`, qui existe que le
+démon tourne ou non. Mesuré le 2026-09-05 : `virsh uri` rend `qemu:///system`
+(ni `LIBVIRT_DEFAULT_URI`, ni `uri_default`), `/etc/libvirt/qemu/Windows.xml`
+est là (9188 octets, 0600, avec ses `<hostdev>`), et il n'y a aucun périmètre
+session sur cet hôte. L'arbitrage n'était donc pas binaire :
+
+| état | lecture | décision |
+|---|---|---|
+| démon muet **+** définition sur disque | une console est là, on ne sait plus la lire | **refuse** |
+| démon muet **+** aucune définition | machine plausiblement neuve | passe |
+
+Ça applique « en cas de doute, refuser » **sans** bloquer une installation
+neuve sur une machine où libvirt n'est pas encore debout : le doute est levé
+par un fait, pas par une politique. Vérifié sur l'hôte, avec le vrai lecteur
+de disque et un `virsh` qui échoue.
+
+Trois limites sont désormais **écrites dans le docstring** — c'est ce qui
+manquait à la version précédente, dont le commentaire nommait le piège vfio
+avant de s'y jeter : (1) seul le périmètre **système** est lu, un hôte en
+`qemu:///session` doit fournir son propre lecteur ; (2) cette branche prouve
+l'**existence**, jamais l'**identité** — sans démon il n'y a pas de XML, donc
+elle peut refuser l'effacement d'un disque que la console définie n'utilisait
+pas, ce qui coûte une réponse explicite là où l'inverse coûte la partition de
+jeux ; (3) une console installée puis **`undefine`** est invisible — le disque
+reste plein, le fichier a disparu, et aucun garde de ce module ne peut voir ça.
+
+Corollaire pour les tests : `definition_on_disk` est **injecté partout**, à
+« absente ». Sans ça la suite aurait conclu de l'état libvirt de la machine qui
+l'exécute — et serait devenue rouge sur l'hôte de référence lui-même, où une VM
+`Windows` est définie.
+
 #### Obstacle 2 — aucun médium Windows sur l'hôte
 
 `/var/lib/nivuus/guest/` ne contient que `payload/retro/wheels/` (4,4 Mo). Il
@@ -998,7 +1032,7 @@ l'épinglage `WINGET_VERSION = "v1.29.290"` du dépôt.
 
 # Dettes de CI — le contrôle plutôt que le code
 
-Les quatre dettes qui suivent ne décrivent pas un manque de l'invité mais un
+Les cinq dettes qui suivent ne décrivent pas un manque de l'invité mais un
 défaut des **contrôles** qui gardent ce dépôt. Elles sont ici, et pas dans un
 plan, parce qu'elles ont été constatées en réparant la CI de la PR #8 le
 2026-09-05 et qu'elles se seraient sinon redécouvertes à la PR suivante.
@@ -1133,6 +1167,38 @@ la PR #7 et l'aurait empêchée de se fermer d'elle-même à la fusion.
 
 **En attendant :** aucune réécriture d'historique n'a été faite. `policy` reste
 rouge sur cette seule étape.
+
+---
+
+## CI-5 — `test_webapp_models` ne peut pas tourner sur cet hôte, et il masque ce qui le suit
+
+**Constaté le 2026-09-05, en jouant `make test-packages`.**
+
+```
+--- test_webapp_models
+ModuleNotFoundError: No module named 'pydantic'
+make: *** [Makefile:81: test-packages] Error 1
+```
+
+Mesuré : `pydantic` n'existe que sous
+`/usr/local/lib/python3.11/dist-packages/`, et **`/usr/bin/python3.11` n'existe
+plus** — la base est en 3.13.5. Le paquet appartient donc à un interpréteur
+disparu, et la suite est structurellement injouable ici sans un venv dédié.
+
+**Ce n'est pas la dette ; la dette est ce que ça cache.** La boucle du
+`Makefile` fait `|| exit 1`, donc l'échec **arrête l'agrégateur**, et les deux
+suites qui viennent après — `test_common_hardware` et
+`test_install_engine_features` — ne sont jamais jouées. Un échec d'environnement
+sur une suite se lit alors comme un silence sur les suivantes, ce qui est
+exactement la classe de faux témoin que ce fichier documente ailleurs.
+
+**Contournement appliqué ce jour :** les deux suites suivantes ont été jouées à
+la main, vertes toutes les deux. Ce n'est pas une réparation.
+
+**Remèdes possibles**, aucun tranché : construire le venv pydantic que
+`iso-build/hook 0500-nivuus-venv` sait déjà faire et pointer `PYTHON=` dessus ;
+ou faire tomber la boucle en collectant les échecs plutôt qu'en sortant au
+premier, de sorte qu'une suite injouable ne masque plus les autres.
 
 ---
 
