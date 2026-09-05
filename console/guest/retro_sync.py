@@ -483,7 +483,7 @@ def identite_invitee(guest) -> str | None:
     code, rapport = guest.retro(["identite"])
     if code != 0:
         return None
-    lignes = [l.strip() for l in rapport.splitlines() if l.strip()]
+    lignes = [ligne.strip() for ligne in rapport.splitlines() if ligne.strip()]
     return lignes[0] if lignes else None
 
 

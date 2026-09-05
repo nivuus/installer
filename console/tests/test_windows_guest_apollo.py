@@ -167,7 +167,7 @@ check("a space in AdminPassword is still accepted",
 # charge AUCUNE appli, et fabrique une entree « Desktop (fallback) » sans
 # virtual-display — l appliance streame alors la VGA emulee en x264 logiciel.
 # Mesure sur l invite le 2026-08-25.
-import json as _json
+import json as _json  # noqa: E402 - deliberately here, under the measurement it belongs to
 _apps = _json.loads(apollo.render_apps(apollo.ApolloParams()))
 check("apps.json declare la version 2", _apps.get("version"), 2)
 check("aucune cle racine inconnue (forme validee sur le binaire reel)",
@@ -186,7 +186,8 @@ check("les uuid sont stables",
 # <hostname>Nivuus</hostname>.
 _conf = apollo.render_conf()
 check("sunshine.conf nomme l hote pour les clients",
-      any(l.strip() == "sunshine_name = Nivuus" for l in _conf.splitlines()), True)
+      any(ligne.strip() == "sunshine_name = Nivuus"
+          for ligne in _conf.splitlines()), True)
 
 # min_log_level est la SEULE chose qui rende la dette C1 observable. Aucune
 # manette ne vibre nulle part, et le maillon qui appartient a ce depot -
@@ -201,7 +202,8 @@ check("sunshine.conf nomme l hote pour les clients",
 # raisonnement, et dont celle-ci n'en portait aucun, se relit comme un
 # reliquat de mise au point.
 _lignes = _conf.splitlines()
-_idx = [i for i, l in enumerate(_lignes) if l.strip().startswith("min_log_level")]
+_idx = [i for i, ligne in enumerate(_lignes)
+        if ligne.strip().startswith("min_log_level")]
 check("sunshine.conf pose un seul min_log_level", len(_idx), 1)
 if _idx:
     check("le journal Apollo est au niveau info",
@@ -254,7 +256,8 @@ print("OK")
 # defaut d'Apollo : une cle retiree ne laisserait aucun symptome visible tant
 # qu'un seul joueur joue avec toujours la meme manette, et les quatre ports
 # deviendraient imprevisibles le jour ou quelqu'un en branche une seconde.
-_idx = [i for i, l in enumerate(_lignes) if l.strip().startswith("gamepad =")]
+_idx = [i for i, ligne in enumerate(_lignes)
+        if ligne.strip().startswith("gamepad =")]
 check("sunshine.conf pose un seul type de manette", len(_idx), 1)
 if _idx:
     check("le type de manette virtuelle est epingle a x360",

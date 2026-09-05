@@ -438,7 +438,7 @@ check("hook sees every pinned CPU", pinned, set(range(16)))
 # passthrough ne porte aucun filet de permissions, donc ce qui est expose l est
 # sans filtre. Exposer /media/data en entier mettait 17 To a portee d un incident
 # dans un invite ouvert au streaming.
-import re as _re
+import re as _re  # noqa: E402 - deliberately here, under the measurement it belongs to
 _srcs = _re.findall(r"<source dir='([^']+)'/>", xml_text)
 check("quatre partages", len(_srcs), 4)
 check("aucun partage n expose une racine",

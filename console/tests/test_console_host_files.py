@@ -60,8 +60,8 @@ for rel in removed:
 for dirpath, _dirnames, filenames in os.walk(hooks_dir):
     for name in filenames:
         path = os.path.join(dirpath, name)
-        body = [l for l in open(path).read().splitlines()
-                if l.strip() and not l.strip().startswith("#")]
+        body = [ligne for ligne in open(path).read().splitlines()
+                if ligne.strip() and not ligne.strip().startswith("#")]
         rel = os.path.relpath(path, ROOT)
         check(f"{rel} does something", bool(body))
 

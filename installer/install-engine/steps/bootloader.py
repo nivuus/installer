@@ -66,7 +66,7 @@ def install_bootloader(config: dict, target: str, fs: dict, emit,
     code = chroot_stream(
         target,
         ["apt-get", "install", "-y", "--no-install-recommends", *packages],
-        on_line=lambda l: emit.info("bootloader", 74, l[:120]),
+        on_line=lambda line: emit.info("bootloader", 74, line[:120]),
     )
     if code != 0:
         raise StepError("failed to install kernel/grub packages")

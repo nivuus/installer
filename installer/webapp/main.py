@@ -13,9 +13,7 @@ import os
 import sys
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import (
-    HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse,
-)
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 # Make `common` importable (installer/ root).

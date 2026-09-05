@@ -4,3 +4,12 @@ pydantic
 pywinrm
 pyyaml
 uvicorn
+
+# ruff is pinned HERE, and this is the only place that can pin it. The shared
+# workflow (nivuus/.github ci-python.yml) ends its dependency step with a bare
+# `pip install ruff pytest`, which resolves to whatever was published that
+# morning; but it installs THIS file first, so a version already satisfied is
+# the version the control runs with. Unpinned, the rule set moved under the
+# repository and `python / Python checks` was never green once - see ruff.toml
+# for the measurement and for the selection this code is written against.
+ruff==0.16.6

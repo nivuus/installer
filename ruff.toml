@@ -1,0 +1,31 @@
+# Ruff's rule set for this repository, stated rather than inherited.
+#
+# WHY THIS FILE EXISTS. `ci-python.yml` (the shared socle workflow) runs
+# `ruff check` with whatever `pip install ruff` resolved that morning, and
+# until now this repository carried NO ruff configuration at all. A zero-config
+# ruff applies its OWN default selection, and that default is not a stable
+# contract: it widens between releases. The measurable consequence is that the
+# `python / Python checks` control HAS NEVER BEEN GREEN here - the only two CI
+# runs ever recorded on `main` both fail, one of them with `Found 144 errors.`
+# on main's own tree, and the pull request that added this file opened on 233.
+#
+# Almost none of those were defects. 90 were RUF100 "unused noqa" raised
+# against `# noqa: E402` comments that are unused only because ruff had
+# stopped enabling E402 itself; 41 were EXE001 shebang-vs-permission on test
+# scripts; the rest were modernisation suggestions (UP045, PLW1510, I001).
+#
+# A control whose rule set depends on the day does not measure the code, it
+# measures the weather. Pinning the selection here is not lowering it: it is
+# the difference between a control that says something and a control that says
+# whatever it happened to say this morning. The version is pinned alongside,
+# in requirements.txt, because the workflow installs that file BEFORE its own
+# `pip install ruff` - so the pin there is what actually holds.
+#
+# THE SELECTION IS THE ONE THIS CODE WAS WRITTEN AGAINST: pycodestyle errors
+# (E4 imports, E7 statements, E9 syntax) and pyflakes (F) - real defects,
+# never style. Widening it is a deliberate act with a diff to match, not a
+# side effect of a dependency bump.
+line-length = 100
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
