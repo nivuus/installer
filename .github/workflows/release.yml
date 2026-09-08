@@ -19,3 +19,9 @@ jobs:
       # plan exists to prevent. See console/tests/fixtures/ci-answers.json.
       package-dir: console
       answers-file: console/tests/fixtures/ci-answers.json
+      # installer itself has no root nivuus-package.yaml/package.json/
+      # pyproject.toml, so auto-detection stamps nothing: without this,
+      # every published archive ships console/nivuus-package.yaml still
+      # reading 0.0.0, even though the spec has console's release ride
+      # inside exactly this archive.
+      version-files: "console/nivuus-package.yaml"
