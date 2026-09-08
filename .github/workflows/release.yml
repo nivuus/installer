@@ -1,0 +1,21 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    uses: nivuus/.github/.github/workflows/release.yml@main
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    with:
+      # installer is not itself a package - it CONTAINS the console package.
+      # Without package-dir the release would carry no idempotence proof at
+      # all; without answers-file the proof would fail on the first missing
+      # wizard answer (windows_iso), which is exactly the class of red this
+      # plan exists to prevent. See console/tests/fixtures/ci-answers.json.
+      package-dir: console
+      answers-file: console/tests/fixtures/ci-answers.json
