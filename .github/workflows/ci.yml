@@ -63,5 +63,10 @@ jobs:
       # console/guest/winrm_exec.py imports the `winrm` module it provides.
       - name: Install dependencies
         run: python -m pip install --upgrade pip && pip install -r requirements.txt
+      # CONSOLE_SUITES=0: console's suites need real hardware (a discrete
+      # GPU, a dedicated NVMe) and fail on a runner for a reason unrelated
+      # to the code under test - see the comment in installer/Makefile.
+      # The engine suites, including the idempotence harness this job was
+      # added to cover, all run here.
       - name: Run the package engine suites
-        run: make -C installer test-packages
+        run: make -C installer test-packages CONSOLE_SUITES=0

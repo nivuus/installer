@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Fixture install hook that rewrites its output, so replaying changes nothing."""
+
 import argparse
 import json
 import os

@@ -36,6 +36,7 @@ judges every added line of a non-test file.
 Run: python3 scripts/idempotence_harness.py --package <dir> \
     [--prereq <dir>]... [--ignore GLOB]...
 """
+
 from __future__ import annotations
 
 import argparse
@@ -113,8 +114,7 @@ def _load_prereq_manifests(prereqs) -> tuple:
     return manifests, ""
 
 
-def check_package(package_dir: str, answers=None, hw=None, ignore=(),
-                   prereqs=()) -> tuple:
+def check_package(package_dir: str, answers=None, hw=None, ignore=(), prereqs=()) -> tuple:
     """Return (exit status, report) for one package directory.
 
     `prereqs` are directories installed ONCE into the same scratch root
@@ -150,8 +150,9 @@ def check_package(package_dir: str, answers=None, hw=None, ignore=(),
             try:
                 run_install(prereq, hw, answers, root)
             except HookError as exc:
-                return 1, (f"{manifest.name}: prerequisite '{prereq.name}' "
-                           f"failed to install: {exc}")
+                return 1, (
+                    f"{manifest.name}: prerequisite '{prereq.name}' failed to install: {exc}"
+                )
 
         run_install(manifest, hw, answers, root)
         first = snapshot(root, ignore)
@@ -162,8 +163,7 @@ def check_package(package_dir: str, answers=None, hw=None, ignore=(),
 
     if first == second:
         shutil.rmtree(root, ignore_errors=True)
-        return 0, (f"{manifest.name}: install is idempotent "
-                   f"({len(first)} identical entries)")
+        return 0, (f"{manifest.name}: install is idempotent ({len(first)} identical entries)")
     return 1, _report(manifest.name, first, second, root)
 
 
@@ -183,17 +183,19 @@ def _load_json_arg(path: str, what: str) -> tuple:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--package", required=True,
-                        help="directory holding nivuus-package.yaml")
-    parser.add_argument("--prereq", action="append", default=[],
-                        help="directory holding a prerequisite package, "
-                             "installed once before --package; repeatable")
-    parser.add_argument("--answers", default="",
-                        help="JSON file holding the wizard answers")
-    parser.add_argument("--hw", default="",
-                        help="JSON file holding the hardware inventory")
-    parser.add_argument("--ignore", action="append", default=[],
-                        help="relative glob to ignore, repeatable")
+    parser.add_argument("--package", required=True, help="directory holding nivuus-package.yaml")
+    parser.add_argument(
+        "--prereq",
+        action="append",
+        default=[],
+        help="directory holding a prerequisite package, "
+        "installed once before --package; repeatable",
+    )
+    parser.add_argument("--answers", default="", help="JSON file holding the wizard answers")
+    parser.add_argument("--hw", default="", help="JSON file holding the hardware inventory")
+    parser.add_argument(
+        "--ignore", action="append", default=[], help="relative glob to ignore, repeatable"
+    )
     args = parser.parse_args(argv)
 
     answers: dict = {}
@@ -210,8 +212,9 @@ def main(argv=None) -> int:
             print(error)
             return 2
 
-    status, report = check_package(args.package, answers, hw,
-                                    tuple(args.ignore), tuple(args.prereq))
+    status, report = check_package(
+        args.package, answers, hw, tuple(args.ignore), tuple(args.prereq)
+    )
     print(report)
     return status
 

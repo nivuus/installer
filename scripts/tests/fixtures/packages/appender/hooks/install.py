@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Fixture install hook that APPENDS, so replaying it corrupts its own output."""
+
 import argparse
 import json
 import os
