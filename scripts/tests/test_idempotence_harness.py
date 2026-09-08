@@ -48,7 +48,32 @@ check("the report says there was nothing to prove",
 status, report = check_package(str(FIXTURES / "does-not-exist"))
 check("a missing manifest exits 2", status, 2)
 
-# --- the snapshot itself must distinguish content, mode and kind ----------- #
+# --- a package needing a prerequisite fails without --prereq, and succeeds
+# once install_order() has installed it first --------------------------- #
+status, report = check_package(str(FIXTURES / "dependent"))
+check("a package needing its prerequisite fails without --prereq", status, 1)
+
+status, report = check_package(str(FIXTURES / "dependent"),
+                                prereqs=(str(FIXTURES / "idempotent"),))
+check("the same package succeeds once its prerequisite is installed",
+      status, 0)
+check("the report names the dependent package", "dependent" in report, True)
+
+# install_order(), not argument order, decides the sequence: 'dependent' is
+# listed BEFORE its own prerequisite 'idempotent' here, and the two-hop chain
+# 'idempotent' -> 'dependent' -> 'grandchild' must still be installed in the
+# right order for 'grandchild' (the package under test) to succeed. If a
+# naive implementation installed prereqs in argument order instead, this
+# would fail with "prerequisite 'dependent' failed to install".
+status, report = check_package(
+    str(FIXTURES / "grandchild"),
+    prereqs=(str(FIXTURES / "dependent"), str(FIXTURES / "idempotent")))
+check("prerequisite order comes from install_order(), not argument order",
+      status, 0)
+check("the report names the grandchild package", "grandchild" in report, True)
+
+# --- the snapshot itself must distinguish content, mode, kind, and
+# additions/removals --------------------------------------------------- #
 import os  # noqa: E402
 import tempfile  # noqa: E402
 
@@ -73,10 +98,67 @@ with tempfile.TemporaryDirectory() as tmp:
           False)
 
 with tempfile.TemporaryDirectory() as tmp:
+    path = os.path.join(tmp, "f")
+    with open(path, "w") as handle:
+        handle.write("a")
+    first = snapshot(tmp, ())
+    os.remove(path)
+    os.symlink("elsewhere", path)
+    check("the snapshot notices a file replaced by a symlink",
+          snapshot(tmp, ()) == first, False)
+
+with tempfile.TemporaryDirectory() as tmp:
+    path = os.path.join(tmp, "f")
+    with open(path, "w") as handle:
+        handle.write("a")
+    first = snapshot(tmp, ())
+    os.remove(path)
+    os.mkdir(path)
+    check("the snapshot notices a file replaced by a directory",
+          snapshot(tmp, ()) == first, False)
+
+with tempfile.TemporaryDirectory() as tmp:
+    first = snapshot(tmp, ())
+    with open(os.path.join(tmp, "new"), "w") as handle:
+        handle.write("a")
+    check("the snapshot notices an added entry", snapshot(tmp, ()) == first,
+          False)
+
+with tempfile.TemporaryDirectory() as tmp:
+    path = os.path.join(tmp, "f")
+    with open(path, "w") as handle:
+        handle.write("a")
+    first = snapshot(tmp, ())
+    os.remove(path)
+    check("the snapshot notices a removed entry", snapshot(tmp, ()) == first,
+          False)
+
+with tempfile.TemporaryDirectory() as tmp:
     with open(os.path.join(tmp, "f"), "w") as handle:
         handle.write("a")
     check("an ignored path is left out of the snapshot",
           snapshot(tmp, ("f",)), {})
+
+# --- malformed --answers/--hw exit 2, not a raw traceback ------------------ #
+from idempotence_harness import main as harness_main  # noqa: E402
+
+with tempfile.TemporaryDirectory() as tmp:
+    bad = os.path.join(tmp, "bad.json")
+    with open(bad, "w") as handle:
+        handle.write("{not valid json")
+
+    status = harness_main(["--package", str(FIXTURES / "idempotent"),
+                            "--answers", bad])
+    check("a malformed --answers file exits 2, not a traceback", status, 2)
+
+    status = harness_main(["--package", str(FIXTURES / "idempotent"),
+                            "--hw", bad])
+    check("a malformed --hw file exits 2, not a traceback", status, 2)
+
+    missing = os.path.join(tmp, "does-not-exist.json")
+    status = harness_main(["--package", str(FIXTURES / "idempotent"),
+                            "--answers", missing])
+    check("an unreadable --answers file exits 2, not a traceback", status, 2)
 
 if failures:
     print(f"FAIL ({len(failures)})")

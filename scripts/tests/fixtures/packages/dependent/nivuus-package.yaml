@@ -1,0 +1,11 @@
+apiVersion: nivuus.dev/v1
+name: dependent
+version: 1.0.0
+label: "Fixture : hook install qui exige 'idempotent' au prealable"
+tier: userspace
+
+requires:
+  packages: [idempotent]
+
+hooks:
+  install: hooks/install.py
