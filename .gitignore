@@ -41,3 +41,7 @@ ha.conf
 
 # Superpowers SDD scratch (ledgers, briefs, review packages)
 .superpowers/
+
+# ── Worktrees ──────────────────────────────────────────────────────────────
+# Isolated workspaces created by git worktree add; never part of the repo.
+.worktrees/
