@@ -75,6 +75,14 @@ test-vm:
 # test_windows_guest_production_domain.py, which calls main() end-to-end rather
 # than stubbing it out - see CLAUDE.md, Installer Architecture, "domain.py is
 # REPAIRED", for how that suite closed the gap.
+# console's suites are HARDWARE-BOUND and cannot run on a CI runner: measured
+# 2026-09-08, test_console_resolve fails 10 assertions there because the
+# machine has no discrete GPU and no dedicated NVMe, so resolve refuses for a
+# different reason than the test expects ("impossible de lire les identifiants
+# PCI du GPU 01:00.0"). They had never run anywhere but this workstation until
+# the CI job was added, which is how the dependency surfaced. Set
+# CONSOLE_SUITES=0 to skip them; making them hermetic is follow-up work.
+CONSOLE_SUITES ?= 1
 PYTHON ?= python3
 
 test-packages: test-scripts
@@ -91,7 +99,11 @@ test-packages: test-scripts
 	    echo "--- $$t"; \
 	    $(PYTHON) $(dir $(INSTALLER_DIR))scripts/tests/$$t.py || exit 1; \
 	done
-	@$(MAKE) -C $(dir $(INSTALLER_DIR))console test PYTHON=$(PYTHON)
+	@if [ "$(CONSOLE_SUITES)" = "1" ]; then \
+	    $(MAKE) -C $(dir $(INSTALLER_DIR))console test PYTHON=$(PYTHON); \
+	else \
+	    echo "--- console suites skipped (CONSOLE_SUITES=0): hardware-bound"; \
+	fi
 
 # Run the host-maintenance script suites (no root, no hardware, no Python).
 #

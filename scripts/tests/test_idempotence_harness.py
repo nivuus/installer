@@ -9,6 +9,7 @@ than only checking that it runs.
 
 Run: python3 scripts/tests/test_idempotence_harness.py
 """
+
 import pathlib
 import sys
 
@@ -34,15 +35,13 @@ check("the report names the package", "idempotent" in report, True)
 # --- a hook that appends is not -------------------------------------------- #
 status, report = check_package(str(FIXTURES / "appender"))
 check("an appending hook is refused", status, 1)
-check("the report names the offending path",
-      "etc/nivuus-appender.conf" in report, True)
+check("the report names the offending path", "etc/nivuus-appender.conf" in report, True)
 check("the report says what changed", "changed" in report, True)
 
 # --- a package with no install hook proves nothing, and says so ------------ #
 status, report = check_package(str(FIXTURES / "refuser"))
 check("a package with no install hook is accepted", status, 0)
-check("the report says there was nothing to prove",
-      "no install hook" in report, True)
+check("the report says there was nothing to prove", "no install hook" in report, True)
 
 # --- an unreadable manifest is an error, not a pass ------------------------ #
 status, report = check_package(str(FIXTURES / "does-not-exist"))
@@ -53,10 +52,8 @@ check("a missing manifest exits 2", status, 2)
 status, report = check_package(str(FIXTURES / "dependent"))
 check("a package needing its prerequisite fails without --prereq", status, 1)
 
-status, report = check_package(str(FIXTURES / "dependent"),
-                                prereqs=(str(FIXTURES / "idempotent"),))
-check("the same package succeeds once its prerequisite is installed",
-      status, 0)
+status, report = check_package(str(FIXTURES / "dependent"), prereqs=(str(FIXTURES / "idempotent"),))
+check("the same package succeeds once its prerequisite is installed", status, 0)
 check("the report names the dependent package", "dependent" in report, True)
 
 # install_order(), not argument order, decides the sequence: 'dependent' is
@@ -67,9 +64,9 @@ check("the report names the dependent package", "dependent" in report, True)
 # would fail with "prerequisite 'dependent' failed to install".
 status, report = check_package(
     str(FIXTURES / "grandchild"),
-    prereqs=(str(FIXTURES / "dependent"), str(FIXTURES / "idempotent")))
-check("prerequisite order comes from install_order(), not argument order",
-      status, 0)
+    prereqs=(str(FIXTURES / "dependent"), str(FIXTURES / "idempotent")),
+)
+check("prerequisite order comes from install_order(), not argument order", status, 0)
 check("the report names the grandchild package", "grandchild" in report, True)
 
 # --- the snapshot itself must distinguish content, mode, kind, and
@@ -84,8 +81,7 @@ with tempfile.TemporaryDirectory() as tmp:
     first = snapshot(tmp, ())
     with open(path, "w") as handle:
         handle.write("b")
-    check("the snapshot notices a content change", snapshot(tmp, ()) == first,
-          False)
+    check("the snapshot notices a content change", snapshot(tmp, ()) == first, False)
 
 with tempfile.TemporaryDirectory() as tmp:
     path = os.path.join(tmp, "f")
@@ -94,8 +90,7 @@ with tempfile.TemporaryDirectory() as tmp:
     os.chmod(path, 0o600)
     first = snapshot(tmp, ())
     os.chmod(path, 0o644)
-    check("the snapshot notices a mode change", snapshot(tmp, ()) == first,
-          False)
+    check("the snapshot notices a mode change", snapshot(tmp, ()) == first, False)
 
 with tempfile.TemporaryDirectory() as tmp:
     path = os.path.join(tmp, "f")
@@ -104,8 +99,7 @@ with tempfile.TemporaryDirectory() as tmp:
     first = snapshot(tmp, ())
     os.remove(path)
     os.symlink("elsewhere", path)
-    check("the snapshot notices a file replaced by a symlink",
-          snapshot(tmp, ()) == first, False)
+    check("the snapshot notices a file replaced by a symlink", snapshot(tmp, ()) == first, False)
 
 with tempfile.TemporaryDirectory() as tmp:
     path = os.path.join(tmp, "f")
@@ -114,15 +108,13 @@ with tempfile.TemporaryDirectory() as tmp:
     first = snapshot(tmp, ())
     os.remove(path)
     os.mkdir(path)
-    check("the snapshot notices a file replaced by a directory",
-          snapshot(tmp, ()) == first, False)
+    check("the snapshot notices a file replaced by a directory", snapshot(tmp, ()) == first, False)
 
 with tempfile.TemporaryDirectory() as tmp:
     first = snapshot(tmp, ())
     with open(os.path.join(tmp, "new"), "w") as handle:
         handle.write("a")
-    check("the snapshot notices an added entry", snapshot(tmp, ()) == first,
-          False)
+    check("the snapshot notices an added entry", snapshot(tmp, ()) == first, False)
 
 with tempfile.TemporaryDirectory() as tmp:
     path = os.path.join(tmp, "f")
@@ -130,14 +122,12 @@ with tempfile.TemporaryDirectory() as tmp:
         handle.write("a")
     first = snapshot(tmp, ())
     os.remove(path)
-    check("the snapshot notices a removed entry", snapshot(tmp, ()) == first,
-          False)
+    check("the snapshot notices a removed entry", snapshot(tmp, ()) == first, False)
 
 with tempfile.TemporaryDirectory() as tmp:
     with open(os.path.join(tmp, "f"), "w") as handle:
         handle.write("a")
-    check("an ignored path is left out of the snapshot",
-          snapshot(tmp, ("f",)), {})
+    check("an ignored path is left out of the snapshot", snapshot(tmp, ("f",)), {})
 
 # --- malformed --answers/--hw exit 2, not a raw traceback ------------------ #
 from idempotence_harness import main as harness_main  # noqa: E402
@@ -147,17 +137,14 @@ with tempfile.TemporaryDirectory() as tmp:
     with open(bad, "w") as handle:
         handle.write("{not valid json")
 
-    status = harness_main(["--package", str(FIXTURES / "idempotent"),
-                            "--answers", bad])
+    status = harness_main(["--package", str(FIXTURES / "idempotent"), "--answers", bad])
     check("a malformed --answers file exits 2, not a traceback", status, 2)
 
-    status = harness_main(["--package", str(FIXTURES / "idempotent"),
-                            "--hw", bad])
+    status = harness_main(["--package", str(FIXTURES / "idempotent"), "--hw", bad])
     check("a malformed --hw file exits 2, not a traceback", status, 2)
 
     missing = os.path.join(tmp, "does-not-exist.json")
-    status = harness_main(["--package", str(FIXTURES / "idempotent"),
-                            "--answers", missing])
+    status = harness_main(["--package", str(FIXTURES / "idempotent"), "--answers", missing])
     check("an unreadable --answers file exits 2, not a traceback", status, 2)
 
 if failures:

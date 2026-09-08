@@ -5,6 +5,7 @@ Mirrors home-stock's real precondition on home-manager: a satellite package
 that writes into what its prerequisite created, and refuses rather than
 leaving an orphan when that prerequisite is missing.
 """
+
 import argparse
 import json
 import os
@@ -18,8 +19,9 @@ args = parser.parse_args()
 json.load(sys.stdin)
 precondition = os.path.join(args.root, "etc/nivuus-idempotent.conf")
 if not os.path.isfile(precondition):
-    print("dependent install: 'idempotent' has not run "
-          f"({precondition} is absent)", file=sys.stderr)
+    print(
+        f"dependent install: 'idempotent' has not run ({precondition} is absent)", file=sys.stderr
+    )
     sys.exit(1)
 
 target = os.path.join(args.root, "etc/nivuus-dependent.conf")

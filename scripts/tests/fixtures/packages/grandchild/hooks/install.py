@@ -5,6 +5,7 @@ Second link of a two-hop chain (idempotent -> dependent -> grandchild), used
 to prove that prerequisite ordering comes from install_order() and not from
 the order --prereq was given on the command line.
 """
+
 import argparse
 import json
 import os
@@ -18,8 +19,9 @@ args = parser.parse_args()
 json.load(sys.stdin)
 precondition = os.path.join(args.root, "etc/nivuus-dependent.conf")
 if not os.path.isfile(precondition):
-    print("grandchild install: 'dependent' has not run "
-          f"({precondition} is absent)", file=sys.stderr)
+    print(
+        f"grandchild install: 'dependent' has not run ({precondition} is absent)", file=sys.stderr
+    )
     sys.exit(1)
 
 target = os.path.join(args.root, "etc/nivuus-grandchild.conf")
