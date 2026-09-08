@@ -82,6 +82,7 @@ test-packages: test-scripts
 	          test_packages_discovery test_packages_conflicts \
 	          test_packages_dependencies \
 	          test_packages_wizard test_packages_runner \
+	          test_idempotence_harness \
 	          test_install_engine_bootloader test_install_engine_packages \
 	          test_packages_plan_order \
 	          test_webapp_models \

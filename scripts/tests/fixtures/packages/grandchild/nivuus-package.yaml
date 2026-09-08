@@ -1,0 +1,11 @@
+apiVersion: nivuus.dev/v1
+name: grandchild
+version: 1.0.0
+label: "Fixture : hook install qui exige 'dependent' au prealable"
+tier: userspace
+
+requires:
+  packages: [dependent]
+
+hooks:
+  install: hooks/install.py

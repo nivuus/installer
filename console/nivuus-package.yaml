@@ -1,6 +1,6 @@
 apiVersion: nivuus.dev/v1
 name: console
-version: 1.0.0
+version: 0.0.0
 label: "Console de jeu Windows"
 tier: platform
 
