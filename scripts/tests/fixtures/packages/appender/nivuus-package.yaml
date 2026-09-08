@@ -1,0 +1,8 @@
+apiVersion: nivuus.dev/v1
+name: appender
+version: 1.0.0
+label: "Fixture : hook install qui ajoute au lieu de réécrire"
+tier: userspace
+
+hooks:
+  install: hooks/install.py

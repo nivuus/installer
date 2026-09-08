@@ -1,0 +1,8 @@
+apiVersion: nivuus.dev/v1
+name: idempotent
+version: 1.0.0
+label: "Fixture : hook install rejouable"
+tier: userspace
+
+hooks:
+  install: hooks/install.py
