@@ -32,3 +32,25 @@ jobs:
       # Python only: CodeQL supports neither Bash nor Zsh, so the shell
       # scripts here are covered by shellcheck instead.
       languages: python
+  packages:
+    name: Package engine suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Same version as the socle's shared ci-python.yml lint job for
+          # this repository. Verified 2026-09-08: `make -C installer
+          # test-packages` is green (40 suites) under both 3.12.13 and the
+          # locally available 3.13.5 with requirements.txt installed.
+          python-version: "3.12"
+      # requirements.txt lists all six runtime dependencies these suites
+      # import (fastapi, jinja2, pydantic, pywinrm, pyyaml, uvicorn) and
+      # additionally pins ruff==0.16.6 for this repository's lint gate - see
+      # the comment in that file. Installing a subset (e.g. omitting
+      # pywinrm) leaves test_windows_guest_winrm_exec red, since
+      # console/guest/winrm_exec.py imports the `winrm` module it provides.
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+      - name: Run the package engine suites
+        run: make -C installer test-packages
