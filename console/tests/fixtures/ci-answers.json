@@ -8,5 +8,5 @@
   "windows_iso": "tests/fixtures/ci-fake-windows.iso",
   "ltsc_key": "NIVUUS-CI-FIXTURE-NOT-A-REAL-PRODUCT-KEY",
   "apollo_password": "NIVUUS-CI-FIXTURE-NOT-A-REAL-PASSWORD",
-  "guest_workdir": "/var/lib/nivuus/guest"
+  "guest_workdir": "/NIVUUS-CI-FIXTURE/not-a-real-guest-workdir"
 }
