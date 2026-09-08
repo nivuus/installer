@@ -1,0 +1,10 @@
+NIVUUS-CI-FIXTURE - THIS IS NOT A WINDOWS MEDIUM.
+
+This file exists only so the `package / Package contract` CI gate
+(nivuus/.github ci-package.yml, via scripts/check-idempotence.sh and
+console/hooks/install.py) has something to `stat()` and copy when it proves
+the console install hook is idempotent. It is referenced by the
+`windows_iso` answer in console/tests/fixtures/ci-answers.json.
+
+Do not point a real install at this file - it contains no bootable content
+and installing from it will fail immediately.

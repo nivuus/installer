@@ -1,0 +1,12 @@
+{
+  "_comment": "NIVUUS-CI-FIXTURE - synthetic wizard answers, not real credentials, paths or keys. Exists only so the package/Package contract CI gate (nivuus/.github ci-package.yml -> check-idempotence.sh -> console/hooks/install.py) can exercise the console install hook unattended. Every string value below is deliberately fake and namespaced NIVUUS-CI-FIXTURE-...; do not reuse any of them on a real console.",
+  "dedicated_nvme": "NIVUUS-CI-FIXTURE-NOT-A-REAL-DISK",
+  "disk_mode": "wipe",
+  "target_disk_verified": false,
+  "retro": false,
+  "admin_password": "NIVUUS-CI-FIXTURE-NOT-A-REAL-PASSWORD",
+  "windows_iso": "tests/fixtures/ci-fake-windows.iso",
+  "ltsc_key": "NIVUUS-CI-FIXTURE-NOT-A-REAL-PRODUCT-KEY",
+  "apollo_password": "NIVUUS-CI-FIXTURE-NOT-A-REAL-PASSWORD",
+  "guest_workdir": "/var/lib/nivuus/guest"
+}

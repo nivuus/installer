@@ -32,6 +32,17 @@ jobs:
       # Python only: CodeQL supports neither Bash nor Zsh, so the shell
       # scripts here are covered by shellcheck instead.
       languages: python
+  package:
+    uses: nivuus/.github/.github/workflows/ci-package.yml@main
+    with:
+      # console is a package living inside this repository rather than one of
+      # its own; it is the only manifest here, and the only one to prove.
+      package-dir: console
+      # console needs a wizard answer (windows_iso) before its install hook
+      # will run at all - without a fixture this job is red from the first
+      # PR for a reason unrelated to idempotence. See
+      # console/tests/fixtures/ci-answers.json.
+      answers-file: console/tests/fixtures/ci-answers.json
   packages:
     name: Package engine suites
     runs-on: ubuntu-latest
