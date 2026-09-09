@@ -4,6 +4,15 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Every job here calls a reusable workflow from nivuus/.github@main, so what
+  # main's CI means can change without a single commit landing in this
+  # repository - and it just did: `ruff format --check` was removed from the
+  # shared python workflow on 2026-09-09, which is what had kept this
+  # repository's main red since 2026-08-27. Without this trigger the only way
+  # to find out whether main is green under the new socle is to push something
+  # to main, which is the wrong way round. `gh workflow run CI --ref main`
+  # asks the question directly.
+  workflow_dispatch:
 
 jobs:
   policy:
