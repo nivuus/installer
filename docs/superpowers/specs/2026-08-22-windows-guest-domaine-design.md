@@ -38,6 +38,17 @@ refuse les machines virtuelles verra désormais l'hyperviseur. C'est la
 conséquence assumée du refus acté au cadrage ; si un jeu se ferme au
 lancement, c'est le premier endroit où regarder.
 
+> **Renversé le 2026-09-15, sur décision du propriétaire.** Le masquage est
+> réinstauré dans le domaine généré (`<kvm><hidden/>`, `hypervisor` en
+> `disable`, `vendor_id`), et il ne suffit pas seul : le domaine tourne sur un
+> QEMU 10.2.2 recompilé avec le patch zhaodice/qemu-anti-detection
+> (`console/host/qemu-anti-detection/`, étape `qemu` de `guest_steps`), qui
+> renomme ce que le XML ne peut pas atteindre — chaînes SMBIOS/ACPI, noms et
+> séries des périphériques, bit VM du firmware. Le SMBIOS reste celui de
+> l'hôte (`hardware.host_smbios`), jamais une machine inventée. Le patch est
+> vendu avec un écart documenté dans son README : le vendeur PCI virtio est
+> conservé, sans quoi le réseau et les partages virtiofs disparaissent.
+
 ### Ce qu'on conserve
 
 Les enlightenments Hyper-V (`relaxed`, `vapic`, `spinlocks`, `vpindex`,

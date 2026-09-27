@@ -9,9 +9,13 @@
 
 """Generate the production Windows guest domain from detected hardware.
 
-The existing production XML is NOT the source: it carries hypervisor masking,
-a fabricated SMBIOS and a vBIOS override that measurements on 2026-08-22
-showed unnecessary. This module builds from the requirement instead.
+The existing production XML is NOT the source: it carried a fabricated
+SMBIOS and a vBIOS override that measurements on 2026-08-22 showed
+unnecessary. This module builds from the requirement instead. Hypervisor
+masking, refused at that framing, was reinstated on 2026-09-15 together
+with the anti-detection QEMU (console/qemu_build.py) the domain runs on;
+the SMBIOS describes the host (hardware.host_smbios), never a fabricated
+machine.
 
 Usage:
     python3 domain.py xml
@@ -30,6 +34,11 @@ from jinja2 import Environment, FileSystemLoader
 
 HERE = Path(__file__).resolve().parent
 TEMPLATES_DIR = HERE / "templates"
+
+# console/qemu_build.py names the emulator the domain runs on.
+if str(HERE.parent) not in sys.path:
+    sys.path.insert(0, str(HERE.parent))
+import qemu_build  # noqa: E402
 
 DOMAIN_NAME = "Windows"
 # dhcp-host pins this MAC to 192.168.3.2 in
@@ -174,6 +183,7 @@ def domain_xml(*, gpu_functions: list[dict], nvme: dict, plan: dict,
                shares: tuple = SHARES,
                uuid: str | None = None,
                smbios: dict | None = None,
+               emulator: str = qemu_build.EMULATOR,
                windows_iso: str | None = None,
                unattend_iso: str | None = None) -> str:
     """Render the production domain XML.
@@ -193,7 +203,7 @@ def domain_xml(*, gpu_functions: list[dict], nvme: dict, plan: dict,
     return env.get_template("domain.xml.j2").render(
         name=name, memory_kib=memory_kib, plan=plan, mac=mac, bridge=bridge,
         nvram_path=nvram_path, gpu_functions=gpu_functions, nvme=nvme,
-        shares=shares, uuid=uuid, smbios=smbios or {},
+        shares=shares, uuid=uuid, smbios=smbios or {}, emulator=emulator,
         install_media=install_media(windows_iso, unattend_iso),
     )
 
