@@ -10,7 +10,7 @@
 # would separate the predicates from the steps they guard, which is exactly
 # the coupling this file makes readable in one piece.
 
-"""The five steps that build the console's Windows guest, and what lets them skip.
+"""The six steps that build the console's Windows guest, and what lets them skip.
 
 This module DECIDES: what to launch, in which order, and what may be skipped.
 It launches nothing. Every step carries the argv it would run, an
@@ -52,6 +52,10 @@ from typing import Callable, Mapping
 
 HERE = Path(__file__).resolve().parent
 GUEST_DIR = HERE / "guest"
+
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+import qemu_build  # noqa: E402
 
 GIB = 1024 ** 3
 
@@ -955,7 +959,7 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
                sleep: Callable[[float], None] | None = None,
                definition_on_disk: Callable[[], bool] | None = None
                ) -> list[Step]:
-    """The five steps, in order, for this host's answers. Runs nothing.
+    """The six steps, in order, for this host's answers. Runs nothing.
 
     `virsh`, `runner`, `size_of`, `pci_address_of`, `qemu_owner`, `chown`,
     `chmod` and `sleep` are injectable so tests can replace them: the real
@@ -1058,6 +1062,13 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
     define_cmd = [python, str(GUEST_DIR / "domain.py"), "define",
                   "--windows-iso", source_iso,
                   "--unattend-iso", str(iso_out)]
+    # The domain names qemu_build.EMULATOR, and libvirt checks that binary
+    # exists AT DEFINE TIME - so the patched QEMU is built here, before
+    # `define`, not lazily before `start`. Skipped whenever the prefix
+    # already carries the version and patch this package ships (see
+    # qemu_build.qemu_built): a re-activation never recompiles for nothing,
+    # a vendored patch update always does.
+    qemu_cmd = qemu_build.build_command()
     start_cmd = ["virsh", "start", DOMAIN_NAME]
 
     def write_secrets() -> None:
@@ -1472,6 +1483,8 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
              None, "fetch the offline payload binaries"),
         Step("build", build_done, build_run, build_cmd, fingerprint,
              "build the unattended Windows ISO"),
+        Step("qemu", qemu_build.qemu_built, lambda: runner(qemu_cmd), qemu_cmd,
+             None, "build the anti-detection QEMU the domain runs on"),
         # `command` is the argv for a fresh host; define_argv() appends
         # --replace at run time when a stale domain is actually there.
         Step("define", domain_defined, lambda: runner(define_argv()), define_cmd,

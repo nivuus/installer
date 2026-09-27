@@ -55,7 +55,20 @@
       <tlbflush state='on'/>
       <ipi state='on'/>
       <evmcs state='on'/>
+      <vendor_id state='on' value='GenuineIntel'/>
     </hyperv>
+    <!-- Hypervisor masking, three pieces that only work together with the
+         anti-detection QEMU named in <emulator> below (which renames what
+         these cannot: SMBIOS/ACPI strings, device names, the firmware VM
+         bit). kvm hidden removes the "KVMKVMKVM" CPUID signature; the
+         hypervisor feature disabled below clears the CPUID bit a guest
+         reads first; vendor_id replaces the Hyper-V leaf's vendor string
+         while leaving its "Hv#1" interface intact, so the enlightenments
+         above remain usable. Reinstated 2026-09-15 on the owner's request;
+         the 2026-08-22 spec had refused masking at framing time. -->
+    <kvm>
+      <hidden state='on'/>
+    </kvm>
     <vmport state='off'/>
     <smm state='on'/>
     <ioapic driver='kvm'/>
@@ -65,7 +78,7 @@
     <cache mode='passthrough'/>
     <maxphysaddr mode='emulate' bits='39'/>
     <feature policy='require' name='topoext'/>
-    <feature policy='require' name='hypervisor'/>
+    <feature policy='disable' name='hypervisor'/>
     <feature policy='require' name='invtsc'/>
     <feature policy='disable' name='split-lock-detect'/>
   </cpu>
@@ -88,7 +101,7 @@
     <suspend-to-disk enabled='yes'/>
   </pm>
   <devices>
-    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <emulator>{{ emulator }}</emulator>
     <controller type='usb' index='0' model='qemu-xhci'/>
     <controller type='sata' index='0'/>
 {%- if install_media %}

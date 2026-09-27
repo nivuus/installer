@@ -1,0 +1,12 @@
+# Site-local additions to abstractions/libvirt-qemu, placed by the Nivuus
+# console package (console/hooks/install.py).
+#
+# Every per-domain profile libvirt generates includes abstractions/libvirt-qemu,
+# which grants exec of /usr/bin/qemu-system-* only. The console's domain runs
+# the anti-detection QEMU built by host/qemu-anti-detection/build-qemu.sh
+# under its own prefix, so without these two lines `virsh start` dies with
+# "Permission denied" on the emulator, and the firmware blobs QEMU loads from
+# its own datadir (kvmvapic.bin, vgabios-stdvga.bin, efi-virtio.rom...) are
+# unreadable. The prefix is qemu_build.QEMU_PREFIX; keep the two in sync.
+  /opt/qemu-anti-detection/bin/qemu-system-x86_64 rmix,
+  /opt/qemu-anti-detection/share/qemu/** r,

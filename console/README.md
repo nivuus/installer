@@ -10,7 +10,7 @@ enough for anyone.
 |---|---|
 | `resolve` | Read-only. Derives `vfio-pci.ids` from the discrete GPU's PCI slot and the dedicated NVMe, `nohz_full` from the CPU topology, and the hugepage budget from host RAM. **Refuses**, with a reason, a machine with no discrete GPU or no properly isolated NVMe. |
 | `install` | Places files on the target — exactly the list below, no more. |
-| `activate` | Arms four of the eight systemd units `install` placed (the two wake sockets, the idle-shutdown timer, the guest-readiness timer) with a symlink into their `.wants/` directory, then reloads systemd and starts them. Then runs five steps to build and start the Windows guest — write the three secrets, fetch the offline payload, build the unattended ISO, define the libvirt domain with both install media, and issue one `virsh start` — each skippable when its own observation says it is already done. It **returns as soon as the VM has been told to start**; Windows Setup itself runs unattended for up to an hour afterwards, and only `nivuus-guest-ready.timer` says how it went. See below. |
+| `activate` | Arms four of the eight systemd units `install` placed (the two wake sockets, the idle-shutdown timer, the guest-readiness timer) with a symlink into their `.wants/` directory, then reloads systemd and starts them, and reloads libvirtd's AppArmor profile so it picks up the rule `install` placed for the anti-detection QEMU. Then runs six steps to build and start the Windows guest — write the three secrets, fetch the offline payload, build the unattended ISO, build the anti-detection QEMU the domain names as its emulator (`host/qemu-anti-detection/`, skipped once its stamp matches the vendored patch), define the libvirt domain with both install media, and issue one `virsh start` — each skippable when its own observation says it is already done. It **returns as soon as the VM has been told to start**; Windows Setup itself runs unattended for up to an hour afterwards, and only `nivuus-guest-ready.timer` says how it went. See below. |
 
 ## What `install` actually deploys
 
@@ -35,6 +35,8 @@ package author builds against:
 | `vm-trigger-47984.socket` + `.service`, `vm-trigger-47989.socket` + `.service`, `vm-idle-shutdown.service` + `.timer`, `nivuus-guest-ready.service` + `.timer` (8 units) | `/etc/systemd/system/` |
 | the shared no-start-limit drop-in, copied twice | `/etc/systemd/system/vm-trigger-{47984,47989}.service.d/no-start-limit.conf` |
 | the retrogaming answer | `/etc/nivuus/retro.json` |
+| `host/apparmor/local-usr.sbin.libvirtd` — lets libvirtd probe the anti-detection QEMU | `/etc/apparmor.d/local/usr.sbin.libvirtd` |
+| `host/apparmor/local-abstractions-libvirt-qemu` — lets every per-domain profile run it | `/etc/apparmor.d/local/abstractions/libvirt-qemu` |
 
 The two CPU wrappers are **copied from the repository, not generated**. They
 used to be heredocs inside `install.py` that called `vm-cpu-partition.sh` and

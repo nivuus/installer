@@ -203,6 +203,50 @@ with tempfile.TemporaryDirectory() as bin_dir:
     check("a failing systemctl is reported for every command",
           len(broken) == 1 + len(activate.WANTS))
 
+# libvirtd's AppArmor profile must be reloaded on a live host, or 'define'
+# cannot probe the anti-detection QEMU the local rule install placed allows.
+with tempfile.TemporaryDirectory() as tmp:
+    flag = os.path.join(tmp, "enabled")
+    profile = os.path.join(tmp, "usr.sbin.libvirtd")
+    open(profile, "w").write("profile libvirtd {}\n")
+    calls = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    open(flag, "w").write("Y\n")
+    check("an enabled AppArmor reloads the libvirtd profile",
+          activate.reload_libvirtd_profile(profile, flag, fake_run) is None
+          and calls == [["apparmor_parser", "-r", profile]])
+
+    calls.clear()
+    open(flag, "w").write("N\n")
+    check("a disabled AppArmor reloads nothing",
+          activate.reload_libvirtd_profile(profile, flag, fake_run) is None
+          and calls == [])
+    check("no AppArmor module at all reloads nothing",
+          activate.reload_libvirtd_profile(profile, flag + ".absent", fake_run)
+          is None and calls == [])
+    open(flag, "w").write("Y\n")
+    check("no libvirtd profile installed reloads nothing",
+          activate.reload_libvirtd_profile(profile + ".absent", flag, fake_run)
+          is None and calls == [])
+
+    def failing_run(cmd, **_kwargs):
+        return subprocess.CompletedProcess(cmd, 1, "", "syntax error")
+
+    refused = activate.reload_libvirtd_profile(profile, flag, failing_run)
+    check("a failed reload is reported with the parser's own words",
+          refused is not None and "syntax error" in refused)
+
+    def missing_parser(cmd, **_kwargs):
+        raise FileNotFoundError("apparmor_parser")
+
+    check("a missing apparmor_parser is reported, not swallowed",
+          activate.reload_libvirtd_profile(profile, flag, missing_parser)
+          is not None)
+
 # --- classifying a step failure: the real deliverable of this task ------- #
 #
 # A hook refusing the VM start is DESIGNED behaviour, not a build failure:

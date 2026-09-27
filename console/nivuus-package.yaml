@@ -61,6 +61,31 @@ apt:
   # firewalld, python3-jinja2 and xorriso above: a package carries its own
   # dependencies, so that a standalone install on an ordinary Debian works.
   - python3-winrm
+  # The anti-detection QEMU is BUILT on the target by
+  # host/qemu-anti-detection/build-qemu.sh (the activate phase's 'qemu'
+  # step): zhaodice/qemu-anti-detection exists only as a source patch
+  # against upstream tarballs, and no Debian package carries it. These are
+  # its build dependencies, one per feature the production domain uses
+  # (see the configure line in the script); qemu-kvm above stays installed
+  # because the built binary loads the same runtime libraries.
+  - build-essential
+  - ninja-build
+  - meson
+  - python3-venv
+  - pkg-config
+  - flex
+  - bison
+  - curl
+  - patch
+  - libglib2.0-dev
+  - libpixman-1-dev
+  - libseccomp-dev
+  - libnuma-dev
+  - libusb-1.0-0-dev
+  - libcap-ng-dev
+  - libattr1-dev
+  - libjpeg-dev
+  - libpng-dev
 
 wizard:
   questions: wizard.yaml

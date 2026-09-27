@@ -14,6 +14,7 @@ sys.path.insert(0, str(REPO / "console"))
 
 import domain  # noqa: E402
 import hardware  # noqa: E402
+import qemu_build  # noqa: E402
 
 failures = []
 
@@ -196,10 +197,22 @@ check("les tags de partage",
       [t.get("dir") for t in root.findall("devices/filesystem/target")],
       ["Downloads", "Games", "Console", "ConsoleSave"])
 
-# Everything the spec forbids must be absent, checked individually so a
-# failure names the offender.
-check("no kvm hidden", root.find("features/kvm") is None, True)
-check("no vendor_id", root.find("features/hyperv/vendor_id") is None, True)
+# Hypervisor masking, reinstated 2026-09-15 (the 2026-08-22 spec had refused
+# it at framing). The three pieces are checked individually so a failure
+# names the offender, and the emulator is the anti-detection build: the
+# masking is useless on Debian's QEMU, which still says "QEMU" everywhere.
+check("kvm hidden", root.find("features/kvm/hidden").get("state"), "on")
+check("vendor_id sur la feuille Hyper-V",
+      root.find("features/hyperv/vendor_id").get("state"), "on")
+check("bit hypervisor retire du CPUID",
+      root.find("cpu/feature[@name='hypervisor']").get("policy"), "disable")
+check("l emulateur est le QEMU anti-detection",
+      root.find("devices/emulator").text, qemu_build.EMULATOR)
+check("un emulateur explicite est honore",
+      ET.fromstring(domain.domain_xml(gpu_functions=GPU, nvme=NVME, plan=plan,
+                                      emulator="/usr/bin/qemu-system-x86_64")
+                    ).find("devices/emulator").text,
+      "/usr/bin/qemu-system-x86_64")
 check("no sysinfo", root.find("sysinfo") is None, True)
 check("no smbios mode", root.find("os/smbios") is None, True)
 check("no vBIOS override", root.find("devices/hostdev/rom") is None, True)
