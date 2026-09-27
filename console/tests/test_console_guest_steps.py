@@ -38,6 +38,7 @@ sys.path.insert(0, CONSOLE)
 # sys.modules[cls.__module__], which is None for an unregistered module.
 sys.modules["guest_steps"] = steps
 spec.loader.exec_module(steps)
+import qemu_build  # noqa: E402
 
 failures = []
 
@@ -209,7 +210,7 @@ with tempfile.TemporaryDirectory() as tmp:
           steps.build_is_current(tmp, a), False)
 
 
-# --- les cinq etapes, leurs commandes et leurs predicats ----------------- #
+# --- les six etapes, leurs commandes et leurs predicats ----------------- #
 # ANSWERS["windows_iso"] is read ONLY for its non-emptiness now (via
 # require_windows_iso_answer) - plan_steps points every step at
 # windows_media_path(guest_workdir) instead, never at this literal. It is
@@ -318,16 +319,51 @@ OFF = {"dumpxml": (0, "<domain/>"), "domstate": (0, "shut off\n")}
 
 with tempfile.TemporaryDirectory() as tmp:
     plan_list = plan(tmp, FakeVirsh(NO_DOMAIN))
-    check("les cinq etapes, dans l ordre",
+    check("les six etapes, dans l ordre",
           [s.name for s in plan_list],
-          ["secrets", "payload", "build", "define", "start"])
+          ["secrets", "payload", "build", "qemu", "define", "start"])
 
     st = by_name(plan_list)
 
-    # Nothing exists yet: no step may be skipped.
+    # Nothing exists yet: no step may be skipped. The qemu predicate reads
+    # /opt/qemu-anti-detection on the machine running this suite, so it is
+    # asserted on its own below against a throwaway prefix, never here.
     for name in ("secrets", "payload", "build", "define", "start"):
         check(f"{name} n est pas fait quand rien n existe",
               st[name].already_done(), False)
+
+    # --- l etape qemu : AVANT define, parce que libvirt verifie le binaire
+    # <emulator> au define ; sa commande est le script versionne du package,
+    # avec le prefixe que domain.py met dans le XML. ------------------------
+    qemu_cmd = st["qemu"].command
+    check("qemu lance build-qemu.sh du package",
+          qemu_cmd[0].endswith("host/qemu-anti-detection/build-qemu.sh"), True)
+    check("build-qemu.sh est executable", os.access(qemu_cmd[0], os.X_OK), True)
+    check("qemu installe dans le prefixe que le domaine nomme",
+          qemu_cmd[qemu_cmd.index("--prefix") + 1], qemu_build.QEMU_PREFIX)
+    check("l emulateur du domaine est sous ce prefixe",
+          qemu_build.EMULATOR.startswith(qemu_build.QEMU_PREFIX + "/"), True)
+    check("le patch vendu porte la version que le script epingle",
+          qemu_build.patch_path().is_file(), True)
+    with tempfile.TemporaryDirectory() as prefix:
+        check("un prefixe vide n est pas construit",
+              qemu_build.qemu_built(prefix), False)
+        os.makedirs(os.path.join(prefix, "bin"))
+        binary = os.path.join(prefix, "bin", "qemu-system-x86_64")
+        pathlib.Path(binary).write_text("#!/bin/sh\n")
+        os.chmod(binary, 0o755)
+        check("un binaire sans tampon n est pas construit",
+              qemu_build.qemu_built(prefix), False)
+        stamp = pathlib.Path(prefix, "nivuus-build.stamp")
+        stamp.write_text("qemu=10.2.2 patch=0000\n")
+        check("un tampon d un autre patch reconstruit",
+              qemu_build.qemu_built(prefix), False)
+        stamp.write_text(qemu_build.expected_stamp() + "\n")
+        check("tampon et binaire attendus : deja construit",
+              qemu_build.qemu_built(prefix), True)
+        os.chmod(binary, 0o644)
+        check("un binaire non executable n est pas construit",
+              qemu_build.qemu_built(prefix), False)
 
     # The command lines are built, never launched. Each flag below is a real
     # add_argument of the script it targets - checked against the source, not
@@ -1710,5 +1746,5 @@ if failures:
     for item in failures:
         print(f"FAIL - {item}")
     sys.exit(1)
-print("OK - five steps, each skippable on an observation, each command built "
+print("OK - six steps, each skippable on an observation, each command built "
       "and none launched")
