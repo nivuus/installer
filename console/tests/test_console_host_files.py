@@ -110,6 +110,29 @@ for dirpath, _dirnames, filenames in os.walk(hooks_root):
         check(f"{rel} est versionne mais aucune table de install.py ne le pose",
               rel in deployed)
 
+# The vendored anti-detection patch MUST leave the virtio PCI vendor alone.
+# Upstream renames 0x1af4 to 0x8086; the virtio-win drivers match on
+# VEN_1AF4 and then never bind - measured 2026-09-15: guest up, NIC silent,
+# virtiofs shares gone. host/qemu-anti-detection/README.md carries the full
+# account; this assertion is what stops a re-vendoring from repeating it.
+aa_dir = os.path.join(CONSOLE, "host", "qemu-anti-detection")
+patches = [name for name in os.listdir(aa_dir) if name.endswith(".patch")]
+check("exactly one vendored QEMU patch", len(patches) == 1)
+for name in patches:
+    body = open(os.path.join(aa_dir, name)).read()
+    check(f"{name} keeps the virtio PCI vendor (no QUMRANET hunk)",
+          "PCI_VENDOR_ID_REDHAT_QUMRANET" not in body)
+    check(f"{name} keeps the virtio subsystem id (no PCI_SUBDEVICE_ID_QEMU hunk)",
+          "PCI_SUBDEVICE_ID_QEMU" not in body)
+build_script = os.path.join(aa_dir, "build-qemu.sh")
+check("build-qemu.sh is versioned and executable",
+      os.path.isfile(build_script) and os.access(build_script, os.X_OK))
+# The two AppArmor site files must be deployed by a placement table too.
+for rel in ("host/apparmor/local-usr.sbin.libvirtd",
+            "host/apparmor/local-abstractions-libvirt-qemu"):
+    check(f"{rel} est versionne et pose par install.py",
+          os.path.isfile(os.path.join(CONSOLE, rel)) and rel in deployed)
+
 if failures:
     for item in failures:
         print(f"FAIL - {item}")

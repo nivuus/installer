@@ -66,6 +66,24 @@ HOOK_FILES = [
      f"{HOOK_BASE}/stopped/end/rules.sh"),
 ]
 
+# The anti-detection QEMU (host/qemu-anti-detection/, built at activate by
+# the 'qemu' step of guest_steps.plan_steps) lives under its own prefix,
+# which the per-domain AppArmor profiles libvirt generates know nothing
+# about: abstractions/libvirt-qemu grants /usr/bin/qemu-system-* only.
+# Debian ships an empty local/abstractions/libvirt-qemu for exactly this,
+# included by the abstraction on every profile load, so no reload here.
+# Two files, two profiles: libvirtd's own (it PROBES the binary at define
+# time) and the abstraction every generated per-domain profile includes
+# (the VM runs under that one). Each is loaded with its profile, so a
+# fresh install needs no reload; on a live host activate reloads the
+# libvirtd one (activate.reload_libvirtd_profile).
+APPARMOR_FILES = [
+    ("host/apparmor/local-usr.sbin.libvirtd",
+     "etc/apparmor.d/local/usr.sbin.libvirtd"),
+    ("host/apparmor/local-abstractions-libvirt-qemu",
+     "etc/apparmor.d/local/abstractions/libvirt-qemu"),
+]
+
 HOST_SCRIPTS = [
     ("host/vm-wake-gate.py", "usr/local/sbin/vm-wake-gate.py"),
     ("host/handle-vm-start.sh", "usr/local/sbin/handle-vm-start.sh"),
@@ -181,6 +199,8 @@ def main() -> int:
     emit({"event": "progress", "pct": 50, "msg": "Deploiement des scripts hote"})
     for src, dest in HOST_SCRIPTS:
         place(os.path.join(HERE, src), under(dest))
+    for src, dest in APPARMOR_FILES:
+        place(os.path.join(HERE, src), under(dest), mode=0o644)
 
     # Placed, deliberately NOT enabled: arming a 0.0.0.0 wake socket for a
     # VM that does not exist yet would be exposure with no counterpart. The

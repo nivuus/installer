@@ -132,6 +132,48 @@ def start_now(units) -> list:
     return failed
 
 
+LIBVIRTD_PROFILE = "/etc/apparmor.d/usr.sbin.libvirtd"
+APPARMOR_ENABLED = "/sys/module/apparmor/parameters/enabled"
+
+
+def reload_libvirtd_profile(profile: str = LIBVIRTD_PROFILE,
+                            enabled_flag: str = APPARMOR_ENABLED,
+                            run=subprocess.run) -> str | None:
+    """Reload libvirtd's AppArmor profile so it sees install's local rule.
+
+    install places local/usr.sbin.libvirtd, which lets libvirtd probe the
+    anti-detection QEMU under /opt. A profile only reads its local include
+    when it is LOADED: at boot that is automatic, but on a live host (a
+    package update replaying install then activate) the profile in the
+    kernel still predates the file, and the 'define' step then dies with
+    "Failed to probe QEMU binary ... Permission denied" - with no DENIED
+    line anywhere to point at the cause. Reloading is idempotent and cheap,
+    so it is done on every activation of the running machine.
+
+    Returns None when done or when there is nothing to reload (AppArmor off,
+    or libvirt's profile not installed), else the one line explaining the
+    failure. Unlike start_now(), a failure here IS fatal to the phase: the
+    guest steps after it cannot succeed without it.
+    """
+    try:
+        with open(enabled_flag, encoding="ascii") as fh:
+            if fh.read().strip() != "Y":
+                return None
+    except OSError:
+        return None         # no AppArmor module: nothing confines libvirtd
+    if not os.path.isfile(profile):
+        return None
+    cmd = ["apparmor_parser", "-r", profile]
+    try:
+        proc = run(cmd, capture_output=True, text=True)
+    except OSError as exc:
+        return f"{' '.join(cmd)} : {exc}"
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()[:200]
+        return f"{' '.join(cmd)} : {detail or proc.returncode}"
+    return None
+
+
 class StepCommandFailed(guest_steps.GuestBuildError):
     """A step's own command exited non-zero.
 
@@ -216,8 +258,8 @@ def run_steps(step_list, emit_fn=emit) -> None:
     Raises ActivationFailure with an already-classified message on the
     first failure - a failure of already_done() included, not only of
     run(). Stopping there is correct, not merely convenient:
-    guest_steps.plan_steps() orders the five steps so each depends on the
-    one before it (secrets -> payload -> build -> define -> start).
+    guest_steps.plan_steps() orders the six steps so each depends on the
+    one before it (secrets -> payload -> build -> qemu -> define -> start).
     """
     count = len(step_list) or 1
     for index, step in enumerate(step_list):
@@ -278,6 +320,12 @@ def main() -> int:
                   file=sys.stderr)
             for item in broken:
                 print(f"  - {item}", file=sys.stderr)
+        refused = reload_libvirtd_profile()
+        if refused:
+            print("console activate: libvirtd's AppArmor profile could not be "
+                  "reloaded, so 'define' could not probe the anti-detection "
+                  f"QEMU - {refused}", file=sys.stderr)
+            return 1
 
     # Arming is unconditional and already done above. Everything from here
     # builds and starts the Windows guest; its own failures must never read

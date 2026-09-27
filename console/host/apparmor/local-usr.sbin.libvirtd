@@ -1,0 +1,16 @@
+# Site-local additions to usr.sbin.libvirtd, placed by the Nivuus console
+# package (console/hooks/install.py).
+#
+# libvirtd PROBES the emulator itself, as the libvirt-qemu user, the first
+# time a domain names it (capabilities cache) - and the packaged profile
+# lets libvirtd exec /usr/bin/* only. Without this line `virsh define`
+# fails with "Failed to probe QEMU binary ... Permission denied", and no
+# AppArmor DENIED line ever appears in dmesg (the same silent trap as the
+# hooks under /usr/local). PUx like the packaged /usr/bin/* rule: the child
+# transitions to its per-domain profile when one exists (a VM start) and
+# runs unconfined otherwise (the probe). The prefix is
+# qemu_build.QEMU_PREFIX; keep the two in sync. A loaded profile
+# only reads this file when it is (re)loaded: the activate hook runs
+# `apparmor_parser -r /etc/apparmor.d/usr.sbin.libvirtd` on the running
+# host for that reason (reload_libvirtd_profile).
+  /opt/qemu-anti-detection/bin/qemu-system-x86_64 PUx,

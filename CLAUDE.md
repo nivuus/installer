@@ -139,6 +139,36 @@ things about it are easy to break:
   armed only the wake/idle units and could manage a `Windows` domain if one
   already existed, not create one.
 
+* **The console runs an anti-detection QEMU, not Debian's (2026-09-15, owner's
+  decision, reversing the 2026-08-22 framing that refused hypervisor masking).**
+  `console/host/qemu-anti-detection/build-qemu.sh` builds upstream QEMU 10.2.2
+  with the vendored zhaodice/qemu-anti-detection patch into
+  `/opt/qemu-anti-detection` (never `/usr/local`, which would shadow the
+  packaged binary for libvirt's own probing); `console/qemu_build.py` is the
+  Python side (prefix, stamp `qemu=<ver> patch=<sha256>`, predicate) and wires
+  it as the `qemu` step of `guest_steps.plan_steps`, **before `define`**,
+  because libvirt validates the `<emulator>` binary at define time. The
+  generated domain carries `<kvm><hidden/>`, `hypervisor` disabled and a
+  `vendor_id`, with the host's own SMBIOS. Three traps, all measured on the
+  production host that day: (1) **two AppArmor site files are needed, not
+  one** — libvirtd itself probes the binary as `libvirt-qemu` and its profile
+  execs `/usr/bin/*` only, so `virsh define` dies with *Failed to probe QEMU
+  binary … Permission denied* and no DENIED line; `local/usr.sbin.libvirtd`
+  (`PUx`; a live host needs `apparmor_parser -r`, which `activate` runs
+  on every activation of the running machine) covers that, and
+  `local/abstractions/libvirt-qemu` (`rmix` + the datadir `r`) covers the VM
+  itself; (2) **the upstream patch renames the virtio PCI vendor 0x1af4 →
+  0x8086** and the virtio-win drivers then never bind: the guest boots and
+  answers ACPI but its NIC sends nothing and the virtiofs shares vanish — the
+  vendored patch drops that hunk, a test in `test_console_host_files.py`
+  keeps it dropped, and `host/qemu-anti-detection/README.md` records the
+  provenance (upstream commit `2750c86`, 2026-04-18); (3) the emulated VGA
+  keeps showing the boot logo once Windows moves to the NVIDIA display, so a
+  `virsh screenshot` proves nothing about whether the guest is up — the tap
+  interface's `rx_packets` and an ACPI shutdown answered in seconds do.
+  Build deps are declared in `nivuus-package.yaml`'s `apt` list; the build
+  takes ~8 min on this host and is skipped on every later activation.
+
 * **`activate` now builds and starts the guest too — phase 2d, plan
   `2026-08-28-console-activate-invite`, done 2026-08-28.** `install` places
   two more units (`nivuus-guest-ready.service`+`.timer`, eight total) and a

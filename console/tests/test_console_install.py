@@ -104,6 +104,23 @@ with tempfile.TemporaryDirectory() as tmp:
     check("le contenu copie est identique a la source",
           copy.read_bytes(), SOURCE_ISO.read_bytes())
 
+    # The anti-detection QEMU runs from /opt: without this local abstraction
+    # every generated per-domain profile denies the emulator and its blobs.
+    aa = root / "etc/apparmor.d/local/abstractions/libvirt-qemu"
+    check("l abstraction AppArmor locale est posee", aa.is_file(), True)
+    check("elle est une donnee, pas un programme (0644)",
+          oct(aa.stat().st_mode & 0o777), "0o644")
+    aa_body = aa.read_text()
+    check("elle autorise l emulateur du prefixe anti-detection",
+          "/opt/qemu-anti-detection/bin/qemu-system-x86_64 rmix," in aa_body, True)
+    check("elle autorise les blobs firmware du prefixe",
+          "/opt/qemu-anti-detection/share/qemu/** r," in aa_body, True)
+    aa_daemon = root / "etc/apparmor.d/local/usr.sbin.libvirtd"
+    check("l ajout local au profil libvirtd est pose", aa_daemon.is_file(), True)
+    check("libvirtd peut sonder l emulateur du prefixe anti-detection",
+          "/opt/qemu-anti-detection/bin/qemu-system-x86_64 PUx," in aa_daemon.read_text(),
+          True)
+
     partition = root / "etc/libvirt/hooks/vm-cpu-partition.sh"
     check("le script de partitionnement est sous /etc/libvirt/hooks",
           partition.is_file(), True)
