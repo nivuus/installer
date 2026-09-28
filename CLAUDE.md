@@ -612,6 +612,22 @@ Activation uses a stamp (`/var/lib/nivuus/packages/<name>.activated`), not a
 self-disabling unit: an interrupted activation must retry at the next boot
 rather than believe it succeeded.
 
+**Local updater (2026-09-28, plan `2026-09-28-updater-local`).** `nivuus
+list|check|update [name…]|status|adopt <dir>` (`installer/packages/nivuus_cli.py`,
+symlinked to `/usr/local/sbin/nivuus` by `steps/package_updates.py`, which
+also enables the check-only `nivuus-check.timer`). A package is followed only
+if its manifest declares `source: {github: owner/repo[, path: sub]}`; the tag
+`vX.Y.Z` is the version, the archive is verified against `SHA256SUMS` **and**
+the API asset `digest` (fail closed), extracted with `tarfile` `filter="data"`,
+its manifest must carry the same name and version, recorded answers must
+satisfy the new questions, `requires.packages` must be installed and not
+`failed` — all before the directory is swapped. Then `install` (root `/`) +
+`activate` replay, and the state gets `state`/`target_version`/`error`/
+`updated_at`. A failed lay is never retried by a bare `nivuus update`, only by
+naming it. `adopt` records a hand-laid package (tracked files only, no hook,
+no invented answers). **Deferred**: HA `update` entities via mqtt, `update
+--self`, `console`'s own `source:`, the `shell` rename.
+
 **Arming `activate` takes three copies onto the target, and the whole phase is
 dead if any is missed** (it was, on the first cut of this branch, while the
 install still reported success — `systemctl enable` ran with `check=False`).
