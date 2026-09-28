@@ -37,9 +37,7 @@ from packages.discovery import discover  # noqa: E402
 from packages.facts import STATE_KEY as FACTS_STATE_KEY  # noqa: E402
 from packages.facts import shadowed_facts  # noqa: E402
 from packages.runner import HookError, run_activate  # noqa: E402
-
-STATE_FILE = "/etc/nivuus/packages.json"
-STAMP_DIR = "/var/lib/nivuus/packages"
+from packages.state import STAMP_DIR, STATE_FILE  # noqa: E402,F401
 
 
 class _StderrEmit:
