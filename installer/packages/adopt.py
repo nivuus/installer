@@ -40,16 +40,28 @@ def _copy_tracked(source: str, dest: str) -> None:
     inside = subprocess.run(
         ["git", "-C", source, "rev-parse", "--is-inside-work-tree"],
         capture_output=True, text=True)
-    if inside.returncode != 0:
-        shutil.copytree(source, dest, symlinks=True)
-        return
-    with tempfile.TemporaryFile() as archive:
-        subprocess.run(["git", "-C", source, "archive", "--format=tar", "HEAD"],
-                       stdout=archive, check=True)
-        archive.seek(0)
-        os.makedirs(dest)
-        with tarfile.open(fileobj=archive) as tar:
-            tar.extractall(dest, filter="data")
+    try:
+        if inside.returncode != 0:
+            shutil.copytree(source, dest, symlinks=True)
+            return
+        with tempfile.TemporaryFile() as archive:
+            proc = subprocess.run(
+                ["git", "-C", source, "archive", "--format=tar", "HEAD"],
+                stdout=archive, stderr=subprocess.PIPE, text=False)
+            if proc.returncode != 0:
+                raise UpdateError(f"git archive HEAD failed in {source}: "
+                                  f"{proc.stderr.decode(errors='replace').strip()}")
+            archive.seek(0)
+            os.makedirs(dest)
+            with tarfile.open(fileobj=archive) as tar:
+                tar.extractall(dest, filter="data")
+    except (OSError, tarfile.TarError, UpdateError) as exc:
+        # A partial copy would make every later adopt refuse "already exists".
+        if os.path.lexists(dest):
+            shutil.rmtree(dest)
+        if isinstance(exc, UpdateError):
+            raise
+        raise UpdateError(f"cannot copy {source} to {dest}: {exc}") from exc
 
 
 def adopt(package_dir: str) -> str:

@@ -57,8 +57,8 @@ def discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, 
     for entry in entries:
         source = os.path.join(root, entry, MANIFEST_NAME)
         if os.path.isdir(source):
-            errors.append((source, f"{MANIFEST_NAME} est un répertoire, "
-                                   "pas un fichier"))
+            errors.append((source, f"{MANIFEST_NAME} is a directory, "
+                                   "not a file"))
             continue
         if not os.path.isfile(source):
             continue
@@ -77,8 +77,8 @@ def discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, 
             paths = ", ".join(os.path.join(m.root, MANIFEST_NAME) for m in group)
             errors.append((
                 name,  # source: the collision has no single path, only a name
-                f"deux packages ou plus déclarent le nom {name!r} : {paths} "
-                "— aucun n'est proposé, renommez-en un",
+                f"two or more packages declare the name {name!r}: {paths} "
+                "- none is offered, rename one of them",
             ))
         else:
             valid.extend(group)

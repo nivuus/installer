@@ -37,7 +37,7 @@ from packages.discovery import discover  # noqa: E402
 from packages.facts import STATE_KEY as FACTS_STATE_KEY  # noqa: E402
 from packages.facts import shadowed_facts  # noqa: E402
 from packages.runner import HookError, run_activate  # noqa: E402
-from packages.state import STAMP_DIR, STATE_FILE  # noqa: E402,F401
+from packages.state import FAILED, STAMP_DIR, STATE_FILE, status  # noqa: E402,F401
 
 
 class _StderrEmit:
@@ -70,6 +70,16 @@ def main(argv: list[str]) -> int:
         return 1
     if name not in state:
         print(f"package {name!r} is not recorded in {STATE_FILE}", file=sys.stderr)
+        return 1
+    # A package whose last update failed is the operator's to retry, with
+    # `nivuus update <name>`: replaying its activate here at every boot would
+    # be the automatic retry the updater refuses to do, with answers never
+    # checked against the version now on disk.
+    if status(state[name]) == FAILED:
+        print(f"package {name!r}: its update to "
+              f"{state[name].get('target_version', '?')} failed "
+              f"({state[name].get('error', 'no detail recorded')}); retry it "
+              f"with 'nivuus update {name}'", file=sys.stderr)
         return 1
 
     manifests, _ = discover()

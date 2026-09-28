@@ -100,6 +100,6 @@ def install_order(chosen) -> list:
     if deps:
         cycle = ", ".join(sorted(deps))
         raise DependencyError(
-            f"cycle de dépendances entre packages : {cycle} - aucun ordre "
-            "d'installation n'est possible")
+            f"dependency cycle between packages: {cycle} - no install "
+            "order is possible")
     return ordered

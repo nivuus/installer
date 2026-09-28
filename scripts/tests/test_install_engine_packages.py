@@ -196,7 +196,7 @@ with tempfile.TemporaryDirectory() as collision_root:
             "collision, not just 'introuvable'",
             lambda: steps_packages.plan_packages(
                 {**config, "packages": {"dupe": {}}}, HW, FakeEmit()),
-            "deux packages ou plus déclarent le nom")
+            "two or more packages declare the name")
     finally:
         steps_packages.discover = real_discover
 
@@ -448,6 +448,18 @@ with tempfile.TemporaryDirectory() as tmp:
           received.get("total_cpus"), 24)
     check("la detection fraiche est passee entiere, pas remplacee",
           received.get("memory_mib"), 65536)
+
+    # A package whose last update failed is not replayed at boot: that would
+    # be the automatic retry the updater refuses to make.
+    state_path = target / "etc/nivuus/packages.json"
+    recorded = json.loads(state_path.read_text())
+    recorded["mesureur"].update(state="failed", target_version="9.0.0",
+                                error="hook exited 1")
+    state_path.write_text(json.dumps(recorded))
+    hw_out.unlink()
+    check("activate_cli refuses a package whose update failed",
+          activate_cli.main(["activate_cli.py", "mesureur"]), 1)
+    check("and runs none of its hooks", hw_out.exists(), False)
     del os.environ["MESUREUR_HW_OUT"]
 
 # --- the activate phase's own apt requirements are fatal, unlike the ------- #

@@ -77,7 +77,7 @@ with tempfile.TemporaryDirectory() as tmp:
     check("the error names the offending path",
           errors[0][0], str(root / "difforme" / "nivuus-package.yaml"))
     check("and says what is wrong with it",
-          "répertoire" in errors[0][1], True)
+          "is a directory" in errors[0][1], True)
 
 # --- duplicate names --------------------------------------------------------#
 # The package name becomes a systemd unit instance name and a key in the

@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from . import releases, state as state_mod
-from .dependencies import install_order
+from .dependencies import DependencyError, install_order
 from .discovery import PACKAGES_DIR, discover
 from .facts import STATE_KEY as FACTS_STATE_KEY
 from .manifest import MANIFEST_NAME, Manifest, ManifestError, load_manifest
@@ -45,6 +45,14 @@ from .runner import HookError, run_activate, run_install
 from .wizard import WizardError, load_questions, validate_answers
 
 CACHE_DIR = os.environ.get("NIVUUS_CACHE_DIR", "/var/cache/nivuus/packages")
+# Releases are extracted, and the previous copy set aside, OUTSIDE the
+# directory discover() scans - a copy of a manifest left there by an
+# interrupted run would collide with the installed one by name, and discovery
+# drops both. A sibling keeps it on the same filesystem, so the swap is a
+# rename.
+STAGING_DIR = os.environ.get(
+    "NIVUUS_STAGING_DIR",
+    os.path.join(os.path.dirname(PACKAGES_DIR.rstrip("/")), ".nivuus-packages-staging"))
 AVAILABLE_NAME = "available.json"
 LOCK_NAME = ".lock"
 
@@ -65,7 +73,10 @@ class Pending:
 class CheckResult:
     pending: list[Pending]
     current: list[str]
+    # Packages the updater does not follow (no manifest, no source:).
     skipped: list[tuple[str, str]]
+    # Packages it follows but could not check this time (network, API).
+    unreachable: list[tuple[str, str]]
 
 
 class _NullEmit:
@@ -99,16 +110,17 @@ def _installed_manifests() -> tuple[dict[str, Manifest], list[tuple[str, str]]]:
 
 
 def _latest(name: str, manifests: dict, fetch):
-    """(release, "") or (None, reason the package cannot be checked)."""
+    """(release, "", False), or (None, reason, reason_is_a_fetch_failure)."""
     manifest = manifests.get(name)
     if manifest is None:
-        return None, f"no manifest under {PACKAGES_DIR}/{name}"
+        return None, f"no manifest under {PACKAGES_DIR}/{name}", False
     if manifest.source is None:
-        return None, "its manifest declares no 'source:', so it has no releases to follow"
+        return None, ("its manifest declares no 'source:', so it has no "
+                      "releases to follow"), False
     try:
-        return fetch(manifest.source.github), ""
+        return fetch(manifest.source.github), "", False
     except releases.ReleaseError as exc:
-        return None, str(exc)
+        return None, str(exc), True
 
 
 def _is_newer(release, record: dict) -> bool:
@@ -126,18 +138,18 @@ def check(fetch=releases.latest_release) -> CheckResult:
     with lock():
         current_state = state_mod.load()
         manifests, errors = _installed_manifests()
-        pending, current, skipped = [], [], list(errors)
+        pending, current, skipped, unreachable = [], [], list(errors), []
         for name in sorted(current_state):
-            release, reason = _latest(name, manifests, fetch)
+            release, reason, fetch_failed = _latest(name, manifests, fetch)
             if release is None:
-                skipped.append((name, reason))
+                (unreachable if fetch_failed else skipped).append((name, reason))
             elif _is_newer(release, current_state[name]):
                 pending.append(Pending(name, current_state[name].get("version", ""),
                                        release.version, release.notes))
             else:
                 current.append(name)
-        _write_available(current_state, pending, skipped)
-        return CheckResult(pending, current, skipped)
+        _write_available(current_state, pending, skipped + unreachable)
+        return CheckResult(pending, current, skipped, unreachable)
 
 
 def _write_available(current_state: dict, pending, skipped) -> None:
@@ -169,7 +181,7 @@ def _stage(name: str, archive: str, subpath: str) -> tuple[str, str]:
     extraction directory: a hostile or broken archive is refused here, before
     anything installed is touched.
     """
-    staging = os.path.join(PACKAGES_DIR, f".{name}.staging")
+    staging = os.path.join(STAGING_DIR, name)
     if os.path.lexists(staging):
         shutil.rmtree(staging)
     os.makedirs(staging)
@@ -242,7 +254,7 @@ def _check_requirements(manifests: list[Manifest], current_state: dict) -> None:
 
 def _swap(name: str, staging: str, root: str) -> Manifest:
     dest = os.path.join(PACKAGES_DIR, name)
-    aside = os.path.join(PACKAGES_DIR, f".{name}.previous")
+    aside = os.path.join(STAGING_DIR, f"{name}.previous")
     if os.path.lexists(aside):
         shutil.rmtree(aside)
     if os.path.lexists(dest):
@@ -258,6 +270,13 @@ def _lay(staged: Manifest, staging: str, answers: dict, current_state: dict,
          hw: dict, emit) -> None:
     name = staged.name
     record = current_state[name]
+    # Recorded as failed BEFORE anything is replaced, and cleared only on
+    # success: a run killed mid-lay (signal, power loss) then leaves a record
+    # that says so, never one claiming the old version is still what runs.
+    state_mod.mark_failed(current_state, name, staged.version,
+                          f"interrupted while laying {staged.version}; its "
+                          "hooks may have run partially")
+    state_mod.save(current_state)
     try:
         manifest = _swap(name, staging, staged.root)
         emit.info("packages", 30, f"[{name}] install {manifest.version}")
@@ -292,6 +311,10 @@ def update(names=None, fetch=releases.latest_release, hw_detect=_default_hw,
     """
     emit = emit or _NullEmit()
     with lock():
+        # Anything left here was left by an interrupted run: only the updater
+        # writes here, and it holds the lock.
+        if os.path.lexists(STAGING_DIR):
+            shutil.rmtree(STAGING_DIR)
         current_state = state_mod.load()
         manifests, _ = _installed_manifests()
         explicit = bool(names)
@@ -304,7 +327,7 @@ def update(names=None, fetch=releases.latest_release, hw_detect=_default_hw,
 
         chosen = []
         for name in targets:
-            release, reason = _latest(name, manifests, fetch)
+            release, reason, _ = _latest(name, manifests, fetch)
             if release is None:
                 if explicit:
                     raise UpdateError(f"{name}: cannot be updated: {reason}")
@@ -323,10 +346,14 @@ def update(names=None, fetch=releases.latest_release, hw_detect=_default_hw,
                 prepared[name] = _prepare(name, release, current_state[name], emit)
             staged = [manifest for _, manifest, _ in prepared.values()]
             _check_requirements(staged, current_state)
+            try:
+                order = install_order(staged)
+            except DependencyError as exc:
+                raise UpdateError(str(exc)) from exc
             # Measured once, before any directory is swapped: a detection
             # failure must refuse the update, not strand a half-laid package.
             hw = hw_detect()
-            for manifest in install_order(staged):
+            for manifest in order:
                 staging, _, answers = prepared[manifest.name]
                 _lay(manifest, staging, answers, current_state, hw, emit)
                 laid.append(manifest.name)

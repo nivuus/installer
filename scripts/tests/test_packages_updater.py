@@ -254,6 +254,61 @@ try:
     check_refused("unknown package", lambda: update(["ghost"], hw_detect=hw),
                   "not installed")
 
+    # --- interruptions and leftovers --------------------------------------------
+    import packages.updater as updater_mod
+    staging_dir = updater_mod.STAGING_DIR
+    check_eq("staging lives outside the scanned directory",
+             os.path.dirname(staging_dir) == os.path.dirname(PACKAGES_DIR), True)
+    os.makedirs(os.path.join(staging_dir, "demo"))
+    with open(os.path.join(staging_dir, "demo", "nivuus-package.yaml"), "w") as fh:
+        fh.write(manifest_text("demo", "9.9.9"))
+    publish("demo", "1.4.0")
+    check_eq("a leftover from an interrupted run does not block the package",
+             update(["demo"], hw_detect=hw), ["demo"])
+    check_eq("and it is cleared", os.path.exists(staging_dir)
+             and os.listdir(staging_dir), [])
+
+    real_install = updater_mod.run_install
+
+    def killed(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    updater_mod.run_install = killed
+    publish("demo", "1.5.0")
+    try:
+        update(["demo"], hw_detect=hw)
+        failures.append("interrupted lay: expected KeyboardInterrupt")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        updater_mod.run_install = real_install
+    record = state.load()["demo"]
+    check_eq("an interrupted lay is recorded as such, not as the old version",
+             (state.status(record), record["target_version"],
+              "interrupted" in record["error"]), ("failed", "1.5.0", True))
+    check_eq("a bare update leaves it for the operator", update(hw_detect=hw), [])
+    check_eq("naming it completes the lay", update(["demo"], hw_detect=hw), ["demo"])
+
+    install_locally("ping", "1.0.0", answers={}, requires=["pong"])
+    install_locally("pong", "1.0.0", answers={}, requires=["ping"])
+    publish("ping", "1.1.0", requires=["pong"])
+    publish("pong", "1.1.0", requires=["ping"])
+    check_refused("a dependency cycle is refused, in English",
+                  lambda: update(["ping", "pong"], hw_detect=hw), "dependency cycle")
+    for name in ("ping", "pong"):
+        current = state.load()
+        del current[name]
+        state.save(current)
+        import shutil
+        shutil.rmtree(os.path.join(PACKAGES_DIR, name))
+
+    fake.releases.pop("nivuus/base")
+    result = check()
+    check_eq("an unreachable release is reported apart from unfollowed packages",
+             ([n for n, _ in result.unreachable], [n for n, _ in result.skipped]),
+             (["base"], ["nosrc"]))
+    publish("base", "1.1.0")
+
     # --- adoption -------------------------------------------------------------
     with tempfile.TemporaryDirectory() as clone:
         for rel, content in package_files("handmade", "0.0.0").items():

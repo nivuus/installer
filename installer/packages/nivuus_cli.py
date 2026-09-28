@@ -86,8 +86,12 @@ def cmd_check(_args) -> int:
     for name in result.current:
         print(f"{name}: up to date")
     for name, reason in result.skipped:
-        print(f"{name}: not checked - {reason}", file=sys.stderr)
-    return 0
+        print(f"{name}: not followed - {reason}", file=sys.stderr)
+    for name, reason in result.unreachable:
+        print(f"{name}: could not be checked - {reason}", file=sys.stderr)
+    # A check that could not reach a followed package's releases did not do
+    # its job: the timer unit must show it failed, not succeed every day.
+    return 1 if result.unreachable else 0
 
 
 def cmd_update(args) -> int:
