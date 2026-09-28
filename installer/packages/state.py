@@ -93,6 +93,9 @@ def mark_installed(state: dict, name: str, version: str,
         record["answers"] = answers
     record.pop("target_version", None)
     record.pop("error", None)
+    # What adoption described - a copy laid by hand from some directory - is
+    # no longer what runs once a release has been laid over it.
+    record.pop("adopted_from", None)
 
 
 def mark_failed(state: dict, name: str, target_version: str,
