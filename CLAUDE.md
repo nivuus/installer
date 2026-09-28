@@ -633,8 +633,13 @@ asked on the terminal (never on argv). `nivuus update --self` lays the
 release's `installer/` subtree over the directory the CLI runs from (swap
 with restore, refuses a git checkout, never combined with packages), records
 the version in `STAMP_DIR/installer.json` — **not** in the package state,
-which every command iterates as packages — and does **not** refresh the
-systemd units under `configs/systemd/`. **Deferred**: HA `update` entities
+which every command iterates as packages — then refreshes, from the same
+verified archive, the installer's own units (`nivuus-check.*`,
+`nivuus-package-activate@`) **that the machine already has**
+(`packages/units.py`: content compared, atomic 0644, then `Reload` and a
+restart of a changed enabled timer over D-Bus via `busctl`, never
+`systemctl`, which a PID-namespaced session cannot use). It does so even when
+the code is already current, so a machine laid by an older updater catches up. **Deferred**: HA `update` entities
 via mqtt, `console`'s own `source:`, the `shell` rename.
 
 **Arming `activate` takes three copies onto the target, and the whole phase is

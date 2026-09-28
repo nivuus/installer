@@ -53,7 +53,8 @@ def payload(version, *, drop=(), installer_link=False):
     The smoke check runs the staged CLI, so a stand-in file would prove
     nothing: the payload must be the code that actually ships.
     """
-    files = {"README.md": "top level, not laid", "installer/VERSION": version}
+    files = {"README.md": "top level, not laid", "installer/VERSION": version,
+             "configs/systemd/nivuus-check.timer": f"timer {version}\n"}
     for sub in ("packages", "common"):
         for path in (REPO / "installer" / sub).rglob("*.py"):
             rel = path.relative_to(REPO).as_posix()
@@ -73,6 +74,23 @@ def laid_version():
         return fh.read()
 
 
+unit_dir = os.path.join(ROOT, "etc", "systemd", "system")
+os.makedirs(unit_dir)
+with open(os.path.join(unit_dir, "nivuus-check.timer"), "w") as fh:
+    fh.write("timer laid by the install engine\n")
+applied = []
+
+
+def update(target=None):
+    return self_update.update_self(target or root, unit_dir=unit_dir,
+                                   apply=applied.append)
+
+
+def timer():
+    with open(os.path.join(unit_dir, "nivuus-check.timer")) as fh:
+        return fh.read()
+
+
 opt = os.path.join(ROOT, "opt", "nivuus")
 root = os.path.join(opt, "installer")
 os.makedirs(os.path.join(root, "packages"))
@@ -82,7 +100,10 @@ with open(os.path.join(root, "packages", "nivuus_cli.py"), "w") as fh:
 try:
     check("no record reads as 0.0.0", self_update.installed_version(), "0.0.0")
     fake.publish("nivuus/installer", "1.5.0", payload("1.5.0"))
-    check("the release is laid", self_update.update_self(root), "1.5.0")
+    check("the release is laid, with its units",
+          update(), ("1.5.0", ["nivuus-check.timer"]))
+    check("the unit carries the release's content", timer(), "timer 1.5.0\n")
+    check("and systemd was told", applied, [["nivuus-check.timer"]])
     check("with the release's files", laid_version(), "1.5.0")
     check("the CLI is executable",
           os.access(os.path.join(root, "packages", "nivuus_cli.py"), os.X_OK), True)
@@ -92,24 +113,31 @@ try:
     with open(os.path.join(os.environ["NIVUUS_STAMP_DIR"], "installer.json")) as fh:
         check("in its own record, not the package state",
               "updated_at" in json.load(fh), True)
-    check("a second run lays nothing", self_update.update_self(root), None)
+    check("a second run lays nothing", update(), (None, []))
+    with open(os.path.join(unit_dir, "nivuus-check.timer"), "w") as fh:
+        fh.write("timer from an older updater\n")
+    check("a current installer still catches its units up",
+          update(), (None, ["nivuus-check.timer"]))
+    check("from the current release", timer(), "timer 1.5.0\n")
 
     fake.publish("nivuus/installer", "1.6.0",
                  payload("1.6.0", drop=("installer/packages/answers.py",)))
     check_refused("a payload whose CLI cannot run is refused before the swap",
-                  lambda: self_update.update_self(root), "does not run from staging")
+                  lambda: update(), "does not run from staging")
     check("and the laid copy is untouched", laid_version(), "1.5.0")
+    check("nor are its units", timer(), "timer 1.5.0\n")
     check("no leftover beside it", sorted(os.listdir(opt)), ["installer"])
 
     fake.publish("nivuus/installer", "1.6.0", payload("1.6.0", installer_link=True))
     check_refused("an installer/ that is a link is refused",
-                  lambda: self_update.update_self(root), "not a plain directory")
+                  lambda: update(), "not a plain directory")
     check("the laid copy is still a real directory",
           (os.path.islink(root), laid_version()), (False, "1.5.0"))
 
     fake.publish("nivuus/installer", "1.6.0", payload("1.6.0"))
     check("a sound release is laid over the previous one",
-          (self_update.update_self(root), laid_version()), ("1.6.0", "1.6.0"))
+          (update(), laid_version(), timer()),
+          (("1.6.0", ["nivuus-check.timer"]), "1.6.0", "timer 1.6.0\n"))
     check("the previous copy is gone, nothing beside it",
           sorted(os.listdir(opt)), ["installer"])
 

@@ -117,9 +117,11 @@ def cmd_update(args) -> int:
         if args != ["--self"]:
             print("usage: nivuus update --self (alone)", file=sys.stderr)
             return 2
-        version = self_update.update_self()
+        version, changed = self_update.update_self()
         print(f"installer: updated to {version}" if version
               else "installer: already up to date")
+        for unit in changed:
+            print(f"installer: systemd unit {unit} refreshed")
         return 0
     laid = update(args or None, emit=_StderrEmit())
     print("\n".join(f"{name}: updated" for name in laid) or "nothing to update")
