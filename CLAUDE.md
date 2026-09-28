@@ -627,8 +627,15 @@ satisfy the new questions, `requires.packages` must be installed and not
 `activate` replay, and the state gets `state`/`target_version`/`error`/
 `updated_at`. A failed lay is never retried by a bare `nivuus update`, only by
 naming it. `adopt` records a hand-laid package (tracked files only, no hook,
-no invented answers). **Deferred**: HA `update` entities via mqtt, `update
---self`, `console`'s own `source:`, the `shell` rename.
+no invented answers); `nivuus answers <name> key=value…` then records them,
+typed and validated by the package's own wizard rules, required secrets
+asked on the terminal (never on argv). `nivuus update --self` lays the
+release's `installer/` subtree over the directory the CLI runs from (swap
+with restore, refuses a git checkout, never combined with packages), records
+the version in `STAMP_DIR/installer.json` — **not** in the package state,
+which every command iterates as packages — and does **not** refresh the
+systemd units under `configs/systemd/`. **Deferred**: HA `update` entities
+via mqtt, `console`'s own `source:`, the `shell` rename.
 
 **Arming `activate` takes three copies onto the target, and the whole phase is
 dead if any is missed** (it was, on the first cut of this branch, while the

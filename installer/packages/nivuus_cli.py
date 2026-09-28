@@ -4,8 +4,12 @@
     nivuus list                 installed packages, version laid, version available
     nivuus check                refresh what is available, lay nothing
     nivuus update [name...]     lay; with no name, every healthy package behind
+    nivuus update --self        lay the latest installer release (this command)
     nivuus status [name]        details, including why a lay failed
     nivuus adopt <package-dir>  record a package laid by hand
+    nivuus answers <name> [key=value...]
+                                record a package's wizard answers; required
+                                secrets are asked for on the terminal
 
 Any other first word is handed to `nivuus-<word>` from PATH, the way git
 does: `nivuus shell doctor` runs `nivuus-shell doctor` without this command
@@ -28,7 +32,7 @@ INSTALLER_ROOT = os.path.dirname(HERE)
 if INSTALLER_ROOT not in sys.path:
     sys.path.insert(0, INSTALLER_ROOT)
 
-from packages import releases, state  # noqa: E402
+from packages import answers, releases, self_update, state  # noqa: E402
 from packages.adopt import adopt  # noqa: E402
 from packages.state import StateError  # noqa: E402
 from packages.updater import AVAILABLE_NAME, UpdateError, check, update  # noqa: E402
@@ -74,6 +78,7 @@ def cmd_list(_args) -> int:
     widths = [max(len(row[i]) for row in rows) for i in range(4)]
     for row in rows:
         print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
+    print(f"\ninstaller (this command): {self_update.installed_version()}")
     checked = available.get("checked_at")
     print(f"\nlast check: {checked}" if checked else "\nnever checked: run 'nivuus check'")
     return 0
@@ -85,16 +90,36 @@ def cmd_check(_args) -> int:
         print(f"{pending.name}: {pending.installed} -> {pending.available}")
     for name in result.current:
         print(f"{name}: up to date")
+    unreachable = list(result.unreachable)
+    try:
+        installed, release = self_update.check_self()
+    except releases.ReleaseError as exc:
+        unreachable.append(("installer", str(exc)))
+    else:
+        behind = (releases.version_key(release.version)
+                  > releases.version_key(installed))
+        print(f"installer: {installed} -> {release.version} (nivuus update --self)"
+              if behind else "installer: up to date")
     for name, reason in result.skipped:
         print(f"{name}: not followed - {reason}", file=sys.stderr)
-    for name, reason in result.unreachable:
+    for name, reason in unreachable:
         print(f"{name}: could not be checked - {reason}", file=sys.stderr)
     # A check that could not reach a followed package's releases did not do
     # its job: the timer unit must show it failed, not succeed every day.
-    return 1 if result.unreachable else 0
+    return 1 if unreachable else 0
 
 
 def cmd_update(args) -> int:
+    if "--self" in args:
+        # Never in the same invocation as packages: an updater half replaced
+        # must not go on to lay anything.
+        if args != ["--self"]:
+            print("usage: nivuus update --self (alone)", file=sys.stderr)
+            return 2
+        version = self_update.update_self()
+        print(f"installer: updated to {version}" if version
+              else "installer: already up to date")
+        return 0
     laid = update(args or None, emit=_StderrEmit())
     print("\n".join(f"{name}: updated" for name in laid) or "nothing to update")
     return 0
@@ -120,8 +145,19 @@ def cmd_adopt(args) -> int:
     return 0
 
 
+def cmd_answers(args) -> int:
+    if not args:
+        print("usage: nivuus answers <name> [key=value...]", file=sys.stderr)
+        return 2
+    name, assignments = args[0], args[1:]
+    recorded = answers.record(name, assignments)
+    print(json.dumps({name: answers.masked(name, recorded)}, indent=2,
+                     ensure_ascii=False))
+    return 0
+
+
 COMMANDS = {"list": cmd_list, "check": cmd_check, "update": cmd_update,
-            "status": cmd_status, "adopt": cmd_adopt}
+            "status": cmd_status, "adopt": cmd_adopt, "answers": cmd_answers}
 
 
 def main(argv: list[str]) -> int:
