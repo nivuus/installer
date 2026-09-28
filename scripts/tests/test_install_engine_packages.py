@@ -196,7 +196,7 @@ with tempfile.TemporaryDirectory() as collision_root:
             "collision, not just 'introuvable'",
             lambda: steps_packages.plan_packages(
                 {**config, "packages": {"dupe": {}}}, HW, FakeEmit()),
-            "deux packages ou plus déclarent le nom")
+            "two or more packages declare the name")
     finally:
         steps_packages.discover = real_discover
 
@@ -257,6 +257,11 @@ def seed_payload(target: pathlib.Path) -> str:
     (payload / "installer" / "packages").mkdir(parents=True)
     shutil.copyfile(REPO / "installer/packages/activate_cli.py",
                     payload / "installer/packages/activate_cli.py")
+    shutil.copyfile(REPO / "installer/packages/nivuus_cli.py",
+                    payload / "installer/packages/nivuus_cli.py")
+    for unit in ("nivuus-check.service", "nivuus-check.timer"):
+        shutil.copyfile(REPO / "configs/systemd" / unit,
+                        payload / "configs/systemd" / unit)
     return "/opt/nivuus"
 
 
@@ -314,6 +319,22 @@ with tempfile.TemporaryDirectory() as tmp:
     check("the CLI that ExecStart names exists on the target", cli.is_file(),
           True)
     check("and it is executable", os.access(cli, os.X_OK), True)
+
+    # --- the updater's way in reaches the target too ------------------------ #
+    nivuus = target / "usr/local/sbin/nivuus"
+    check("the nivuus command is a symlink into the payload",
+          (nivuus.is_symlink(), os.readlink(nivuus)),
+          (True, "/opt/nivuus/installer/packages/nivuus_cli.py"))
+    check("the CLI it names is executable on the target",
+          os.access(target / "opt/nivuus/installer/packages/nivuus_cli.py",
+                    os.X_OK), True)
+    check("the daily check unit reaches the target",
+          "ExecStart=/usr/local/sbin/nivuus check" in
+          (target / "etc/systemd/system/nivuus-check.service").read_text(), True)
+    timer_link = target / "etc/systemd/system/timers.target.wants/nivuus-check.timer"
+    check("and its timer is enabled",
+          (timer_link.is_symlink(), os.readlink(timer_link)),
+          (True, "/etc/systemd/system/nivuus-check.timer"))
 
     pkg_dir = target / "opt/nivuus-packages/demo"
     check("the selected package travels to the target", pkg_dir.is_dir(), True)
@@ -427,6 +448,18 @@ with tempfile.TemporaryDirectory() as tmp:
           received.get("total_cpus"), 24)
     check("la detection fraiche est passee entiere, pas remplacee",
           received.get("memory_mib"), 65536)
+
+    # A package whose last update failed is not replayed at boot: that would
+    # be the automatic retry the updater refuses to make.
+    state_path = target / "etc/nivuus/packages.json"
+    recorded = json.loads(state_path.read_text())
+    recorded["mesureur"].update(state="failed", target_version="9.0.0",
+                                error="hook exited 1")
+    state_path.write_text(json.dumps(recorded))
+    hw_out.unlink()
+    check("activate_cli refuses a package whose update failed",
+          activate_cli.main(["activate_cli.py", "mesureur"]), 1)
+    check("and runs none of its hooks", hw_out.exists(), False)
     del os.environ["MESUREUR_HW_OUT"]
 
 # --- the activate phase's own apt requirements are fatal, unlike the ------- #
