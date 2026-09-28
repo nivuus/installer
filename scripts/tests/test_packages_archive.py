@@ -63,7 +63,7 @@ def refused(label, *entries):
 
 with tempfile.TemporaryDirectory() as root:
     dest = os.path.join(root, "dest")
-    extract(archive(entry("./", tarfile.DIRTYPE), entry("hooks/", tarfile.DIRTYPE, mode=0o777),
+    extract(archive(entry("./", tarfile.DIRTYPE, mode=0o775), entry("hooks/", tarfile.DIRTYPE, mode=0o777),
                     entry("hooks/install.py", mode=0o4777),
                     entry("link", tarfile.SYMTYPE, linkname="hooks/install.py"),
                     entry("hard", tarfile.LNKTYPE, linkname="hooks/install.py",

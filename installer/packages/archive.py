@@ -82,6 +82,19 @@ def extract(tar: tarfile.TarFile, dest: str) -> None:
     """
     os.makedirs(dest, exist_ok=True)
     root = os.path.realpath(dest)
+    directories = []
     for member in tar.getmembers():
-        tar.extract(_checked(member, root), dest, numeric_owner=True,
-                    **_NO_FURTHER_FILTER)
+        member = _checked(member, root)
+        # A directory's own mode is applied only once everything is in place,
+        # deepest first - what extractall() does: applied at once, a
+        # directory without write or search permission would refuse its own
+        # children to any extracting user but root.
+        tar.extract(member, dest, set_attrs=not member.isdir(),
+                    numeric_owner=True, **_NO_FURTHER_FILTER)
+        if member.isdir():
+            directories.append(member)
+    for member in sorted(directories, key=lambda m: m.name, reverse=True):
+        path = os.path.join(dest, member.name)
+        tar.chown(member, path, True)
+        tar.utime(member, path)
+        tar.chmod(member, path)
