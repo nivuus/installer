@@ -61,6 +61,13 @@ the live image to disk. Full docs: `installer/README.md`.
 - `installer/install-engine/` — `run.py` orchestrator + `steps/` (partition,
   debootstrap, chroot_base, bootloader, features, validate). `--stop-after STEP`
   for staged testing. `templates/*.j2` render NM bridges, VLAN, PPPoE, hostapd.
+  `chroot_base` also lays the **memory guard on every host, whatever the
+  wizard selected**: `earlyoom` in `CORE_PACKAGES` (fails the install loudly)
+  + `/etc/default/earlyoom` from `EARLYOOM_ARGS` (`-m 10,5 -s 100,100`, `--avoid`
+  on infrastructure, no `--prefer`). Added after the 2026-09-27 hang: orphaned
+  vitest workers took ~28 GB, swap full, 45 min of thrashing with no OOM kill.
+  earlyoom, not systemd-oomd: oomd kills a whole cgroup (every SSH session in
+  a `session-N.scope`). Suite: `scripts/tests/test_install_engine_base.py`.
 - `installer/webapp/` — FastAPI portal: `main.py` (routes + `/ws/progress` +
   captive-detection endpoints), `models.py` (Pydantic v2 `InstallConfig`),
   `installer_runner.py`, `static/` + `templates/` wizard.

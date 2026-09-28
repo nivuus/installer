@@ -1,7 +1,8 @@
 """Step 6: base configuration inside the chroot.
 
 Locale, timezone, hostname/hosts, apt sources, the primary user account
-(password + sudo + SSH key), and sshd hardening from the wizard answers.
+(password + sudo + SSH key), sshd hardening from the wizard answers, and the
+memory guard every host gets whatever the wizard selected.
 """
 from __future__ import annotations
 
@@ -14,8 +15,27 @@ from .util import StepError, chroot_run, chroot_stream, write_file
 # so their dbus/logind/polkit dependency chains configure in the right order.
 CORE_PACKAGES = [
     "network-manager", "openssh-server", "sudo", "dbus", "polkitd",
-    "ifupdown", "iproute2", "iputils-ping",
+    "ifupdown", "iproute2", "iputils-ping", "earlyoom",
 ]
+
+# earlyoom options. On 2026-09-27 orphaned test workers took ~28 GB with swap
+# already full, and the kernel thrashed its page cache for 45 minutes without
+# ever invoking the OOM killer. earlyoom kills the single biggest process
+# instead (systemd-oomd kills a whole cgroup, i.e. every SSH session sharing it).
+#   -m 10,5  SIGTERM under 10 % available memory, SIGKILL under 5 %
+#   -s 100,100  ignore swap for both signals; without ",100" the SIGKILL limit
+#               defaults to half, i.e. it would wait for 50 % free swap
+# No --prefer: its +300 would pick a small innocent process over the runaway.
+# --avoid takes 300 off the infrastructure below. Names are matched against
+# /proc/pid/comm, which the kernel truncates to 15 bytes.
+EARLYOOM_AVOID = [
+    "qemu-system-x86", "virtiofsd", "libvirtd", "virtqemud",
+    "dockerd", "containerd", "containerd-shim",
+    "sshd", "systemd", "systemd-journal", "systemd-logind", "dbus-daemon",
+    "pppd", "NetworkManager", "hostapd", "dnsmasq", "mosquitto", "firewalld",
+]
+EARLYOOM_ARGS = ("-r 3600 -m 10,5 -s 100,100 "
+                 f"--avoid '^({'|'.join(EARLYOOM_AVOID)})$'")
 
 
 def configure_base(config: dict, target: str, emit) -> None:
@@ -25,6 +45,7 @@ def configure_base(config: dict, target: str, emit) -> None:
     _hostname(config, target)
     _user(config, target, emit)
     _sshd(config, target, emit)
+    _memory_guard(target, emit)
 
 
 def _install_core_packages(target: str, emit) -> None:
@@ -130,3 +151,11 @@ def _sshd(config: dict, target: str, emit) -> None:
     write_file(os.path.join(target, "etc/ssh/sshd_config.d/10-nivuus.conf"), conf)
     chroot_run(target, ["systemctl", "enable", "ssh"], check=False)
     chroot_run(target, ["systemctl", "enable", "NetworkManager"], check=False)
+
+
+def _memory_guard(target: str, emit) -> None:
+    emit.info("base", 69, "Configuring the memory guard (earlyoom)…")
+    write_file(os.path.join(target, "etc/default/earlyoom"),
+               "# Managed by the Nivuus installer (see chroot_base.py)\n"
+               f'EARLYOOM_ARGS="{EARLYOOM_ARGS}"\n')
+    chroot_run(target, ["systemctl", "enable", "earlyoom"])
