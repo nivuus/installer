@@ -96,6 +96,22 @@ refused("write through a link", entry("up", tarfile.SYMTYPE, linkname="."),
         entry("sub/l/../evil"))
 
 
+# This repository's own release is `git archive HEAD`, and `nivuus update
+# --self` extracts it with extract(). Tracked links into live-build's install
+# tree once made it unextractable, which only a real run on the reference
+# host revealed: this proves the archive the release will publish passes.
+import subprocess  # noqa: E402
+
+with tempfile.TemporaryDirectory() as root:
+    tarball = os.path.join(root, "release.tar")
+    subprocess.run(["git", "-C", str(REPO), "archive", "--format=tar",
+                    "-o", tarball, "HEAD"], check=True)
+    try:
+        with tarfile.open(tarball) as tar:
+            extract(tar, os.path.join(root, "dest"))
+    except ArchiveError as exc:
+        failures.append(f"this repository's release archive is refused: {exc}")
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
