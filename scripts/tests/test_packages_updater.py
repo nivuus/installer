@@ -265,8 +265,8 @@ try:
     publish("demo", "1.4.0")
     check_eq("a leftover from an interrupted run does not block the package",
              update(["demo"], hw_detect=hw), ["demo"])
-    check_eq("and it is cleared", os.path.exists(staging_dir)
-             and os.listdir(staging_dir), [])
+    check_eq("and it is cleared, directory included",
+             os.path.exists(staging_dir), False)
 
     real_install = updater_mod.run_install
 
@@ -365,6 +365,10 @@ try:
         publish("handmade", "1.0.0")
         check_eq("an adopted package updates to the release",
                  update(["handmade"], hw_detect=hw), ["handmade"])
+        check_eq("and no longer claims to come from the adopted directory",
+                 "adopted_from" in state.load()["handmade"], False)
+    check_eq("no empty staging directory is left beside the packages",
+             os.path.exists(updater_mod.STAGING_DIR), False)
 finally:
     fake.close()
 

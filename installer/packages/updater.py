@@ -371,4 +371,6 @@ def update(names=None, fetch=releases.latest_release, hw_detect=_default_hw,
             for staging, _, _ in prepared.values():
                 if os.path.lexists(staging):
                     shutil.rmtree(staging)
+            if os.path.isdir(STAGING_DIR) and not os.listdir(STAGING_DIR):
+                os.rmdir(STAGING_DIR)
         return laid
