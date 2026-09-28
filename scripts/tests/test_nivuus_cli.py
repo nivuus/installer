@@ -87,8 +87,15 @@ try:
     fake.publish("nivuus/demo", "1.0.0", fake_github.build_archive({
         "nivuus-package.yaml": MANIFEST.format(version="1.0.0"),
         "hooks/install.py": HOOK}))
-    check("check reports the pending release",
-          run("check")[:2], (0, "demo: 0.0.0 -> 1.0.0\n"))
+    code, out, err = run("check")
+    check("check fails when the installer's own release is unreachable",
+          (code, "installer: could not be checked" in err), (1, True))
+    fake.publish("nivuus/installer", "2.0.0", fake_github.build_archive({
+        "installer/packages/nivuus_cli.py": ""}))
+    check("check reports the pending release and the installer's",
+          run("check")[:2],
+          (0, "demo: 0.0.0 -> 1.0.0\n"
+              "installer: 0.0.0 -> 2.0.0 (nivuus update --self)\n"))
     code, out, _ = run("list")
     contains("list shows what is available", out, "demo     0.0.0      1.0.0")
 
@@ -103,6 +110,16 @@ try:
     code, _, err = run("update", "ghost")
     check("an error exits 1", code, 1)
     contains("and names the package", err, "ghost: not installed")
+
+    code, _, err = run("update", "--self")
+    check("update --self refuses a git checkout", code, 1)
+    contains("and says why", err, "update it with git")
+    check("update --self never shares an invocation with packages",
+          run("update", "--self", "demo")[0], 2)
+
+    code, _, err = run("answers", "demo", "zone=north")
+    check("answers to a package without questions are refused", code, 1)
+    contains("naming what it asks", err, "unknown question 'zone'")
 
     check("unknown word delegates to nivuus-<word>",
           run("hello", "world")[:2], (0, "hello world\n"))
