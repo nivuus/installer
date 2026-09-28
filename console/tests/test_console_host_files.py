@@ -16,6 +16,7 @@ the opposite. Nothing structural forbade it, which is why it is checked here.
 """
 import importlib.util
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -132,6 +133,33 @@ for rel in ("host/apparmor/local-usr.sbin.libvirtd",
             "host/apparmor/local-abstractions-libvirt-qemu"):
     check(f"{rel} est versionne et pose par install.py",
           os.path.isfile(os.path.join(CONSOLE, rel)) and rel in deployed)
+
+# A hook may pause media-manager's containers and resume them - `stop` and
+# `start`, which never recreate anything - but it must never converge that
+# stack. The hooks address it with an explicit `-f docker-compose.yml`, and an
+# explicit -f makes compose ignore the COMPOSE_FILE that media-manager writes
+# into its .env to add its hardware overlay (docker-compose.qsv.yml: /dev/dri).
+# Any recreate from a hook therefore drops the iGPU, and `up <service>` also
+# converges that service's dependencies: rebind-host-gpu.sh ran
+# `up -d tdarr-node-nvenc` on every VM shutdown, which could recreate `tdarr`
+# itself without /dev/dri (2026-09-28 audit).
+MEDIA_MANAGER = "/opt/nivuus/media-manager/"
+CONVERGING = re.compile(r"\s(up|create|run)(\s|$)")
+for dirpath, _dirnames, filenames in os.walk(hooks_root):
+    for name in filenames:
+        path = os.path.join(dirpath, name)
+        rel = os.path.relpath(path, CONSOLE)
+        # Join backslash continuations: 10-cpu-confine.sh spreads its compose
+        # call over two lines.
+        text = open(path).read().replace("\\\n", " ")
+        for line in text.splitlines():
+            code = line.split("#", 1)[0]
+            if "docker compose" not in code or MEDIA_MANAGER not in code:
+                continue
+            verb = CONVERGING.search(code)
+            check(f"{rel} only stops/starts media-manager containers, "
+                  f"found `{verb.group(1) if verb else ''}`",
+                  verb is None)
 
 if failures:
     for item in failures:

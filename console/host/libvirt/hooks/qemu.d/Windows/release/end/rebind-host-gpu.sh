@@ -127,7 +127,12 @@ nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml \
 
 # ollama runs in docker; `up -d` (re)creates with the GPU device now that nvidia is back
 docker compose -f /opt/nivuus/ollama/docker-compose.yml --env-file /opt/nivuus/ollama/.env up -d
-# le node NVENC de Tdarr reprend la file d'encodage sur la carte redevenue disponible
-docker compose -f /opt/nivuus/media-manager/docker-compose.yml --env-file /opt/nivuus/media-manager/.env up -d tdarr-node-nvenc
+# Tdarr's NVENC node resumes the encode queue on the card it just got back.
+# `start`, never `up`: bind-vfio-gpu.sh only STOPPED this container, so starting
+# it again is the exact inverse. `up` with an explicit -f ignores the
+# COMPOSE_FILE overlays media-manager writes into its .env, and it also
+# converges the service's dependencies - it could recreate `tdarr` without
+# /dev/dri at every VM shutdown (2026-09-28 audit).
+docker compose -f /opt/nivuus/media-manager/docker-compose.yml --env-file /opt/nivuus/media-manager/.env start tdarr-node-nvenc
 
 logger -t gpu-rebind "Fin du rebind GPU (managed reattach + modules/persistenced/CDI)"
