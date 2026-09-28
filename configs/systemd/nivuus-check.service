@@ -1,0 +1,10 @@
+[Unit]
+Description=Nivuus: check installed packages against their latest releases
+# Checks only: it refreshes /var/lib/nivuus/packages/available.json and lays
+# nothing. Laying a release stays the operator's decision (nivuus update).
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nivuus check

@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""`nivuus`, the command that follows installed packages to their releases.
+
+    nivuus list                 installed packages, version laid, version available
+    nivuus check                refresh what is available, lay nothing
+    nivuus update [name...]     lay; with no name, every healthy package behind
+    nivuus status [name]        details, including why a lay failed
+    nivuus adopt <package-dir>  record a package laid by hand
+
+Any other first word is handed to `nivuus-<word>` from PATH, the way git
+does: `nivuus shell doctor` runs `nivuus-shell doctor` without this command
+knowing anything about shell.
+
+Installed as a symlink /usr/local/sbin/nivuus -> this file, which lives in
+the installer payload. It resolves its own path, so the symlink can import
+`packages` and `common` from where they really are - the same reason
+activate_cli.py is run in place.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+INSTALLER_ROOT = os.path.dirname(HERE)
+if INSTALLER_ROOT not in sys.path:
+    sys.path.insert(0, INSTALLER_ROOT)
+
+from packages import releases, state  # noqa: E402
+from packages.adopt import adopt  # noqa: E402
+from packages.state import StateError  # noqa: E402
+from packages.updater import AVAILABLE_NAME, UpdateError, check, update  # noqa: E402
+
+USAGE = __doc__.split("\n\n")[1]
+
+
+class _StderrEmit:
+    def _write(self, level, msg):
+        print(f"[{level}] {msg}", file=sys.stderr, flush=True)
+
+    def info(self, step, pct, msg):
+        self._write("info", msg)
+
+    def warn(self, step, pct, msg):
+        self._write("warn", msg)
+
+    def error(self, step, pct, msg):
+        self._write("error", msg)
+
+
+def _available() -> dict:
+    path = os.path.join(state.STAMP_DIR, AVAILABLE_NAME)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        return {}
+
+
+def cmd_list(_args) -> int:
+    current = state.load()
+    if not current:
+        print(f"no package recorded in {state.STATE_FILE}")
+        return 0
+    available = _available()
+    known = available.get("packages", {})
+    rows = [("PACKAGE", "INSTALLED", "AVAILABLE", "STATE")]
+    for name, record in sorted(current.items()):
+        rows.append((name, record.get("version", "?"),
+                     known.get(name, {}).get("available", "-"),
+                     state.status(record)))
+    widths = [max(len(row[i]) for row in rows) for i in range(4)]
+    for row in rows:
+        print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
+    checked = available.get("checked_at")
+    print(f"\nlast check: {checked}" if checked else "\nnever checked: run 'nivuus check'")
+    return 0
+
+
+def cmd_check(_args) -> int:
+    result = check()
+    for pending in result.pending:
+        print(f"{pending.name}: {pending.installed} -> {pending.available}")
+    for name in result.current:
+        print(f"{name}: up to date")
+    for name, reason in result.skipped:
+        print(f"{name}: not checked - {reason}", file=sys.stderr)
+    return 0
+
+
+def cmd_update(args) -> int:
+    laid = update(args or None, emit=_StderrEmit())
+    print("\n".join(f"{name}: updated" for name in laid) or "nothing to update")
+    return 0
+
+
+def cmd_status(args) -> int:
+    current = state.load()
+    names = args or sorted(current)
+    for name in names:
+        if name not in current:
+            raise UpdateError(f"{name}: not installed on this machine")
+        record = {k: v for k, v in current[name].items() if k != "answers"}
+        record["state"] = state.status(current[name])
+        print(json.dumps({name: record}, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_adopt(args) -> int:
+    if len(args) != 1:
+        print("usage: nivuus adopt <package-dir>", file=sys.stderr)
+        return 2
+    print(f"{adopt(args[0])}: adopted")
+    return 0
+
+
+COMMANDS = {"list": cmd_list, "check": cmd_check, "update": cmd_update,
+            "status": cmd_status, "adopt": cmd_adopt}
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 2 or argv[1] in ("-h", "--help", "help"):
+        print(USAGE)
+        return 0 if len(argv) >= 2 else 2
+    word, args = argv[1], argv[2:]
+    if word not in COMMANDS:
+        delegate = shutil.which(f"nivuus-{word}")
+        if delegate is None:
+            print(f"nivuus: unknown command {word!r}\n{USAGE}", file=sys.stderr)
+            return 2
+        os.execv(delegate, [delegate, *args])
+    try:
+        return COMMANDS[word](args)
+    except (UpdateError, releases.ReleaseError, StateError) as exc:
+        print(f"nivuus {word}: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily check of Nivuus packages against their latest releases
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+# A machine that was off at the scheduled time checks at its next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -257,6 +257,11 @@ def seed_payload(target: pathlib.Path) -> str:
     (payload / "installer" / "packages").mkdir(parents=True)
     shutil.copyfile(REPO / "installer/packages/activate_cli.py",
                     payload / "installer/packages/activate_cli.py")
+    shutil.copyfile(REPO / "installer/packages/nivuus_cli.py",
+                    payload / "installer/packages/nivuus_cli.py")
+    for unit in ("nivuus-check.service", "nivuus-check.timer"):
+        shutil.copyfile(REPO / "configs/systemd" / unit,
+                        payload / "configs/systemd" / unit)
     return "/opt/nivuus"
 
 
@@ -314,6 +319,22 @@ with tempfile.TemporaryDirectory() as tmp:
     check("the CLI that ExecStart names exists on the target", cli.is_file(),
           True)
     check("and it is executable", os.access(cli, os.X_OK), True)
+
+    # --- the updater's way in reaches the target too ------------------------ #
+    nivuus = target / "usr/local/sbin/nivuus"
+    check("the nivuus command is a symlink into the payload",
+          (nivuus.is_symlink(), os.readlink(nivuus)),
+          (True, "/opt/nivuus/installer/packages/nivuus_cli.py"))
+    check("the CLI it names is executable on the target",
+          os.access(target / "opt/nivuus/installer/packages/nivuus_cli.py",
+                    os.X_OK), True)
+    check("the daily check unit reaches the target",
+          "ExecStart=/usr/local/sbin/nivuus check" in
+          (target / "etc/systemd/system/nivuus-check.service").read_text(), True)
+    timer_link = target / "etc/systemd/system/timers.target.wants/nivuus-check.timer"
+    check("and its timer is enabled",
+          (timer_link.is_symlink(), os.readlink(timer_link)),
+          (True, "/etc/systemd/system/nivuus-check.timer"))
 
     pkg_dir = target / "opt/nivuus-packages/demo"
     check("the selected package travels to the target", pkg_dir.is_dir(), True)

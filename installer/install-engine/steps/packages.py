@@ -45,6 +45,7 @@ from packages.wizard import (DISK_TYPE, WizardError, load_questions,
                              validate_answers)
 
 from .bootloader import grub_defaults
+from .package_updates import deploy_updater
 from .util import StepError, chroot_run, write_file
 
 STATE_REL_PATH = "etc/nivuus/packages.json"
@@ -383,6 +384,8 @@ def apply_packages(plan, target: str, nivuus_dir: str, hw: dict, emit) -> None:
                       "sans ces dépendances")
 
     _deploy_activation(plan, target, nivuus_dir, emit)
+    # A machine that receives packages also receives the way to follow them.
+    deploy_updater(target, nivuus_dir)
 
     # The answers - and the facts resolve measured - must outlive the portal:
     # the activate phase runs at first boot, long after there is anyone left
