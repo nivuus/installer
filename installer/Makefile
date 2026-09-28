@@ -53,16 +53,18 @@ test-vm:
 
 # Run the package-engine test suite (no root, no chroot, no ISO).
 #
-# PYTHON is overridable because two of the 13 Python suites in the loop below
+# PYTHON is overridable because two of the 14 Python suites in the loop below
 # need a dependency that is NOT in the Debian base: test_webapp_models needs
 # pydantic v2 (bookworm ships v1) and test_install_engine_features needs
 # jinja2 (the 3 shell suites of test-scripts need neither). Measured
-# suite by suite, 2026-08-28. `make test-packages PYTHON=/path/to/venv/bin/python3`.
+# suite by suite, 2026-08-28. test_install_engine_base imports chroot_base,
+# which imports `crypt`: removed in Python 3.13, so it needs <= 3.12 (the ISO
+# is bookworm, 3.11). `make test-packages PYTHON=/path/to/venv/bin/python3`.
 # The CI runs no Python tests at all (ci.yml sets test-paths: ""), so this target
 # is the only aggregator there is - and an aggregator that fails for a missing
 # dependency reads as "the engine is broken", which is the wrong thing to learn.
 #
-# 39 suites (2026-08-29, measured): 13 run directly below (the engine/webapp/
+# 40 suites (2026-09-28): 14 run directly below (the engine/webapp/
 # packages suites that stay outside console/), 3 shell suites are delegated to
 # the `test-scripts` prerequisite below, and 23 are delegated to
 # `console/Makefile`'s own `test` target - every suite testing code that lives
@@ -95,7 +97,8 @@ test-packages: test-scripts
 	          test_packages_plan_order \
 	          test_webapp_models \
 	          test_common_hardware \
-	          test_install_engine_features; do \
+	          test_install_engine_features \
+	          test_install_engine_base; do \
 	    echo "--- $$t"; \
 	    $(PYTHON) $(dir $(INSTALLER_DIR))scripts/tests/$$t.py || exit 1; \
 	done
