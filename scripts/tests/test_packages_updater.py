@@ -289,6 +289,28 @@ try:
     check_eq("a bare update leaves it for the operator", update(hw_detect=hw), [])
     check_eq("naming it completes the lay", update(["demo"], hw_detect=hw), ["demo"])
 
+    real_rename = os.rename
+
+    def rename_refusing_the_new_copy(src, dst):
+        if dst == os.path.join(PACKAGES_DIR, "demo") and src.startswith(staging_dir) \
+                and not src.endswith(".previous"):
+            raise OSError("simulated: rename refused")
+        return real_rename(src, dst)
+
+    publish("demo", "1.6.0")
+    updater_mod.os.rename = rename_refusing_the_new_copy
+    try:
+        check_refused("a refused swap is raised",
+                      lambda: update(["demo"], hw_detect=hw), "rename refused")
+    finally:
+        updater_mod.os.rename = real_rename
+    check_eq("the previous copy is put back, never left missing",
+             installed_version("demo"), "1.5.0")
+    check_eq("and the failure is recorded",
+             state.status(state.load()["demo"]), "failed")
+    check_eq("the next named update completes", update(["demo"], hw_detect=hw),
+             ["demo"])
+
     install_locally("ping", "1.0.0", answers={}, requires=["pong"])
     install_locally("pong", "1.0.0", answers={}, requires=["ping"])
     publish("ping", "1.1.0", requires=["pong"])
@@ -323,6 +345,23 @@ try:
                  (record["version"], record["answers"]), ("0.0.0", {}))
         check_eq("adoption runs no hook", len(witness()), lines)
         check_refused("adopting twice", lambda: adopt(clone), "already recorded")
+        os.makedirs(os.path.join(clone, ".git"))
+        saved_path = os.environ["PATH"]
+        os.environ["PATH"] = ""
+        try:
+            current = state.load()
+            del current["handmade"]
+            state.save(current)
+            import shutil
+            shutil.rmtree(os.path.join(PACKAGES_DIR, "handmade"))
+            check_refused("a clone cannot be adopted without git",
+                          lambda: adopt(clone), "git is not installed")
+            check_eq("and nothing is left half-copied",
+                     os.path.exists(os.path.join(PACKAGES_DIR, "handmade")), False)
+            os.rmdir(os.path.join(clone, ".git"))
+            check_eq("a plain directory needs no git", adopt(clone), "handmade")
+        finally:
+            os.environ["PATH"] = saved_path
         publish("handmade", "1.0.0")
         check_eq("an adopted package updates to the release",
                  update(["handmade"], hw_detect=hw), ["handmade"])

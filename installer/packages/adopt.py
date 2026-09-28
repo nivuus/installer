@@ -25,6 +25,7 @@ import tarfile
 import tempfile
 
 from . import state as state_mod
+from .archive import ArchiveError, extract
 from .discovery import PACKAGES_DIR
 from .manifest import MANIFEST_NAME, ManifestError, load_manifest
 from .updater import UpdateError, lock
@@ -37,11 +38,21 @@ def _copy_tracked(source: str, dest: str) -> None:
     .env; `git archive HEAD` is what the release workflow publishes, so it is
     what an adopted copy should hold too.
     """
-    inside = subprocess.run(
-        ["git", "-C", source, "rev-parse", "--is-inside-work-tree"],
-        capture_output=True, text=True)
+    if shutil.which("git") is None:
+        # The installed target has no git by default. A plain copy is only
+        # honest when the directory is not a clone - otherwise it would carry
+        # .git, caches and possibly a .env.
+        if os.path.lexists(os.path.join(source, ".git")):
+            raise UpdateError(f"{source} is a git clone and git is not "
+                              "installed: install git to copy only its "
+                              "tracked files")
+        is_clone = False
+    else:
+        is_clone = subprocess.run(
+            ["git", "-C", source, "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True).returncode == 0
     try:
-        if inside.returncode != 0:
+        if not is_clone:
             shutil.copytree(source, dest, symlinks=True)
             return
         with tempfile.TemporaryFile() as archive:
@@ -54,8 +65,8 @@ def _copy_tracked(source: str, dest: str) -> None:
             archive.seek(0)
             os.makedirs(dest)
             with tarfile.open(fileobj=archive) as tar:
-                tar.extractall(dest, filter="data")
-    except (OSError, tarfile.TarError, UpdateError) as exc:
+                extract(tar, dest)
+    except (OSError, tarfile.TarError, ArchiveError, UpdateError) as exc:
         # A partial copy would make every later adopt refuse "already exists".
         if os.path.lexists(dest):
             shutil.rmtree(dest)

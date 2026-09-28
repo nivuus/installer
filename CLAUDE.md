@@ -618,7 +618,9 @@ symlinked to `/usr/local/sbin/nivuus` by `steps/package_updates.py`, which
 also enables the check-only `nivuus-check.timer`). A package is followed only
 if its manifest declares `source: {github: owner/repo[, path: sub]}`; the tag
 `vX.Y.Z` is the version, the archive is verified against `SHA256SUMS` **and**
-the API asset `digest` (fail closed), extracted with `tarfile` `filter="data"`,
+the API asset `digest` (fail closed), extracted by `packages/archive.py` (member-by-member `realpath` checks —
+**not** `tarfile`'s `filter=`, which bookworm's Python 3.11.2 rejects with
+`TypeError`; the suites run on 3.13 and never saw it, a PR review did),
 its manifest must carry the same name and version, recorded answers must
 satisfy the new questions, `requires.packages` must be installed and not
 `failed` — all before the directory is swapped. Then `install` (root `/`) +

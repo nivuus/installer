@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from . import releases, state as state_mod
+from .archive import ArchiveError, extract
 from .dependencies import DependencyError, install_order
 from .discovery import PACKAGES_DIR, discover
 from .facts import STATE_KEY as FACTS_STATE_KEY
@@ -177,7 +178,7 @@ def _write_available(current_state: dict, pending, skipped) -> None:
 def _stage(name: str, archive: str, subpath: str) -> tuple[str, str]:
     """Extract `archive` beside the installed copy. Returns (staging, root).
 
-    The `data` filter refuses absolute paths, `..` and links leaving the
+    archive.extract() refuses absolute paths, `..` and links leaving the
     extraction directory: a hostile or broken archive is refused here, before
     anything installed is touched.
     """
@@ -187,8 +188,8 @@ def _stage(name: str, archive: str, subpath: str) -> tuple[str, str]:
     os.makedirs(staging)
     try:
         with tarfile.open(archive) as tar:
-            tar.extractall(staging, filter="data")
-    except (tarfile.TarError, OSError) as exc:
+            extract(tar, staging)
+    except (ArchiveError, tarfile.TarError, OSError) as exc:
         shutil.rmtree(staging)
         raise UpdateError(f"{name}: {os.path.basename(archive)} cannot be "
                           f"extracted ({exc})") from exc
@@ -259,7 +260,14 @@ def _swap(name: str, staging: str, root: str) -> Manifest:
         shutil.rmtree(aside)
     if os.path.lexists(dest):
         os.rename(dest, aside)
-    os.rename(root, dest)
+    try:
+        os.rename(root, dest)
+    except OSError:
+        # Never leave the machine with no copy at all: put the previous one
+        # back, then let the failure be recorded and raised.
+        if os.path.lexists(aside) and not os.path.lexists(dest):
+            os.rename(aside, dest)
+        raise
     for leftover in (aside, staging):
         if os.path.lexists(leftover):
             shutil.rmtree(leftover)
