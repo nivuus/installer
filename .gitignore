@@ -18,6 +18,16 @@ installer/iso-build/config/bootstrap
 installer/iso-build/config/chroot
 installer/iso-build/config/common
 installer/iso-build/config/source
+# `lb config` links live-build's own default hooks here, as absolute
+# symlinks into /usr/share/live/build/hooks (Debian bug #793587), and
+# regenerates them on every build (build.sh runs ./auto/config). Tracked,
+# they only pointed nowhere on any machine without live-build - and made the
+# installer's release archive unextractable by a safe extractor, which
+# refuses a link that leaves the archive. Only our own hooks are tracked.
+installer/iso-build/config/hooks/normal/*
+!installer/iso-build/config/hooks/normal/0500-nivuus-venv.hook.chroot
+!installer/iso-build/config/hooks/normal/9000-enable-services.hook.chroot
+installer/iso-build/config/hooks/live/*
 installer/iso-build/local/
 
 # Payload synced in by build.sh (regenerated each build; mirrors the repo)
