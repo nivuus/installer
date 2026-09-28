@@ -41,6 +41,13 @@ PLATFORM_KEYS = ("kernel-cmdline", "modules", "hugepages-mib")
 # singular would install a satellite before the package it needs.
 REQUIRES_KEYS = ("capabilities", "features", "packages")
 
+# `source:` names where a package's releases are published. Closed like
+# `requires:`: a misspelt key would otherwise leave a package that looks
+# updatable and never is.
+SOURCE_KEYS = ("github", "path")
+# GitHub's own rules for an owner and a repository name, joined by one slash.
+GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$")
+
 
 class ManifestError(RuntimeError):
     """Raised when a manifest cannot be parsed or violates the contract."""
@@ -71,6 +78,18 @@ class Platform:
 
 
 @dataclass(frozen=True)
+class Source:
+    """Where the updater looks for this package's releases.
+
+    `path` is the package's directory inside the release archive, "" for the
+    archive root. Only a package living inside another repository's tree
+    (console, inside installer) needs it.
+    """
+    github: str
+    path: str = ""
+
+
+@dataclass(frozen=True)
 class Manifest:
     name: str
     version: str
@@ -90,6 +109,9 @@ class Manifest:
     apt: tuple[str, ...] = ()
     questions_file: str = ""
     hooks: tuple[tuple[str, str], ...] = ()
+    # None when the manifest declares no `source:` - such a package is never
+    # updated, and the updater says so rather than skipping it in silence.
+    source: Source | None = None
 
     def hook_path(self, phase: str) -> str:
         """Absolute path of the hook for `phase`, or "" when none is declared."""
@@ -164,6 +186,27 @@ def _parse_platform(raw: Any, tier: str, what: str) -> Platform:
         modules=_str_list(raw, "modules", what),
         hugepages_mib=hugepages,
     )
+
+
+def _parse_source(raw: Any, what: str) -> Source | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ManifestError(f"{what}: 'source' must be a mapping")
+    unknown = [k for k in raw if k not in SOURCE_KEYS]
+    if unknown:
+        raise ManifestError(
+            f"{what}: unknown key(s) under 'source': {sorted(map(str, unknown))}; "
+            f"expected {list(SOURCE_KEYS)}")
+    github = _require(raw, "github", f"{what} (source)")
+    if not GITHUB_REPO_RE.match(github) or ".." in github:
+        raise ManifestError(
+            f"{what}: source github {github!r} must be owner/repository")
+    path_raw = raw.get("path")
+    if path_raw is not None and not isinstance(path_raw, str):
+        raise ManifestError(f"{what}: source 'path' must be a string")
+    path = _safe_relpath(path_raw, what) if path_raw and path_raw.strip("/") else ""
+    return Source(github=github, path="" if path == "." else path)
 
 
 def parse_manifest(data: Any, root: str) -> Manifest:
@@ -249,6 +292,7 @@ def parse_manifest(data: Any, root: str) -> Manifest:
         apt=_str_list(data, "apt", what),
         questions_file=questions_file,
         hooks=tuple(hooks),
+        source=_parse_source(data.get("source"), what),
     )
 
 

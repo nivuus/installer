@@ -16,7 +16,8 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "installer"))
 
 from packages.manifest import (  # noqa: E402
-    API_VERSION, ManifestError, Platform, load_manifest, parse_manifest,
+    API_VERSION, ManifestError, Platform, Source, load_manifest,
+    parse_manifest,
 )
 
 failures = []
@@ -227,6 +228,42 @@ legacy = parse_manifest({**MINIMAL, "requires": {
 check("capabilities toujours lues", legacy.capabilities,
       ("iommu", "gpu-discrete"))
 check("features toujours lues", legacy.features, ("networking",))
+
+
+# --- source: where a package's releases come from --------------------------
+# Without it no update is possible; a malformed one must be refused rather
+# than turn into a request against the wrong repository.
+check("no source declared reads None",
+      parse_manifest(MINIMAL, "/pkg/demo").source, None)
+check("source github read",
+      parse_manifest({**MINIMAL, "source": {"github": "nivuus/home-stock"}},
+                     "/pkg/demo").source,
+      Source(github="nivuus/home-stock", path=""))
+check("source path read and normalised",
+      parse_manifest({**MINIMAL, "source": {"github": "nivuus/installer",
+                                            "path": "console/"}},
+                     "/pkg/demo").source,
+      Source(github="nivuus/installer", path="console"))
+check_raises("source must be a mapping",
+             lambda: parse_manifest({**MINIMAL, "source": "nivuus/x"},
+                                    "/pkg/demo"),
+             "'source' must be a mapping")
+check_raises("source github required",
+             lambda: parse_manifest({**MINIMAL, "source": {}}, "/pkg/demo"),
+             "'github' is required")
+for bad in ("home-stock", "nivuus/home-stock/extra", "../x/y", "nivuus/ x"):
+    check_raises(f"source github {bad!r} refused",
+                 lambda bad=bad: parse_manifest(
+                     {**MINIMAL, "source": {"github": bad}}, "/pkg/demo"),
+                 "owner/repository")
+check_raises("unknown key under source refused",
+             lambda: parse_manifest({**MINIMAL, "source": {
+                 "github": "nivuus/x", "gitlab": "nivuus/x"}}, "/pkg/demo"),
+             "gitlab")
+check_raises("source path escaping the archive refused",
+             lambda: parse_manifest({**MINIMAL, "source": {
+                 "github": "nivuus/x", "path": "../other"}}, "/pkg/demo"),
+             "relative path")
 
 
 if failures:
