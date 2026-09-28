@@ -67,6 +67,7 @@ def cmd_list(_args) -> int:
     current = state.load()
     if not current:
         print(f"no package recorded in {state.STATE_FILE}")
+        print(f"installer (this command): {self_update.installed_version()}")
         return 0
     available = _available()
     known = available.get("packages", {})

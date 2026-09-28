@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import sys
+import tarfile
 import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -46,13 +47,30 @@ def check_refused(label, fn, needle):
     failures.append(f"{label}: expected UpdateError, none raised")
 
 
-def payload(version, *, complete=True):
-    files = {"README.md": "top level, not laid",
-             "installer/packages/nivuus_cli.py": f"# {version}\n",
-             "installer/packages/updater.py": "", "installer/common/hardware.py": ""}
-    if complete:
-        files["installer/packages/activate_cli.py"] = ""
+def payload(version, *, drop=(), installer_link=False):
+    """A release archive built from THIS repository's real installer/ tree.
+
+    The smoke check runs the staged CLI, so a stand-in file would prove
+    nothing: the payload must be the code that actually ships.
+    """
+    files = {"README.md": "top level, not laid", "installer/VERSION": version}
+    for sub in ("packages", "common"):
+        for path in (REPO / "installer" / sub).rglob("*.py"):
+            rel = path.relative_to(REPO).as_posix()
+            if "__pycache__" not in rel and rel not in drop:
+                files[rel] = path.read_bytes()
+    if installer_link:
+        files = {k.replace("installer/", "real/", 1): v for k, v in files.items()}
+        link = tarfile.TarInfo("installer")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "real"
+        return fake_github.build_archive(files, extra=[link])
     return fake_github.build_archive(files)
+
+
+def laid_version():
+    with open(os.path.join(root, "VERSION")) as fh:
+        return fh.read()
 
 
 opt = os.path.join(ROOT, "opt", "nivuus")
@@ -65,8 +83,7 @@ try:
     check("no record reads as 0.0.0", self_update.installed_version(), "0.0.0")
     fake.publish("nivuus/installer", "1.5.0", payload("1.5.0"))
     check("the release is laid", self_update.update_self(root), "1.5.0")
-    with open(os.path.join(root, "packages", "nivuus_cli.py")) as fh:
-        check("with the release's files", fh.read(), "# 1.5.0\n")
+    check("with the release's files", laid_version(), "1.5.0")
     check("the CLI is executable",
           os.access(os.path.join(root, "packages", "nivuus_cli.py"), os.X_OK), True)
     check("only the installer subtree is laid",
@@ -77,12 +94,24 @@ try:
               "updated_at" in json.load(fh), True)
     check("a second run lays nothing", self_update.update_self(root), None)
 
-    fake.publish("nivuus/installer", "1.6.0", payload("1.6.0", complete=False))
-    check_refused("an archive that is not a payload is refused",
-                  lambda: self_update.update_self(root), "not an installer payload")
-    with open(os.path.join(root, "packages", "nivuus_cli.py")) as fh:
-        check("and the laid copy is untouched", fh.read(), "# 1.5.0\n")
+    fake.publish("nivuus/installer", "1.6.0",
+                 payload("1.6.0", drop=("installer/packages/answers.py",)))
+    check_refused("a payload whose CLI cannot run is refused before the swap",
+                  lambda: self_update.update_self(root), "does not run from staging")
+    check("and the laid copy is untouched", laid_version(), "1.5.0")
     check("no leftover beside it", sorted(os.listdir(opt)), ["installer"])
+
+    fake.publish("nivuus/installer", "1.6.0", payload("1.6.0", installer_link=True))
+    check_refused("an installer/ that is a link is refused",
+                  lambda: self_update.update_self(root), "not a plain directory")
+    check("the laid copy is still a real directory",
+          (os.path.islink(root), laid_version()), (False, "1.5.0"))
+
+    fake.publish("nivuus/installer", "1.6.0", payload("1.6.0"))
+    check("a sound release is laid over the previous one",
+          (self_update.update_self(root), laid_version()), ("1.6.0", "1.6.0"))
+    check("the previous copy is gone, nothing beside it",
+          sorted(os.listdir(opt)), ["installer"])
 
     check_refused("a git checkout is never overwritten",
                   lambda: self_update.update_self(str(REPO / "installer")),
