@@ -19,9 +19,9 @@ replacing the code that is running:
 Three limits, stated rather than hidden:
   - it refuses to touch a git checkout: a developer's clone is updated with
     git, and overwriting it would lose work;
-  - only the `installer/` subtree is laid. The systemd units under
-    configs/systemd/ (nivuus-check.*, nivuus-package-activate@) are not
-    refreshed by it;
+  - only the `installer/` subtree is laid as code; the installer's own
+    systemd units are refreshed from the same archive by units.py, and only
+    those already present on the machine;
   - the laid version is recorded in STAMP_DIR/installer.json, not in the
     package state file, which is a namespace of packages only. A payload
     with no record (a fresh ISO install) reads as 0.0.0, so the first run
@@ -38,7 +38,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-from . import releases, state as state_mod
+from . import releases, state as state_mod, units
 from .archive import ArchiveError, extract
 from .updater import CACHE_DIR, UpdateError, lock
 
@@ -119,42 +119,58 @@ def check_self(fetch=releases.latest_release):
     return installed_version(), fetch(INSTALLER_REPO)
 
 
-def update_self(root: str = DEFAULT_ROOT, fetch=releases.latest_release):
-    """Lay the latest installer release over `root`. Returns the version laid,
-    or None when already current."""
+def update_self(root: str = DEFAULT_ROOT, fetch=releases.latest_release,
+                unit_dir: str | None = None, apply=units.systemd_apply):
+    """Lay the latest installer release over `root`, then its systemd units.
+
+    Returns (version laid or None when already current, units rewritten).
+    The units are refreshed even when the code is current, so a machine laid
+    by an updater that did not know about them yet catches up.
+    """
     checkout = _git_checkout(root)
     if checkout:
         raise UpdateError(f"{root} is inside the git checkout {checkout}; "
                           "update it with git, not with nivuus update --self")
     with lock():
         release = fetch(INSTALLER_REPO)
-        if (releases.version_key(release.version)
-                <= releases.version_key(installed_version())):
-            return None
+        current = installed_version()
+        if releases.version_key(release.version) < releases.version_key(current):
+            return None, []
         archive = releases.download(release, CACHE_DIR)
-        root = os.path.realpath(root)
-        staging = os.path.join(os.path.dirname(root), ".nivuus-installer-staging")
+        laid = None
+        if releases.version_key(release.version) > releases.version_key(current):
+            _lay(archive, os.path.realpath(root), release)
+            _record(release.version)
+            laid = release.version
+        try:
+            changed = units.refresh(archive, unit_dir or units.UNIT_DIR, apply)
+        except (units.UnitError, tarfile.TarError, OSError) as exc:
+            raise UpdateError(f"installer {release.version}: systemd units not "
+                              f"refreshed ({exc})") from exc
+        return laid, changed
+
+
+def _lay(archive: str, root: str, release) -> None:
+    staging = os.path.join(os.path.dirname(root), ".nivuus-installer-staging")
+    if os.path.lexists(staging):
+        shutil.rmtree(staging)
+    try:
+        with tarfile.open(archive) as tar:
+            extract(tar, staging)
+        new = os.path.join(staging, SUBTREE)
+        # A link here would be moved as a link, and its relative target
+        # would mean something else once in place.
+        if os.path.islink(new) or not os.path.isdir(new):
+            raise UpdateError(f"{release.repo} {release.tag}: {SUBTREE}/ is "
+                              "not a plain directory in the archive")
+        _smoke(new, release)
+        for rel in EXECUTABLES:
+            os.chmod(os.path.join(new, rel), 0o755)
+        # After this, `new` holds the previous payload, removed below.
+        _exchange(new, root)
+    except (ArchiveError, tarfile.TarError, OSError,
+            subprocess.TimeoutExpired) as exc:
+        raise UpdateError(f"installer {release.version} not laid: {exc}") from exc
+    finally:
         if os.path.lexists(staging):
             shutil.rmtree(staging)
-        try:
-            with tarfile.open(archive) as tar:
-                extract(tar, staging)
-            new = os.path.join(staging, SUBTREE)
-            # A link here would be moved as a link, and its relative target
-            # would mean something else once in place.
-            if os.path.islink(new) or not os.path.isdir(new):
-                raise UpdateError(f"{release.repo} {release.tag}: {SUBTREE}/ is "
-                                  "not a plain directory in the archive")
-            _smoke(new, release)
-            for rel in EXECUTABLES:
-                os.chmod(os.path.join(new, rel), 0o755)
-            # After this, `new` holds the previous payload, removed below.
-            _exchange(new, root)
-        except (ArchiveError, tarfile.TarError, OSError,
-                subprocess.TimeoutExpired) as exc:
-            raise UpdateError(f"installer {release.version} not laid: {exc}") from exc
-        finally:
-            if os.path.lexists(staging):
-                shutil.rmtree(staging)
-        _record(release.version)
-        return release.version
