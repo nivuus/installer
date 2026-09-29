@@ -34,7 +34,7 @@ done
 # pleine recette, entrant en concurrence avec le domaine de test pour le GPU.
 #
 # systemctl NE FONCTIONNE PAS depuis une session automatisée sur cet hôte
-# (voir CLAUDE.md, "Host Shell Gotchas" — la session tourne dans son propre
+# (voir docs/claude/host-shell-gotchas.md, "Host Shell Gotchas" — la session tourne dans son propre
 # PID namespace, systemd authentifie par SO_PEERCRED). Piloter systemd via
 # le bus D-Bus système à la place. Un humain sur une vraie console peut
 # utiliser `systemctl disable --now vm-idle-shutdown.timer vm-trigger-47984.socket

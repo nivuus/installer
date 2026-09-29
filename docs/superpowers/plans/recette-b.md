@@ -76,7 +76,7 @@ Cette recette utilise `testdomain.py` (sous-projet A), pas `domain.py`
 (production) : son disque est un fichier qcow2 ordinaire sur `/media/data`
 (`/media/data/vm/windows-ltsc-test.qcow2`), jamais le NVMe Samsung passé en
 hostdev à la VM `Windows` — ce dernier reste statiquement lié à `vfio-pci`
-(`144d:a808`, voir CLAUDE.md) et n'apparaît même pas comme périphérique bloc
+(`144d:a808`, voir docs/claude/host-infrastructure.md) et n'apparaît même pas comme périphérique bloc
 sur l'hôte. Confirmer avant de commencer :
 
 ```bash
@@ -174,7 +174,7 @@ sockets de réveil `vm-trigger-47984/47989` : une simple sonde Moonlight sur
 entrant en concurrence avec le domaine de test pour le GPU.
 
 `systemctl` ne fonctionne pas depuis une session automatisée sur cet hôte
-(voir CLAUDE.md, « Host Shell Gotchas ») ; piloter systemd via D-Bus. Un
+(voir docs/claude/host-shell-gotchas.md, « Host Shell Gotchas ») ; piloter systemd via D-Bus. Un
 humain sur une vraie console peut à la place utiliser
 `systemctl mask --now vm-idle-shutdown.timer vm-trigger-47984.socket
 vm-trigger-47989.socket` directement.
@@ -360,7 +360,7 @@ d'affichage même en plein flux) :
 ```bash
 python3 winrm_exec.py cmd 'schtasks /create /tn nivuus-probe /tr "powershell -NoProfile -ExecutionPolicy Bypass -File C:\nivuus\probe\advanced-color.ps1" /sc once /st 00:00 /ru Administrator /it /f'
 python3 winrm_exec.py cmd 'schtasks /run /tn nivuus-probe'
-sleep 200   # Add-Type compile du C# à la volée : budget ~3 min (CLAUDE.md)
+sleep 200   # Add-Type compile du C# à la volée : budget ~3 min (docs/claude/host-cloud-gaming-apollo.md)
 python3 winrm_exec.py cmd 'type C:\nivuus\state\advanced-color.txt'
 ```
 
@@ -659,7 +659,7 @@ dbus-send $M.StartUnit string:"vm-trigger-47989.socket" string:"replace"
 
 ⚠️ La régénération CDI n'est pas facultative : `nvidia_uvm` reçoit un majeur
 **dynamique**, et une spécification figée fait renvoyer 999 à tout CUDA
-pendant que `nvidia-smi` continue de fonctionner (voir CLAUDE.md).
+pendant que `nvidia-smi` continue de fonctionner (voir docs/claude/host-infrastructure.md).
 
 `testdomain.py teardown` supprime le domaine, son varstore (`--nvram`) et le
 fichier qcow2 — les deux ISO construits en §2 et §6

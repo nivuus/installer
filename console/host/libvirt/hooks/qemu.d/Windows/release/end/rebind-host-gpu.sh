@@ -32,7 +32,7 @@ logger -t gpu-rebind "Début du rebind GPU (managed='yes', pas de virsh)"
 # daemon — a running worker thread keeps the /run/libvirtd.pid flock so no fresh
 # libvirtd can start, and only a reboot clears it. Found 2026-07-22 the first
 # time the refusal path was exercised end-to-end. Same recursion trap as the
-# bind side, documented in CLAUDE.md.
+# bind side, documented in docs/claude/host-infrastructure.md.
 #
 # Wait (via sysfs, no libvirtd call) for libvirt's managed reattach to have put
 # the GPU back on nvidia before we touch modules / persistenced.
@@ -94,7 +94,7 @@ lspci -k | grep -A5 'VGA compatible controller.*NVIDIA'
 # inheriting the libvirtd profile, which grants `/usr/bin/* PUx`, but AppArmor
 # resolves symlinks first and /usr/bin/nvidia-smi is an update-alternatives
 # chain ending at /usr/lib/nvidia/current/nvidia-smi — outside every PUx path.
-# CLAUDE.md documents this trap for /usr/local/*; it is in fact wider: any
+# docs/claude/host-infrastructure.md documents this trap for /usr/local/*; it is in fact wider: any
 # alternatives-managed binary is affected. Reading procfs gives the same
 # confirmation without an exec.
 if grep -qs . /proc/driver/nvidia/gpus/*/information; then

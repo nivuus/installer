@@ -30,7 +30,7 @@ sys.path.insert(0, HERE)
 import hardware  # noqa: E402
 
 # Guest memory budget. NOT "half the host" - this project already made and
-# corrected that exact mistake: CLAUDE.md's "Hugepages pool halved" finding
+# corrected that exact mistake: docs/claude/host-ops-audits.md's "Hugepages pool halved" finding
 # records a 16584-page pool (double the VM's real need) that left the host
 # swapping, cut down to 8448 pages (~16896 MiB; the VM itself uses ~8205
 # MiB). GUEST_MIB_DEFAULT is pinned to that measured, settled figure -

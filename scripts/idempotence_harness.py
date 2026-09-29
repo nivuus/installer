@@ -27,7 +27,7 @@ is not actionable on its own: the reader needs the two trees to compare. A
 successful run removes its scratch root - this harness runs on every pull
 request across six repositories, so an unbounded pile of temp directories on
 a self-hosted runner is a real, measured failure mode on this host (see
-CLAUDE.md, "Disk space: audit + permanent bounds"), not a hypothetical one.
+docs/claude/host-ops-audits.md, "Disk space: audit + permanent bounds"), not a hypothetical one.
 
 Messages are in English, unlike discovery.py's: those reach an operator in the
 installer portal, these reach a developer in a CI log, and check-english.sh

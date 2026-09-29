@@ -1173,8 +1173,9 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
 
     # build.py stages driver copies (~1.8 GiB) under tempfile's default
     # location, which is /tmp unless TMPDIR says otherwise - and on this
-    # host /tmp is a 10 GiB tmpfs, already 97% full (see CLAUDE.md's
-    # tmpfs/swap notes for the same class of failure). stage_dir sits on the
+    # host /tmp is a 10 GiB tmpfs, already 97% full (see
+    # docs/claude/host-stability-incidents.md, tmpfs/swap notes for the same
+    # class of failure). stage_dir sits on the
     # SAME filesystem as iso_out (both under the workdir, on the data disk),
     # so the fix is also cheaper than a cross-filesystem TMPDIR would be:
     # build.py's tempfile.TemporaryDirectory ends with an os.replace/rename

@@ -131,7 +131,8 @@ with tempfile.TemporaryDirectory() as tmp:
     # The two CPU wrappers are copied from the repository, not generated:
     # the heredocs they replace called the partition script and stopped
     # there, dropping `nivuus-cpu-mode@{gaming,idle}.service` - named a
-    # PUBLIC CONTRACT of this repository in CLAUDE.md, deployed on the host
+    # PUBLIC CONTRACT of this repository in
+    # docs/claude/installer-console-package.md, deployed on the host
     # side by install-engine/steps/features.py, and honoured by no code at
     # all while the heredocs were what landed. Asserting the unit name here
     # is what makes the contract two-sided; byte identity with the source is
