@@ -262,8 +262,8 @@ def _inert_chown(path, uid, gid):
     ensure_qemu_owned) - without this, every test in the file that reaches
     that branch through plan() would fall back to the REAL os.chown and the
     REAL /var/lib/libvirt/qemu, which happens to work only because THIS
-    particular test process runs as root on the real host (see CLAUDE.md's
-    'sessions run as root on the live server') and would break on any other
+    particular test process runs as root on the real host (see
+    docs/claude/host-shell-gotchas.md, 'sessions run as root on the live server') and would break on any other
     machine. Tests that actually want to OBSERVE the chown calls build their
     own steps.plan_steps(...) directly and inject their own recorder -
     see RecordingChown below."""

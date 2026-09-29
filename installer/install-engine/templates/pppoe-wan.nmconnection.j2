@@ -2,7 +2,7 @@
 id=pppoe-{{ parent }}.{{ vlan_id }}
 uuid={{ uuid }}
 type=pppoe
-# CRITICAL (see CLAUDE.md): PPPoE-over-VLAN under NetworkManager needs BOTH a
+# CRITICAL (see docs/claude/host-network-rf-wan.md): PPPoE-over-VLAN under NetworkManager needs BOTH a
 # concrete ppp interface-name AND pppoe.parent set to the VLAN device. An empty
 # interface-name yields "error determine name for pppoe".
 interface-name=ppp0

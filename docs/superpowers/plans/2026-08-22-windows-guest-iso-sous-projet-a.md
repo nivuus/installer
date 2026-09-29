@@ -2481,7 +2481,7 @@ d'appairer un client Moonlight et d'ouvrir un flux pendant la fenêtre GPU — c
 
 **Ce que A doit trancher est une question d'OS, pas d'écran.** Le blocage sur
 Server 2022 est `rc=31 ERROR_GEN_FAILURE`, et l'API échoue *quel que soit
-l'affichage* (mesuré, voir CLAUDE.md). Donc `rc=0` sur le dongle HDMI — même avec
+l'affichage* (mesuré, voir docs/claude/host-cloud-gaming-apollo.md). Donc `rc=0` sur le dongle HDMI — même avec
 `supported=0` — prouve que l'OS et la pile NVIDIA participent : le verrou saute,
 la migration est justifiée. Que SudoVDA expose ensuite le HDR est une question
 *SudoVDA-sur-24H2*, à laquelle ses mainteneurs répondent déjà oui, et que le

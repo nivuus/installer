@@ -259,7 +259,7 @@ laisser un document mentir en silence.
    les écrit **une fois**, à l'installation du bootloader. En autonome, `console`
    doit modifier un bootloader **existant** — un tout autre problème, dont cette
    machine est la preuve vivante (systemd-boot + kernelstub + entrées BLS à la
-   main, voir `CLAUDE.md`). Ce ne sont pas deux copies, ce sont deux problèmes.
+   main, voir `docs/claude/host-infrastructure.md`). Ce ne sont pas deux copies, ce sont deux problèmes.
 
 ## `iso-build/build.sh` : généraliser un mécanisme qui tourne
 

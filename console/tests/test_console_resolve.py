@@ -292,7 +292,7 @@ check("memoire negative : un refus est emis", reason is not None, True)
 
 # --- budget invite : GUEST_MIB_DEFAULT (16384), jamais "moitie de l hote" #
 # Round 2 de revue : "moitie de l hote" rejouait EXACTEMENT l erreur deja
-# corrigee dans ce projet (CLAUDE.md, "Hugepages pool halved" - un pool de
+# corrigee dans ce projet (docs/claude/host-ops-audits.md, "Hugepages pool halved" - un pool de
 # 16584 pages, double du besoin reel, faisait swapper l hote ; reduit a 8448
 # pages, ~16896 MiB mesures). Le budget par defaut est donc fixe a 16384 MiB
 # (16 GiB), et seulement reduit si l hote ne peut pas le fournir - jamais
@@ -369,7 +369,7 @@ else:
 
 # 64 GiB hote (cette machine) : le point que l on veut EPINGLER. La moitie
 # de l hote serait 32768 MiB - c est exactement l erreur "hugepages pool
-# halved" documentee dans CLAUDE.md. L invite doit recevoir le DEFAUT fixe
+# halved" documentee dans docs/claude/host-ops-audits.md. L invite doit recevoir le DEFAUT fixe
 # (16384 MiB), jamais la moitie de l hote : c est le cas qu un futur lecteur
 # sera tente de "corriger" en le remettant a host_mib // 2, donc gardez
 # cette assertion telle quelle si le budget par defaut change un jour pour

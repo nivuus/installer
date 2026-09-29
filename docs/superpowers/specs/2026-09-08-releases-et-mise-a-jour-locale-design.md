@@ -331,7 +331,7 @@ donc toute machine fraîchement installée se croirait immédiatement en retard
 sur les neuf packages. `build.sh` récupère à la place les archives des
 dernières releases : l'ISO devient reproductible, et la machine naît à jour.
 
-**`retro` répare une dette connue.** Le point (5) de `installer/CLAUDE.md`
+**`retro` répare une dette connue.** Le point (5) de `installer/docs/claude/installer-console-package.md`
 constate que `retro: true` *ne peut pas réussir* : `fetch_payload.py` résout
 `RETRO_SRC` vers `/opt/retro` une fois le package `console` copié, et rien ne
 crée ce répertoire. Un package `retro` qui se pose lui-même comble le trou. Mais

@@ -361,7 +361,8 @@ def expected_provision_version() -> str:
 
     Imported lazily, INSIDE this function rather than at module scope, same
     convention and same reason as domain.py's own lazy HardwareError import
-    (see CLAUDE.md's "the lesson that outlives the bug"): this script is
+    (see "the lesson that outlives the bug" in
+    docs/claude/console-activate-lessons.md): this script is
     deployed standalone under /usr/local/sbin/, and a module-scope import
     would make importing THIS FILE depend on guest/payload.py being on
     sys.path even for callers that never reach READY. DOMAIN_PY already

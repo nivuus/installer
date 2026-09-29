@@ -75,7 +75,7 @@ test-vm:
 # sub-make because 9 console suites import jinja2 - not pydantic, which nothing
 # under console/ uses. console/guest/domain.py is exercised for real by
 # test_windows_guest_production_domain.py, which calls main() end-to-end rather
-# than stubbing it out - see CLAUDE.md, Installer Architecture, "domain.py is
+# than stubbing it out - see docs/claude/console-activate-lessons.md, "domain.py is
 # REPAIRED", for how that suite closed the gap.
 # console's suites are HARDWARE-BOUND and cannot run on a CI runner: measured
 # 2026-09-08, test_console_resolve fails 10 assertions there because the

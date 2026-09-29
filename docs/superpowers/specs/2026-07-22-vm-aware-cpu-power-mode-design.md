@@ -128,7 +128,7 @@ descriptor is what lifts the constraint, so the unit's lifetime *is* the policy
 ### Kernel command line
 
 Drop `intel_idle.max_cstate=3` from the default BLS entry. This touches the ESP,
-which is the fragile path documented in CLAUDE.md: systemd-boot with
+which is the fragile path documented in docs/claude/host-infrastructure.md: systemd-boot with
 hand-managed BLS entries *and* kernelstub, on a 511 MB ESP at ~83 % full. Edit
 the BLS entry, then verify with `bootctl list` that the default entry carries
 the expected cmdline before rebooting. Keep the 6.12.43 entry untouched as the
