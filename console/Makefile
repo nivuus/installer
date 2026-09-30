@@ -53,7 +53,7 @@ test:
 	    echo "--- $$t"; \
 	    $(PYTHON) $(CONSOLE_DIR)/tests/$$t.py || exit 1; \
 	done
-	@for t in test_handle_vm_start; do \
+	@for t in test_handle_vm_start test_vm_control; do \
 	    echo "--- $$t"; \
 	    bash $(CONSOLE_DIR)/tests/$$t.sh || exit 1; \
 	done
