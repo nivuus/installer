@@ -68,7 +68,7 @@ APP_ACTIVE=0
 if [ -r "$APP_ACTIVITY_FILE" ]; then
     APP_TS=$(cat "$APP_ACTIVITY_FILE")
     if [[ "$APP_TS" =~ ^[0-9]+$ ]]; then
-        if [ $(( $(date +%s) - APP_TS )) -lt "$APP_ACTIVITY_MAX_AGE_S" ]; then
+        if [ $(( $(date +%s) - 10#$APP_TS )) -lt "$APP_ACTIVITY_MAX_AGE_S" ]; then
             APP_ACTIVE=1
         fi
     else

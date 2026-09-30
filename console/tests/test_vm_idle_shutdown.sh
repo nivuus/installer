@@ -104,6 +104,20 @@ run_target
 [ "$(strikes)" = "0" ] && pass "strikes reset to 0" || fail "strikes=$(strikes)"
 teardown_sandbox
 
+echo "[9] app-activity with leading zeros (octal trap) -> no activity, no arithmetic error"
+setup_sandbox
+echo "0000000009" > "$SANDBOX/state/app-activity"
+# LC_ALL=C pins the wording of bash's own error messages.
+LC_ALL=C VM_IDLE_STATE_DIR="$SANDBOX/state" NF_CONNTRACK="$SANDBOX/conntrack" \
+    PATH="$SANDBOX/bin:$PATH" bash "$TARGET" >/dev/null 2>"$SANDBOX/stderr"
+[ "$(strikes)" = "2" ] && pass "strikes 1 -> 2" || fail "strikes=$(strikes)"
+if grep -q "value too great for base" "$SANDBOX/stderr" "$SANDBOX/log"; then
+    fail "bash arithmetic error: $(cat "$SANDBOX/stderr")"
+else
+    pass "no base error on leading zeros"
+fi
+teardown_sandbox
+
 echo
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
