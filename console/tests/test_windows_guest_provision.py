@@ -15,7 +15,7 @@ PROVISION = GUEST / "provision"
 PROBE = GUEST / "probe"
 
 STAGES = ["00-bootstrap.ps1", "10-nvidia.ps1", "15-virtio.ps1", "20-disk.ps1",
-          "25-apollo.ps1", "30-steam.ps1", "32-retro.ps1", "33-winget.ps1",
+          "25-apollo.ps1", "30-steam.ps1", "31-explorer.ps1", "32-retro.ps1", "33-winget.ps1",
           "34-gaming-services.ps1", "35-shares.ps1",
           "40-agent.ps1", "45-debloat.ps1", "50-power.ps1",
           "55-updates.ps1", "99-marker.ps1"]
@@ -689,8 +689,19 @@ check("99-marker.ps1 compare a la session console",
 # C: est regeneree a chaque reconstruction : une bibliotheque Steam qui y
 # atterrit par megarde est exactement le defaut que la separation C:/D: existe
 # pour empecher. Le masque est un champ de bits, une lettre par bit depuis A.
-check("30-steam.ps1 masque C: dans les boites de dialogue",
-      "NoDrives" in _steam and "NoViewOnDrive" in _steam, True)
+check("30-steam.ps1 masque C: dans les boites de dialogue", "NoDrives" in _steam, True)
+# NoViewOnDrive refuse aussi les chemins saisis : la racine du pont de fichiers
+# (C:\\Users\\<compte>\\Mes Fichiers) deviendrait inaccessible a l explorateur.
+check("30-steam.ps1 ne pose pas NoViewOnDrive",
+      "Set-ItemProperty -Path $policies -Name 'NoViewOnDrive'" in _steam, False)
+check("30-steam.ps1 retire NoViewOnDrive d une appliance deja provisionnee",
+      "Remove-ItemProperty -Path $policies -Name 'NoViewOnDrive'" in _steam, True)
+_explorer = (PROVISION / "31-explorer.ps1").read_text(encoding="utf-8")
+check("31-explorer.ps1 masque Home et Gallery du volet de navigation",
+      "f874310e-b6b7-47dc-bc84-b9e6b38f5903" in _explorer
+      and "e88865ea-0e1c-4e20-9aa6-edcd0212c87c" in _explorer, True)
+check("31-explorer.ps1 masque les dossiers utilisateur de Ce PC (64 et 32 bits)",
+      "ThisPCPolicy" in _explorer and "WOW6432Node" in _explorer, True)
 check("30-steam.ps1 relit les valeurs posees", "did not take" in _steam, True)
 
 # steam-session.ps1 est la commande SUIVIE par Apollo : sa sortie ferme la

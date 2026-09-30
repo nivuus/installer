@@ -17,7 +17,7 @@ $currentStage = $null
 Start-Transcript -Path 'C:\nivuus\provision.log' -Append | Out-Null
 try {
     $stages = @('00-bootstrap.ps1', '10-nvidia.ps1', '15-virtio.ps1',
-                '20-disk.ps1', '25-apollo.ps1', '30-steam.ps1',
+                '20-disk.ps1', '25-apollo.ps1', '30-steam.ps1', '31-explorer.ps1',
                 # 32-retro.ps1 tourne TOUJOURS, retrogaming ou pas : quand
                 # l'option n'est pas cochee il dit pourquoi il ne fait rien.
                 # Une etape retiree de cette liste ne laisserait aucune trace,
