@@ -1,6 +1,7 @@
 #!/bin/bash
 # Shut down the Windows VM after sustained inactivity (energy saving).
-# Activity = established streaming/RDP flows to the VM, or VM CPU usage.
+# Activity = established streaming/RDP flows to the VM, a desk app window, or
+# CPU usage measured INSIDE the guest.
 # Wake-on-demand is provided by vm-trigger-47984.socket (re-armed here).
 # Run periodically by vm-idle-shutdown.timer.
 
@@ -12,7 +13,14 @@ STATE_DIR="${VM_IDLE_STATE_DIR:-/run/nivuus-vm-idle}"
 STATE_FILE="$STATE_DIR/state"
 NF_CONNTRACK="${NF_CONNTRACK:-/proc/net/nf_conntrack}"
 IDLE_STRIKES_LIMIT=3          # checks in a row before shutdown (3 x 10 min)
-CPU_ACTIVE_THRESHOLD=50       # % of one vCPU-core averaged since last check
+# Guest CPU, % of ALL its logical processors, averaged since the last pass.
+# Measured in Windows, not from the host: libvirt's cpu.time also counts the
+# hypervisor cost of an idle guest (timer interrupts, halt exits), about 50 % of
+# one core for this 14-vCPU VM - the old "50 % of one core" threshold sat ON that
+# floor and hibernation never fired (seen 2026-09-30: host 53-66 % while
+# Windows reported 1 %). Idle reads ~1 %; one busy thread of 14 is ~7 %.
+CPU_ACTIVE_THRESHOLD=5
+WINVM="${VM_IDLE_WINVM:-/usr/local/bin/winvm}"
 # A desk app window is "open now" when the platform said so recently. The
 # platform sends `busy` every APP_HEARTBEAT_S (plateforme BUSY_PERIOD_MS, keep
 # them equal); three missed beats mean the last window is gone. The 30 minutes
@@ -76,25 +84,44 @@ if [ -r "$APP_ACTIVITY_FILE" ]; then
     fi
 fi
 
-# --- Activity check 2: VM CPU usage since last check ---
-NOW_NS=$(date +%s%N)
-CPU_NS=$(LC_ALL=C virsh domstats --cpu-total "$VM_NAME" 2>/dev/null | awk -F= "/cpu.time/ {print \$2}")
-read PREV_NS PREV_CPU STRIKES < "$STATE_FILE" 2>/dev/null || { PREV_NS=0; PREV_CPU=0; STRIKES=0; }
+# --- Activity check 2: guest CPU usage since the last pass ---
+# The raw performance counter is cumulative, so the average since the previous
+# pass needs no sampling window: busy = 100 * (1 - dIdle / dTime), where the
+# guest's own clock (100 ns units) and the _Total idle counter come from the
+# same query. State layout: "<guest_time> <guest_idle> <strikes>".
+#
+# Unknown is NOT idle: if the guest cannot be measured (WinRM down, VM still
+# booting, password file broken) the pass counts as active and says so in the
+# journal. Hibernating a guest we cannot see could cut a session.
+GUEST_CPU_QUERY='$o = Get-CimInstance Win32_PerfRawData_PerfOS_Processor | Where-Object { $_.Name -eq "_Total" }; "$($o.Timestamp_Sys100NS) $($o.PercentProcessorTime)"'
+read PREV_T PREV_IDLE STRIKES < "$STATE_FILE" 2>/dev/null || { PREV_T=0; PREV_IDLE=0; STRIKES=0; }
 
 CPU_PCT=0
-if [ -n "$CPU_NS" ] && [ "$PREV_NS" -gt 0 ] && [ "$NOW_NS" -gt "$PREV_NS" ]; then
-    CPU_PCT=$(( (CPU_NS - PREV_CPU) * 100 / (NOW_NS - PREV_NS) ))
+CPU_KNOWN=1
+if ! read -r GUEST_T GUEST_IDLE _ < <(timeout 30 "$WINVM" --ps "$GUEST_CPU_QUERY" 2>/dev/null | tr -d "\r") \
+   || ! [[ "$GUEST_T" =~ ^[0-9]+$ && "$GUEST_IDLE" =~ ^[0-9]+$ ]]; then
+    CPU_KNOWN=0
+    GUEST_T=0
+    GUEST_IDLE=0
+    logger -t "$LOG_TAG" "guest CPU unavailable (winvm failed): counting this pass as active"
+elif [ "$PREV_T" -gt 0 ]; then
+    if [ "$GUEST_T" -gt "$PREV_T" ] && [ "$GUEST_IDLE" -ge "$PREV_IDLE" ]; then
+        CPU_PCT=$(( 100 - (GUEST_IDLE - PREV_IDLE) * 100 / (GUEST_T - PREV_T) ))
+    else
+        # The counters went backwards: the guest restarted since the last pass.
+        CPU_PCT=-1
+    fi
 fi
 
 # --- Decide ---
-# Negative CPU delta = VM restarted since last check (counter reset): treat as active
-if [ "$FLOWS" -gt 0 ] || [ "$APP_ACTIVE" -eq 1 ] || [ "$CPU_PCT" -ge "$CPU_ACTIVE_THRESHOLD" ] || [ "$CPU_PCT" -lt 0 ] || [ "$PREV_NS" -eq 0 ]; then
+if [ "$FLOWS" -gt 0 ] || [ "$APP_ACTIVE" -eq 1 ] || [ "$CPU_KNOWN" -eq 0 ] \
+   || [ "$CPU_PCT" -ge "$CPU_ACTIVE_THRESHOLD" ] || [ "$CPU_PCT" -lt 0 ] || [ "$PREV_T" -eq 0 ]; then
     STRIKES=0
 else
     STRIKES=$((STRIKES + 1))
 fi
 
-echo "$NOW_NS ${CPU_NS:-0} $STRIKES" > "$STATE_FILE"
+echo "$GUEST_T $GUEST_IDLE $STRIKES" > "$STATE_FILE"
 logger -t "$LOG_TAG" "flows=$FLOWS app=$APP_ACTIVE cpu=${CPU_PCT}% strikes=$STRIKES/$IDLE_STRIKES_LIMIT"
 
 if [ "$STRIKES" -ge "$IDLE_STRIKES_LIMIT" ]; then
@@ -104,7 +131,7 @@ if [ "$STRIKES" -ge "$IDLE_STRIKES_LIMIT" ]; then
     # Short timeout: the WinRM call hangs while the guest falls asleep.
     # Then poll fast: the shut-off window can be only a few seconds long if a
     # Moonlight poll re-wakes the VM - leaving "running" at ANY point = success.
-    timeout 10 /usr/local/bin/winvm "shutdown /h /f" >/dev/null 2>&1
+    timeout 10 "$WINVM" "shutdown /h /f" >/dev/null 2>&1
     HIBERNATED=0
     for _ in $(seq 1 45); do
         sleep 2
