@@ -1,0 +1,10 @@
+[Unit]
+Description=Start the Windows VM and open its forward-ports (requested through the control socket)
+# systemd counts starts, not failures: a caller retrying while the guest boots
+# must never disable this unit.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/handle-vm-start.sh
+TimeoutStartSec=300

@@ -41,6 +41,7 @@ PYTHON ?= python3
 test:
 	@for t in test_console_hardware test_console_resolve test_console_install \
 	          test_console_host_files test_console_wake_units test_console_activate \
+	          test_console_vm_control_units \
 	          test_console_guest_steps test_console_guest_ready \
 	          test_vm_wake_gate \
 	          test_retro_marker_bridge \

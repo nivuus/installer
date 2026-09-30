@@ -88,6 +88,7 @@ HOST_SCRIPTS = [
     ("host/vm-wake-gate.py", "usr/local/sbin/vm-wake-gate.py"),
     ("host/handle-vm-start.sh", "usr/local/sbin/handle-vm-start.sh"),
     ("host/vm-idle-shutdown.sh", "usr/local/sbin/vm-idle-shutdown.sh"),
+    ("host/vm-control.sh", "usr/local/sbin/vm-control.sh"),
     ("host/winvm", "usr/local/bin/winvm"),
     ("host/guest-ready-watch.py", "usr/local/sbin/guest-ready-watch.py"),
 ]
@@ -99,6 +100,7 @@ UNITS = [
     "vm-trigger-47989.socket", "vm-trigger-47989.service",
     "vm-idle-shutdown.service", "vm-idle-shutdown.timer",
     "nivuus-guest-ready.service", "nivuus-guest-ready.timer",
+    "nivuus-vm-control.socket", "nivuus-vm-control@.service", "nivuus-vm-wake.service",
 ]
 
 # The same drop-in serves both wake services; systemd reads it from each
@@ -107,6 +109,12 @@ DROPIN_SRC = "host/systemd/vm-trigger-no-start-limit.conf"
 DROPIN_TARGETS = [
     "etc/systemd/system/vm-trigger-47984.service.d/no-start-limit.conf",
     "etc/systemd/system/vm-trigger-47989.service.d/no-start-limit.conf",
+]
+
+# A sysusers.d entry, not a groupadd: the standard mechanism, idempotent, and
+# applied by activate (systemd-sysusers) before the control socket starts.
+SYSUSERS = [
+    ("host/sysusers/nivuus-vm.conf", "usr/lib/sysusers.d/nivuus-vm.conf"),
 ]
 
 
@@ -211,6 +219,8 @@ def main() -> int:
               under(f"etc/systemd/system/{unit}"), mode=0o644)
     for dest in DROPIN_TARGETS:
         place(os.path.join(HERE, DROPIN_SRC), under(dest), mode=0o644)
+    for src, dest in SYSUSERS:
+        place(os.path.join(HERE, src), under(dest), mode=0o644)
 
     # The operator's retrogaming choice, recorded durably on the target.
     # console/guest/build.py reads it much later - possibly by hand, possibly

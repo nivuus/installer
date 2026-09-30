@@ -68,6 +68,7 @@ WANTS = {
     "vm-trigger-47989.socket": "sockets.target.wants",
     "vm-idle-shutdown.timer": "timers.target.wants",
     "nivuus-guest-ready.timer": "timers.target.wants",
+    "nivuus-vm-control.socket": "sockets.target.wants",
 }
 
 UNIT_DIR = "etc/systemd/system"
@@ -130,6 +131,28 @@ def start_now(units) -> list:
             detail = (proc.stderr or proc.stdout or "").strip()[:200]
             failed.append(f"{' '.join(cmd)} : {detail or proc.returncode}")
     return failed
+
+
+SYSUSERS_CONF = "/usr/lib/sysusers.d/nivuus-vm.conf"
+
+
+def apply_sysusers(conf=SYSUSERS_CONF):
+    """Create the nivuus-vm group before the control socket starts.
+
+    The socket declares SocketGroup=nivuus-vm; with no such group it fails to
+    start. Returns a failure description, or None. Like start_now() it never
+    raises and never fails the phase: the unit is already linked, so the next
+    boot (which runs systemd-sysusers itself) is correct either way.
+    """
+    try:
+        proc = subprocess.run(["systemd-sysusers", conf],
+                              capture_output=True, text=True)
+    except OSError as exc:
+        return f"systemd-sysusers: {exc}"
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()[:200]
+        return f"systemd-sysusers {conf}: {detail or proc.returncode}"
+    return None
 
 
 LIBVIRTD_PROFILE = "/etc/apparmor.d/usr.sbin.libvirtd"
@@ -313,6 +336,11 @@ def main() -> int:
     # a target being installed (or a throwaway root in a test), reloading and
     # starting would drive the WRONG systemd - the installer's own.
     if root == "/":
+        refused_group = apply_sysusers()
+        if refused_group:
+            print("console activate: the nivuus-vm group could not be created, "
+                  f"so the control socket will not start - {refused_group}",
+                  file=sys.stderr)
         broken = start_now(list(WANTS))
         if broken:
             print("console activate: unites liees mais non demarrees ; "

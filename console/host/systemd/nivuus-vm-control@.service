@@ -1,0 +1,9 @@
+[Unit]
+Description=Windows VM control request
+
+[Service]
+ExecStart=/usr/local/sbin/vm-control.sh
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+TimeoutStartSec=15

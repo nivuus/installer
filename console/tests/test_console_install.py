@@ -165,6 +165,7 @@ with tempfile.TemporaryDirectory() as tmp:
         "etc/libvirt/hooks/qemu.d/Windows/started/begin/rules.sh",
         "etc/libvirt/hooks/qemu.d/Windows/stopped/end/rules.sh",
         "usr/local/sbin/vm-idle-shutdown.sh",
+        "usr/local/sbin/vm-control.sh",
     ]
     for rel in executables:
         check(f"{rel} depose", (root / rel).is_file(), True)
@@ -189,6 +190,9 @@ with tempfile.TemporaryDirectory() as tmp:
                        "etc/libvirt/hooks/qemu.d/Windows/release/end/10-cpu-release.sh"),
                       ("libvirt/hooks/qemu", "etc/libvirt/hooks/qemu"),
                       ("vm-idle-shutdown.sh", "usr/local/sbin/vm-idle-shutdown.sh"),
+                      ("vm-control.sh", "usr/local/sbin/vm-control.sh"),
+                      ("sysusers/nivuus-vm.conf",
+                       "usr/lib/sysusers.d/nivuus-vm.conf"),
                       ("guest-ready-watch.py",
                        "usr/local/sbin/guest-ready-watch.py")):
         origin = CONSOLE / "host" / src
@@ -213,11 +217,16 @@ with tempfile.TemporaryDirectory() as tmp:
         "etc/systemd/system/vm-idle-shutdown.timer",
         "etc/systemd/system/nivuus-guest-ready.service",
         "etc/systemd/system/nivuus-guest-ready.timer",
+        "etc/systemd/system/nivuus-vm-control.socket",
+        "etc/systemd/system/nivuus-vm-control@.service",
+        "etc/systemd/system/nivuus-vm-wake.service",
         "etc/systemd/system/vm-trigger-47984.service.d/no-start-limit.conf",
         "etc/systemd/system/vm-trigger-47989.service.d/no-start-limit.conf",
     ]
     for rel in units:
         check(f"{rel} depose", (root / rel).is_file(), True)
+    check("usr/lib/sysusers.d/nivuus-vm.conf depose",
+          (root / "usr/lib/sysusers.d/nivuus-vm.conf").is_file(), True)
 
     # The drop-in must reach BOTH services: systemd reads it from each
     # unit's own .d/ directory, so one copy enables the limit on the other.
