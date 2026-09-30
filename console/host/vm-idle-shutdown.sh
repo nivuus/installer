@@ -133,7 +133,11 @@ if [ "$STRIKES" -ge "$IDLE_STRIKES_LIMIT" ]; then
     # Moonlight poll re-wakes the VM - leaving "running" at ANY point = success.
     timeout 10 "$WINVM" "shutdown /h /f" >/dev/null 2>&1
     HIBERNATED=0
-    for _ in $(seq 1 45); do
+    # 90 x 2 s = 180 s. Windows needs ~70-80 s to write the 16 GB guest's
+    # hibernation file (measured 2026-09-30: 80 s from the request to "shut
+    # off"); a 90 s budget left 10 s of margin, and an ACPI shutdown sent to a
+    # guest that is still hibernating loses the session.
+    for _ in $(seq 1 90); do
         sleep 2
         if ! LC_ALL=C virsh domstate "$VM_NAME" 2>/dev/null | grep -q running; then
             HIBERNATED=1; break
