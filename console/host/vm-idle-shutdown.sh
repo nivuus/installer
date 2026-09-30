@@ -8,10 +8,19 @@ VM_NAME="Windows"
 VM_IP="192.168.3.2"
 TCP_PORTS="3389|47984|47989|48010"
 UDP_PORTS="47998|47999|48000"
-STATE_DIR="/run/nivuus-vm-idle"
+STATE_DIR="${VM_IDLE_STATE_DIR:-/run/nivuus-vm-idle}"
 STATE_FILE="$STATE_DIR/state"
+NF_CONNTRACK="${NF_CONNTRACK:-/proc/net/nf_conntrack}"
 IDLE_STRIKES_LIMIT=3          # checks in a row before shutdown (3 x 10 min)
 CPU_ACTIVE_THRESHOLD=50       # % of one vCPU-core averaged since last check
+# A desk app window is "open now" when the platform said so recently. The
+# platform sends `busy` every APP_HEARTBEAT_S (plateforme BUSY_PERIOD_MS, keep
+# them equal); three missed beats mean the last window is gone. The 30 minutes
+# of idle time come from IDLE_STRIKES_LIMIT, NOT from this window - widening
+# it to 30 min would double-count and keep the VM up for ~1 h.
+APP_HEARTBEAT_S=60
+APP_ACTIVITY_MAX_AGE_S=$((3 * APP_HEARTBEAT_S))
+APP_ACTIVITY_FILE="$STATE_DIR/app-activity"
 LOG_TAG="vm-idle-shutdown"
 
 mkdir -p "$STATE_DIR"
@@ -47,9 +56,25 @@ fi
 # --- Activity check 1: established flows to the VM (Sunshine/Moonlight/RDP) ---
 # conntrack line layout: proto ... [state] src= dst= sport= dport= [reply tuple] ...
 # DNAT'ed flows carry the VM IP in the reply tuple, so match it on either side.
-FLOWS_TCP=$(grep -scE "ESTABLISHED.*=$VM_IP .*port=($TCP_PORTS)( |$)" /proc/net/nf_conntrack)
-FLOWS_UDP=$(grep -scE "udp.*=$VM_IP .*port=($UDP_PORTS)( |$).*ASSURED" /proc/net/nf_conntrack)
+FLOWS_TCP=$(grep -scE "ESTABLISHED.*=$VM_IP .*port=($TCP_PORTS)( |$)" "$NF_CONNTRACK")
+FLOWS_UDP=$(grep -scE "udp.*=$VM_IP .*port=($UDP_PORTS)( |$).*ASSURED" "$NF_CONNTRACK")
 FLOWS=$(( ${FLOWS_TCP:-0} + ${FLOWS_UDP:-0} ))
+
+# --- Activity check 3: a desk app window reported by the platform ---
+# Written by vm-control.sh `busy`. Missing = no window. Unreadable = ignored
+# and logged. Dated in the future (clock skew) = active: never cut a session
+# because of a clock step.
+APP_ACTIVE=0
+if [ -r "$APP_ACTIVITY_FILE" ]; then
+    APP_TS=$(cat "$APP_ACTIVITY_FILE")
+    if [[ "$APP_TS" =~ ^[0-9]+$ ]]; then
+        if [ $(( $(date +%s) - 10#$APP_TS )) -lt "$APP_ACTIVITY_MAX_AGE_S" ]; then
+            APP_ACTIVE=1
+        fi
+    else
+        logger -t "$LOG_TAG" "ignoring $APP_ACTIVITY_FILE: not a timestamp"
+    fi
+fi
 
 # --- Activity check 2: VM CPU usage since last check ---
 NOW_NS=$(date +%s%N)
@@ -63,14 +88,14 @@ fi
 
 # --- Decide ---
 # Negative CPU delta = VM restarted since last check (counter reset): treat as active
-if [ "$FLOWS" -gt 0 ] || [ "$CPU_PCT" -ge "$CPU_ACTIVE_THRESHOLD" ] || [ "$CPU_PCT" -lt 0 ] || [ "$PREV_NS" -eq 0 ]; then
+if [ "$FLOWS" -gt 0 ] || [ "$APP_ACTIVE" -eq 1 ] || [ "$CPU_PCT" -ge "$CPU_ACTIVE_THRESHOLD" ] || [ "$CPU_PCT" -lt 0 ] || [ "$PREV_NS" -eq 0 ]; then
     STRIKES=0
 else
     STRIKES=$((STRIKES + 1))
 fi
 
 echo "$NOW_NS ${CPU_NS:-0} $STRIKES" > "$STATE_FILE"
-logger -t "$LOG_TAG" "flows=$FLOWS cpu=${CPU_PCT}% strikes=$STRIKES/$IDLE_STRIKES_LIMIT"
+logger -t "$LOG_TAG" "flows=$FLOWS app=$APP_ACTIVE cpu=${CPU_PCT}% strikes=$STRIKES/$IDLE_STRIKES_LIMIT"
 
 if [ "$STRIKES" -ge "$IDLE_STRIKES_LIMIT" ]; then
     logger -t "$LOG_TAG" "VM idle for $((STRIKES * 10)) min - hibernating (session preserved)"

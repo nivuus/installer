@@ -55,5 +55,7 @@ scripts/tests/test_hw_blackbox.sh           # 27 assertions on a fake hwmon tree
 scripts/tests/test_net_rps_ecores.sh        # 20 assertions on a fake hybrid CPU
 console/tests/test_vm_wake_gate.py
 console/tests/test_handle_vm_start.sh       # 10 assertions on a fake virsh
+console/tests/test_vm_control.sh            # 12 assertions on fake systemctl and logger
+console/tests/test_vm_idle_shutdown.sh     # 11 assertions on fake virsh, logger and conntrack
 scripts/disk-maintenance.sh --dry-run       # ALWAYS this first when / fills up
 ```

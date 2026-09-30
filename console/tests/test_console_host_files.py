@@ -38,6 +38,9 @@ if os.path.isfile(idle):
     head = open(idle).readline()
     check("vm-idle-shutdown.sh starts with a shebang", head.startswith("#!"))
 
+control = os.path.join(CONSOLE, "host", "vm-control.sh")
+check("vm-control.sh is versioned", os.path.isfile(control))
+
 for unit in ("vm-idle-shutdown.service", "vm-idle-shutdown.timer"):
     check(f"{unit} is versioned",
           os.path.isfile(os.path.join(CONSOLE, "host", "systemd", unit)))
