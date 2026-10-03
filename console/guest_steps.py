@@ -580,16 +580,32 @@ def copy_windows_medium(source: str, dest: str, *,
     replaces the medium in place with a byte-identical-SIZE but different
     file must remove the copy (or its stamp - see media_identity) by hand,
     exactly as media_identity() already documents for the fingerprint.
+
+    Replayed WITHOUT the source - `nivuus update console` runs this hook
+    again on a machine whose live medium was unmounted at the first
+    reboot, so the recorded 'windows_iso' answer names a path that no
+    longer exists - it trusts the copy already on the target, provided
+    the copy is complete by ITS OWN account: an ISO 9660 image carries,
+    in its primary volume descriptor, the size of the volume it holds,
+    and a copy at least that large was not cut short (see
+    copy_is_complete). That evidence lives in the file itself, so a copy
+    made by any earlier version of this hook qualifies - no record to
+    migrate, nothing for the operator to do. A copy shorter than its
+    descriptor claims, or a file that is not an ISO image at all, refuses
+    as before: an update that silently kept a truncated medium would only
+    be discovered by a Windows build failing twenty minutes later.
     """
+    dest_path = Path(dest)
     try:
         size = os.stat(source).st_size
     except OSError as exc:
+        if copy_is_complete(dest_path):
+            return  # the source is gone; the complete copy stands in for it
         raise GuestBuildError(
-            f"the Windows medium {source} is not readable: {exc.strerror}. "
-            "Check the path given to the wizard before retrying the "
-            "install.") from None
+            f"the Windows medium {source} is not readable: {exc.strerror}, "
+            f"and no complete copy of it is present at {dest}. Check the "
+            "path given to the wizard before retrying the install.") from None
 
-    dest_path = Path(dest)
     try:
         if dest_path.stat().st_size == size:
             return  # already copied in full; several GB not worth redoing
@@ -617,6 +633,97 @@ def copy_windows_medium(source: str, dest: str, *,
             f"the Windows medium {source} could not be copied to "
             f"{dest_path.parent}: {exc.strerror or exc}.") from None
     os.replace(tmp_path, dest_path)
+
+
+# ECMA-119 (ISO 9660): sixteen 2048-byte sectors of system area, then the
+# volume descriptor set, one descriptor per sector, closed by a terminator
+# (type 255). The primary descriptor is type 1 with identifier "CD001"; it
+# carries the volume space size in logical blocks at bytes 80-87 and the
+# logical block size at bytes 128-131, each recorded twice, little-endian
+# then big-endian. Read here by hand rather than through pycdlib: a few
+# fields of a few sectors, on a hook that must run both from the live
+# installer medium and on a bare bookworm target, do not justify a
+# dependency in both environments.
+ISO_SYSTEM_AREA = 16 * 2048
+ISO_SECTOR = 2048
+ISO_PVD_TYPE = 1
+ISO_TERMINATOR_TYPE = 255
+ISO_IDENTIFIER = b"CD001"
+# The set is small (a primary, maybe a boot record, maybe a supplementary
+# one for Joliet, then the terminator); an image that goes on much longer
+# without a terminator is not one this reader understands.
+ISO_MAX_DESCRIPTORS = 64
+# ECMA-119 6.2.2: a logical block is 2^n bytes, at least 512 and at most
+# one sector. Anything else is a damaged field, whatever its two halves say.
+ISO_BLOCK_SIZES = (512, 1024, 2048)
+
+
+def _both_endian(field: bytes) -> int | None:
+    """A both-endian field's value, or None when its two halves disagree -
+    damaged metadata is not metadata to act on."""
+    half = len(field) // 2
+    little = int.from_bytes(field[:half], "little")
+    big = int.from_bytes(field[half:], "big")
+    return little if little == big else None
+
+
+def iso_volume_size(path: str | Path) -> int | None:
+    """Bytes the image at `path` says it holds, or None when it carries no
+    usable primary volume descriptor: absent, too short, not an ISO 9660
+    image, a descriptor set with no primary before its terminator, size
+    fields whose two halves contradict each other, a block size the
+    standard does not allow, or a volume too small to hold the very
+    descriptor that describes it and the terminator that must follow. Not knowing is not knowing: None never
+    means "probably fine" - and a size that cannot be right is not a size
+    a truncated copy gets measured against.
+
+    The primary descriptor is usually the first of the set but the standard
+    does not make it so: the set is walked until a primary, the
+    terminator or the end of the file.
+    """
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(ISO_SYSTEM_AREA)
+            for index in range(ISO_MAX_DESCRIPTORS):
+                descriptor = handle.read(ISO_SECTOR)
+                if len(descriptor) < ISO_SECTOR or descriptor[1:6] != ISO_IDENTIFIER:
+                    return None
+                kind = descriptor[0]
+                if kind == ISO_TERMINATOR_TYPE:
+                    return None
+                if kind == ISO_PVD_TYPE:
+                    blocks = _both_endian(descriptor[80:88])
+                    block_size = _both_endian(descriptor[128:132])
+                    if not blocks or block_size not in ISO_BLOCK_SIZES:
+                        return None
+                    size = blocks * block_size
+                    # The set is closed by a mandatory terminator, so the
+                    # volume holds at least this descriptor and one more.
+                    if size < ISO_SYSTEM_AREA + (index + 2) * ISO_SECTOR:
+                        return None  # a volume too small to be a descriptor set
+                    return size
+    except OSError:
+        return None
+    return None
+
+
+def copy_is_complete(dest: str | Path) -> bool:
+    """True only when `dest` is at least as large as its own primary volume
+    descriptor says the volume is: a copy cut short fails this, a complete
+    one passes it, and a file that is no ISO image at all fails it too, as
+    does one whose size fields contradict themselves.
+
+    "At least": completeness is what is judged, not identity. Mastering
+    tools may pad an image past its volume, and a padded copy is still a
+    complete one; a shorter one never is.
+    """
+    claimed = iso_volume_size(dest)
+    if claimed is None:
+        return False
+    try:
+        return Path(dest).stat().st_size >= claimed
+    except OSError:
+        return False
 
 
 def media_identity(iso_path: str) -> str:

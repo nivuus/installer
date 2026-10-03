@@ -33,6 +33,8 @@ HOOK = CONSOLE / "hooks" / "install.py"
 # hook subprocess LEAVES on the filesystem, never mocks its internals.
 sys.path.insert(0, str(CONSOLE))
 import guest_steps  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from iso_fixture import fake_iso  # noqa: E402
 
 failures = []
 
@@ -69,7 +71,7 @@ def load_unit(path):
 # which each stand in for a fresh install target. Cleaned up at the bottom.
 FIXTURES = pathlib.Path(tempfile.mkdtemp(prefix="nivuus-console-install-test-"))
 SOURCE_ISO = FIXTURES / "live-medium.iso"
-SOURCE_ISO.write_bytes(b"NIVUUS-FAKE-WINDOWS-MEDIUM" * 200)  # a few KB, not GB
+SOURCE_ISO.write_bytes(fake_iso(blocks=24))  # a few sectors, not GB
 
 # Where install.py is expected to place the copy, under an install root:
 # derived from guest_steps' own convention (DEFAULT_GUEST_WORKDIR +
@@ -351,6 +353,36 @@ with tempfile.TemporaryDirectory() as tmp:
     check("le hook sort 0 quand la copie est deja complete", proc.returncode, 0)
     check("une copie deja complete (meme taille) n est pas refaite",
           copy.read_bytes(), stale)
+
+# REPLAY WITHOUT THE LIVE MEDIUM: `nivuus update console` runs this hook
+# again on a machine whose live medium was unmounted at the first reboot,
+# so the recorded 'windows_iso' answer names a path that no longer exists.
+# The copy install made the first time is complete by its own volume
+# descriptor; the replay must stand on it, not refuse - a refusal marks
+# console failed in the updater's state and blocks every package that
+# requires it (desk).
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    proc = subprocess.run(
+        [sys.executable, str(HOOK), "--phase", "install", "--root", str(root)],
+        input=CTX, capture_output=True, text=True, cwd=str(CONSOLE))
+    check("premiere pose : le hook sort 0", proc.returncode, 0)
+    copy = root / COPY_REL
+    first = copy.read_bytes()
+    replay = json.loads(CTX)
+    replay["answers"]["windows_iso"] = str(root / "unmounted-live-medium.iso")
+    proc = subprocess.run(
+        [sys.executable, str(HOOK), "--phase", "install", "--root", str(root)],
+        input=json.dumps(replay), capture_output=True, text=True, cwd=str(CONSOLE))
+    check("rejoue sans le media source, le hook sort 0", proc.returncode, 0)
+    check("la copie enregistree est intacte apres le rejeu", copy.read_bytes(), first)
+    # A copy cut short of what its descriptor claims is NOT accepted.
+    copy.write_bytes(first[:-1])
+    proc = subprocess.run(
+        [sys.executable, str(HOOK), "--phase", "install", "--root", str(root)],
+        input=json.dumps(replay), capture_output=True, text=True, cwd=str(CONSOLE))
+    check("rejoue sans source sur une copie tronquee, le hook refuse",
+          proc.returncode != 0, True)
 
 shutil.rmtree(FIXTURES, ignore_errors=True)
 

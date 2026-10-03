@@ -94,8 +94,10 @@ verified archive, the installer's own units (`nivuus-check.*`,
 (`packages/units.py`: content compared, atomic 0644, then `Reload` and a
 restart of a changed enabled timer over D-Bus via `busctl`, never
 `systemctl`, which a PID-namespaced session cannot use). It does so even when
-the code is already current, so a machine laid by an older updater catches up. **Deferred**: HA `update` entities
-via mqtt, `console`'s own `source:`, the `shell` rename.
+the code is already current, so a machine laid by an older updater catches up. `console` declares `source: {github: nivuus/installer, path: console}`
+(2026-10-03): the updater follows it through installer's releases, whose
+archive carries `console/` stamped with installer's version. **Deferred**: HA
+`update` entities via mqtt, the `shell` rename.
 
 **Arming `activate` takes three copies onto the target, and the whole phase is
 dead if any is missed** (it was, on the first cut of this branch, while the

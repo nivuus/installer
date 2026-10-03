@@ -39,6 +39,8 @@ sys.path.insert(0, CONSOLE)
 sys.modules["guest_steps"] = steps
 spec.loader.exec_module(steps)
 import qemu_build  # noqa: E402
+sys.path.insert(0, HERE)
+from iso_fixture import fake_iso  # noqa: E402
 
 failures = []
 
@@ -1077,6 +1079,108 @@ with tempfile.TemporaryDirectory() as tmp:
     check("le media copie est bien present", dest.is_file(), True)
     check("le contenu copie est identique a la source",
           dest.read_bytes(), source.read_bytes())
+
+    # A REPLAY of install (`nivuus update console`) runs once the live
+    # medium is gone: the recorded 'windows_iso' answer then names a path
+    # that no longer exists, and refusing it would mark console failed and
+    # block every package that requires it (desk). Measured before this
+    # existed: the replay refused. The copy is judged by its own volume
+    # descriptor - evidence that any earlier copy carries too, so nothing
+    # has to be migrated on a machine installed before this.
+    gone = root / "unmounted-live-medium.iso"
+    image = fake_iso(blocks=24)
+    source.write_bytes(image)
+    dest.unlink()
+    steps.copy_windows_medium(str(source), str(dest))
+    check("l image annonce sa propre taille",
+          steps.iso_volume_size(dest), len(image))
+    steps.copy_windows_medium(str(gone), str(dest))
+    check("une source disparue est acceptee quand la copie est complete",
+          dest.read_bytes(), image)
+    dest.write_bytes(image + b"\x00" * 2048)
+    check("une copie plus longue que son volume (bourrage) reste complete",
+          steps.copy_is_complete(dest), True)
+
+    # ...but only then. A copy cut short of what its descriptor claims is
+    # a truncation; a file that is no ISO image at all is "we do not know".
+    # Both refuse, and the refusal still names the source so the operator
+    # sees which path the recorded answer points at.
+    dest.write_bytes(image[:-1])
+    try:
+        steps.copy_windows_medium(str(gone), str(dest))
+        failures.append("une copie tronquee a ete acceptee sans source")
+    except steps.GuestBuildError as exc:
+        check("le refus sans source nomme la source", str(gone) in str(exc), True)
+    dest.write_bytes(b"x" * len(image))
+    check("un fichier sans descripteur de volume n est pas une copie complete",
+          steps.copy_is_complete(dest), False)
+    check_raises("sans descripteur, une source disparue est refusee",
+                 steps.GuestBuildError,
+                 lambda: steps.copy_windows_medium(str(gone), str(dest)))
+    check("un fichier absent n est pas une copie complete",
+          steps.copy_is_complete(root / "nowhere.iso"), False)
+
+    # The primary descriptor need not open the set (review of #32): with
+    # a boot record ahead of it, a reader fixed on sector 16 would call a
+    # complete copy unknown and refuse the replay.
+    booted = fake_iso(blocks=24, boot_record_first=True)
+    dest.write_bytes(booted)
+    check("un descripteur primaire precede d un boot record est trouve",
+          steps.iso_volume_size(dest), len(booted))
+    steps.copy_windows_medium(str(gone), str(dest))
+    check("une copie complete avec boot record en tete est acceptee",
+          dest.read_bytes(), booted)
+
+    # Both halves of a both-endian field must agree: a damaged little-endian
+    # block count (24 -> 20) with an intact big-endian one is contradictory
+    # metadata, never a smaller volume to accept a 20-sector copy against.
+    damaged = bytearray(image)
+    damaged[32768 + 80:32768 + 84] = (20).to_bytes(4, "little")
+    dest.write_bytes(bytes(damaged))
+    check("des moities little/big-endian discordantes rendent None",
+          steps.iso_volume_size(dest), None)
+    check("une copie aux tailles contradictoires n est pas complete",
+          steps.copy_is_complete(dest), False)
+    # A set closed by its terminator without a primary descriptor: unknown.
+    headless = bytearray(image)
+    headless[32768] = 2  # the primary becomes a supplementary descriptor
+    dest.write_bytes(bytes(headless))
+    check("un jeu de descripteurs sans primaire rend None",
+          steps.iso_volume_size(dest), None)
+
+    # Agreeing halves are not a plausible size (review of #32): a block
+    # count of 1 or a block size of 1, written consistently in both
+    # halves, would let a 17-sector stump call itself complete.
+    tiny_count = bytearray(image)
+    tiny_count[32768 + 80:32768 + 84] = (1).to_bytes(4, "little")
+    tiny_count[32768 + 84:32768 + 88] = (1).to_bytes(4, "big")
+    dest.write_bytes(bytes(tiny_count)[:17 * 2048])
+    check("un volume d un seul bloc ne contient pas son descripteur : None",
+          steps.iso_volume_size(dest), None)
+    check("un moignon de 17 secteurs n est pas une copie complete",
+          steps.copy_is_complete(dest), False)
+    tiny_block = bytearray(image)
+    tiny_block[32768 + 128:32768 + 130] = (1).to_bytes(2, "little")
+    tiny_block[32768 + 130:32768 + 132] = (1).to_bytes(2, "big")
+    dest.write_bytes(bytes(tiny_block)[:18 * 2048])
+    check("une taille de bloc hors norme rend None",
+          steps.iso_volume_size(dest), None)
+    check("un moignon de 18 secteurs n est pas une copie complete",
+          steps.copy_is_complete(dest), False)
+    # The boundary: a volume ending right after its primary descriptor has
+    # no room for the terminator the standard requires - not a volume.
+    boundary = bytearray(image)
+    boundary[32768 + 80:32768 + 84] = (17).to_bytes(4, "little")
+    boundary[32768 + 84:32768 + 88] = (17).to_bytes(4, "big")
+    dest.write_bytes(bytes(boundary)[:17 * 2048])
+    check("un volume qui s arrete a son descripteur primaire rend None",
+          steps.iso_volume_size(dest), None)
+    check("ce moignon de 17 secteurs n est pas une copie complete",
+          steps.copy_is_complete(dest), False)
+    # Back to the 1000-byte source the checks below were written against.
+    source.write_bytes(b"x" * 1000)
+    dest.unlink()
+    steps.copy_windows_medium(str(source), str(dest))
     check("aucun fichier .partial ne survit a une copie reussie",
           dest.with_name(dest.name + ".partial").exists(), False)
 
