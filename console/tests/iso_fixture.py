@@ -1,0 +1,32 @@
+"""A minimal ISO 9660 image for the suites: system area, one primary volume
+descriptor claiming `blocks` logical blocks of 2048 bytes, then the volume.
+
+Never the real ~4.8 GB medium - a few sectors are enough for what the hooks
+read: the descriptor's identifier, its volume space size and its logical
+block size (guest_steps.iso_volume_size), nothing past that.
+"""
+from __future__ import annotations
+
+SECTOR = 2048
+SYSTEM_AREA = 16 * SECTOR
+
+
+def fake_iso(blocks: int = 20, fill: bytes = b"\xaa") -> bytes:
+    """`blocks` * 2048 bytes carrying a valid primary volume descriptor."""
+    if blocks < 18:
+        raise ValueError("an image needs the system area, a descriptor and "
+                         "a terminator: at least 18 blocks")
+    pvd = bytearray(SECTOR)
+    pvd[0] = 1                                   # type: primary
+    pvd[1:6] = b"CD001"                          # identifier
+    pvd[6] = 1                                   # version
+    pvd[80:84] = blocks.to_bytes(4, "little")    # volume space size, LE
+    pvd[84:88] = blocks.to_bytes(4, "big")       # ... and BE
+    pvd[128:130] = SECTOR.to_bytes(2, "little")  # logical block size, LE
+    pvd[130:132] = SECTOR.to_bytes(2, "big")     # ... and BE
+    terminator = bytearray(SECTOR)
+    terminator[0] = 255
+    terminator[1:6] = b"CD001"
+    terminator[6] = 1
+    body = (fill * (SECTOR // len(fill) + 1))[:SECTOR] * (blocks - 18)
+    return bytes(SYSTEM_AREA * b"\x00") + bytes(pvd) + bytes(terminator) + body

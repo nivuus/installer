@@ -584,32 +584,31 @@ def copy_windows_medium(source: str, dest: str, *,
     Replayed WITHOUT the source - `nivuus update console` runs this hook
     again on a machine whose live medium was unmounted at the first
     reboot, so the recorded 'windows_iso' answer names a path that no
-    longer exists - it trusts the copy already on the target, provided the
-    record written at the end of its copy (see medium_record_path) says it
-    is complete: same size then as now. Without that record, or with a
-    size that differs from it, it refuses as before: an update that
-    silently kept a truncated medium would only be discovered by a
-    Windows build failing twenty minutes later.
+    longer exists - it trusts the copy already on the target, provided
+    the copy is complete by ITS OWN account: an ISO 9660 image carries,
+    in its primary volume descriptor, the size of the volume it holds,
+    and a copy at least that large was not cut short (see
+    copy_is_complete). That evidence lives in the file itself, so a copy
+    made by any earlier version of this hook qualifies - no record to
+    migrate, nothing for the operator to do. A copy shorter than its
+    descriptor claims, or a file that is not an ISO image at all, refuses
+    as before: an update that silently kept a truncated medium would only
+    be discovered by a Windows build failing twenty minutes later.
     """
     dest_path = Path(dest)
     try:
         size = os.stat(source).st_size
     except OSError as exc:
         if copy_is_complete(dest_path):
-            return  # the source is gone, the recorded copy stands in for it
+            return  # the source is gone; the complete copy stands in for it
         raise GuestBuildError(
             f"the Windows medium {source} is not readable: {exc.strerror}, "
-            f"and no complete copy is recorded at {dest}. Check the path "
-            "given to the wizard before retrying the install.") from None
+            f"and no complete copy of it is present at {dest}. Check the "
+            "path given to the wizard before retrying the install.") from None
 
     try:
         if dest_path.stat().st_size == size:
-            # Already copied in full; several GB not worth redoing. A copy
-            # made before records existed gets its record now, so the next
-            # replay can stand on it once the source is gone.
-            if _recorded_size(dest_path) != size:
-                _write_medium_record(dest_path, size, source)
-            return
+            return  # already copied in full; several GB not worth redoing
     except OSError:
         pass  # absent, or otherwise unreadable: (re)copy it below
 
@@ -634,45 +633,55 @@ def copy_windows_medium(source: str, dest: str, *,
             f"the Windows medium {source} could not be copied to "
             f"{dest_path.parent}: {exc.strerror or exc}.") from None
     os.replace(tmp_path, dest_path)
-    _write_medium_record(dest_path, size, source)
 
 
-def medium_record_path(dest: str | Path) -> Path:
-    """Where a completed copy records its size: right next to the copy.
-
-    The record is what lets a replay of install (an update) accept the copy
-    once the source it was taken from is gone - the only evidence of
-    completeness that survives the live medium. Same choice as
-    media_identity(): a size, never a content hash of several gigabytes.
-    """
-    return Path(f"{dest}.size")
-
-
-def _write_medium_record(dest_path: Path, size: int, source: str) -> None:
-    """Only ever called once `dest_path` holds the full copy."""
-    medium_record_path(dest_path).write_text(
-        json.dumps({"size": size, "source": source}) + "\n")
+# ECMA-119 (ISO 9660): sixteen 2048-byte sectors of system area, then the
+# volume descriptors; the primary one is type 1 with identifier "CD001",
+# carries the volume space size in logical blocks at bytes 80-87 (both-endian
+# 32-bit, little-endian half first) and the logical block size at bytes
+# 128-131 (both-endian 16-bit). Read here by hand rather than through
+# pycdlib: two fields of one sector, on a hook that must run both from the
+# live installer medium and on a bare bookworm target, do not justify a
+# dependency in both environments.
+ISO_SYSTEM_AREA = 16 * 2048
+ISO_SECTOR = 2048
+ISO_PVD_TYPE = 1
+ISO_IDENTIFIER = b"CD001"
 
 
-def _recorded_size(dest_path: Path) -> int | None:
-    """The size the record claims, or None on every error: absent,
-    unreadable, not JSON, wrong shape. Not knowing is not knowing."""
+def iso_volume_size(path: str | Path) -> int | None:
+    """Bytes the image at `path` says it holds, or None when it carries no
+    primary volume descriptor (absent, too short, not an ISO 9660 image).
+    Not knowing is not knowing: None never means "probably fine"."""
     try:
-        data = json.loads(medium_record_path(dest_path).read_text())
-    except (OSError, ValueError):
+        with open(path, "rb") as handle:
+            handle.seek(ISO_SYSTEM_AREA)
+            pvd = handle.read(ISO_SECTOR)
+    except OSError:
         return None
-    size = data.get("size") if isinstance(data, dict) else None
-    return size if isinstance(size, int) and not isinstance(size, bool) else None
+    if len(pvd) < 132 or pvd[0] != ISO_PVD_TYPE or pvd[1:6] != ISO_IDENTIFIER:
+        return None
+    blocks = int.from_bytes(pvd[80:84], "little")
+    block_size = int.from_bytes(pvd[128:130], "little")
+    if blocks == 0 or block_size == 0:
+        return None
+    return blocks * block_size
 
 
 def copy_is_complete(dest: str | Path) -> bool:
-    """True only when `dest` exists with exactly the size its record claims."""
-    dest_path = Path(dest)
-    recorded = _recorded_size(dest_path)
-    if recorded is None:
+    """True only when `dest` is at least as large as its own primary volume
+    descriptor says the volume is: a copy cut short fails this, a complete
+    one passes it, and a file that is no ISO image at all fails it too.
+
+    "At least": completeness is what is judged, not identity. Mastering
+    tools may pad an image past its volume, and a padded copy is still a
+    complete one; a shorter one never is.
+    """
+    claimed = iso_volume_size(dest)
+    if claimed is None:
         return False
     try:
-        return dest_path.stat().st_size == recorded
+        return Path(dest).stat().st_size >= claimed
     except OSError:
         return False
 
