@@ -673,7 +673,7 @@ def iso_volume_size(path: str | Path) -> int | None:
     image, a descriptor set with no primary before its terminator, size
     fields whose two halves contradict each other, a block size the
     standard does not allow, or a volume too small to hold the very
-    descriptor that describes it. Not knowing is not knowing: None never
+    descriptor that describes it and the terminator that must follow. Not knowing is not knowing: None never
     means "probably fine" - and a size that cannot be right is not a size
     a truncated copy gets measured against.
 
@@ -697,8 +697,10 @@ def iso_volume_size(path: str | Path) -> int | None:
                     if not blocks or block_size not in ISO_BLOCK_SIZES:
                         return None
                     size = blocks * block_size
-                    if size < ISO_SYSTEM_AREA + (index + 1) * ISO_SECTOR:
-                        return None  # a volume that does not even reach its own descriptor
+                    # The set is closed by a mandatory terminator, so the
+                    # volume holds at least this descriptor and one more.
+                    if size < ISO_SYSTEM_AREA + (index + 2) * ISO_SECTOR:
+                        return None  # a volume too small to be a descriptor set
                     return size
     except OSError:
         return None

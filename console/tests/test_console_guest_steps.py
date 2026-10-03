@@ -1167,6 +1167,16 @@ with tempfile.TemporaryDirectory() as tmp:
           steps.iso_volume_size(dest), None)
     check("un moignon de 18 secteurs n est pas une copie complete",
           steps.copy_is_complete(dest), False)
+    # The boundary: a volume ending right after its primary descriptor has
+    # no room for the terminator the standard requires - not a volume.
+    boundary = bytearray(image)
+    boundary[32768 + 80:32768 + 84] = (17).to_bytes(4, "little")
+    boundary[32768 + 84:32768 + 88] = (17).to_bytes(4, "big")
+    dest.write_bytes(bytes(boundary)[:17 * 2048])
+    check("un volume qui s arrete a son descripteur primaire rend None",
+          steps.iso_volume_size(dest), None)
+    check("ce moignon de 17 secteurs n est pas une copie complete",
+          steps.copy_is_complete(dest), False)
     # Back to the 1000-byte source the checks below were written against.
     source.write_bytes(b"x" * 1000)
     dest.unlink()
