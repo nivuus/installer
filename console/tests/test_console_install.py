@@ -352,6 +352,35 @@ with tempfile.TemporaryDirectory() as tmp:
     check("une copie deja complete (meme taille) n est pas refaite",
           copy.read_bytes(), stale)
 
+# REPLAY WITHOUT THE LIVE MEDIUM: `nivuus update console` runs this hook
+# again on a machine whose live medium was unmounted at the first reboot,
+# so the recorded 'windows_iso' answer names a path that no longer exists.
+# The copy install made the first time is complete and recorded; the replay
+# must stand on it, not refuse - a refusal marks console failed in the
+# updater's state and blocks every package that requires it (desk).
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    proc = subprocess.run(
+        [sys.executable, str(HOOK), "--phase", "install", "--root", str(root)],
+        input=CTX, capture_output=True, text=True, cwd=str(CONSOLE))
+    check("premiere pose : le hook sort 0", proc.returncode, 0)
+    copy = root / COPY_REL
+    first = copy.read_bytes()
+    replay = json.loads(CTX)
+    replay["answers"]["windows_iso"] = str(root / "unmounted-live-medium.iso")
+    proc = subprocess.run(
+        [sys.executable, str(HOOK), "--phase", "install", "--root", str(root)],
+        input=json.dumps(replay), capture_output=True, text=True, cwd=str(CONSOLE))
+    check("rejoue sans le media source, le hook sort 0", proc.returncode, 0)
+    check("la copie enregistree est intacte apres le rejeu", copy.read_bytes(), first)
+    # A truncated copy is NOT accepted on the strength of its record.
+    copy.write_bytes(first[:-1])
+    proc = subprocess.run(
+        [sys.executable, str(HOOK), "--phase", "install", "--root", str(root)],
+        input=json.dumps(replay), capture_output=True, text=True, cwd=str(CONSOLE))
+    check("rejoue sans source sur une copie tronquee, le hook refuse",
+          proc.returncode != 0, True)
+
 shutil.rmtree(FIXTURES, ignore_errors=True)
 
 # The byte-for-byte comparison above only protects the TRANSPORT: a regression

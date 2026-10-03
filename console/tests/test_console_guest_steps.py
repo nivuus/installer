@@ -1077,6 +1077,45 @@ with tempfile.TemporaryDirectory() as tmp:
     check("le media copie est bien present", dest.is_file(), True)
     check("le contenu copie est identique a la source",
           dest.read_bytes(), source.read_bytes())
+
+    # The copy records its size, and that record is what a REPLAY of install
+    # (`nivuus update console`) stands on once the live medium is gone: the
+    # recorded 'windows_iso' answer then names a path that no longer exists,
+    # and refusing it would mark console failed and block every package that
+    # requires it (desk). Measured before this existed: the replay refused.
+    record = steps.medium_record_path(dest)
+    check("une copie complete laisse un enregistrement de sa taille",
+          record.is_file(), True)
+    check("l enregistrement dit la taille copiee",
+          json.loads(record.read_text())["size"], len(source.read_bytes()))
+    gone = root / "unmounted-live-medium.iso"
+    before = dest.read_bytes()
+    steps.copy_windows_medium(str(gone), str(dest))
+    check("une source disparue est acceptee quand la copie enregistree est complete",
+          dest.read_bytes(), before)
+
+    # ...but only then. A copy whose size no longer matches its record is a
+    # truncation or a swap, and a missing record is "we do not know": both
+    # refuse, and the refusal still names the source so the operator sees
+    # which path the recorded answer points at.
+    dest.write_bytes(before[:-1])
+    try:
+        steps.copy_windows_medium(str(gone), str(dest))
+        failures.append("une copie tronquee a ete acceptee sans source")
+    except steps.GuestBuildError as exc:
+        check("le refus sans source nomme la source", str(gone) in str(exc), True)
+    dest.write_bytes(before)
+    record.unlink()
+    check_raises("sans enregistrement, une source disparue est refusee",
+                 steps.GuestBuildError,
+                 lambda: steps.copy_windows_medium(str(gone), str(dest)))
+
+    # A copy made before records existed: the source is still readable and
+    # the sizes match, so the skip path writes the missing record - the
+    # machine catches up on the first install that still sees the medium.
+    steps.copy_windows_medium(str(source), str(dest))
+    check("une copie d avant les enregistrements recoit le sien",
+          steps.copy_is_complete(dest), True)
     check("aucun fichier .partial ne survit a une copie reussie",
           dest.with_name(dest.name + ".partial").exists(), False)
 

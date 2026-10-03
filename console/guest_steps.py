@@ -580,19 +580,36 @@ def copy_windows_medium(source: str, dest: str, *,
     replaces the medium in place with a byte-identical-SIZE but different
     file must remove the copy (or its stamp - see media_identity) by hand,
     exactly as media_identity() already documents for the fingerprint.
+
+    Replayed WITHOUT the source - `nivuus update console` runs this hook
+    again on a machine whose live medium was unmounted at the first
+    reboot, so the recorded 'windows_iso' answer names a path that no
+    longer exists - it trusts the copy already on the target, provided the
+    record written at the end of its copy (see medium_record_path) says it
+    is complete: same size then as now. Without that record, or with a
+    size that differs from it, it refuses as before: an update that
+    silently kept a truncated medium would only be discovered by a
+    Windows build failing twenty minutes later.
     """
+    dest_path = Path(dest)
     try:
         size = os.stat(source).st_size
     except OSError as exc:
+        if copy_is_complete(dest_path):
+            return  # the source is gone, the recorded copy stands in for it
         raise GuestBuildError(
-            f"the Windows medium {source} is not readable: {exc.strerror}. "
-            "Check the path given to the wizard before retrying the "
-            "install.") from None
+            f"the Windows medium {source} is not readable: {exc.strerror}, "
+            f"and no complete copy is recorded at {dest}. Check the path "
+            "given to the wizard before retrying the install.") from None
 
-    dest_path = Path(dest)
     try:
         if dest_path.stat().st_size == size:
-            return  # already copied in full; several GB not worth redoing
+            # Already copied in full; several GB not worth redoing. A copy
+            # made before records existed gets its record now, so the next
+            # replay can stand on it once the source is gone.
+            if _recorded_size(dest_path) != size:
+                _write_medium_record(dest_path, size, source)
+            return
     except OSError:
         pass  # absent, or otherwise unreadable: (re)copy it below
 
@@ -617,6 +634,47 @@ def copy_windows_medium(source: str, dest: str, *,
             f"the Windows medium {source} could not be copied to "
             f"{dest_path.parent}: {exc.strerror or exc}.") from None
     os.replace(tmp_path, dest_path)
+    _write_medium_record(dest_path, size, source)
+
+
+def medium_record_path(dest: str | Path) -> Path:
+    """Where a completed copy records its size: right next to the copy.
+
+    The record is what lets a replay of install (an update) accept the copy
+    once the source it was taken from is gone - the only evidence of
+    completeness that survives the live medium. Same choice as
+    media_identity(): a size, never a content hash of several gigabytes.
+    """
+    return Path(f"{dest}.size")
+
+
+def _write_medium_record(dest_path: Path, size: int, source: str) -> None:
+    """Only ever called once `dest_path` holds the full copy."""
+    medium_record_path(dest_path).write_text(
+        json.dumps({"size": size, "source": source}) + "\n")
+
+
+def _recorded_size(dest_path: Path) -> int | None:
+    """The size the record claims, or None on every error: absent,
+    unreadable, not JSON, wrong shape. Not knowing is not knowing."""
+    try:
+        data = json.loads(medium_record_path(dest_path).read_text())
+    except (OSError, ValueError):
+        return None
+    size = data.get("size") if isinstance(data, dict) else None
+    return size if isinstance(size, int) and not isinstance(size, bool) else None
+
+
+def copy_is_complete(dest: str | Path) -> bool:
+    """True only when `dest` exists with exactly the size its record claims."""
+    dest_path = Path(dest)
+    recorded = _recorded_size(dest_path)
+    if recorded is None:
+        return False
+    try:
+        return dest_path.stat().st_size == recorded
+    except OSError:
+        return False
 
 
 def media_identity(iso_path: str) -> str:
