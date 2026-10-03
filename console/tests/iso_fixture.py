@@ -11,11 +11,23 @@ SECTOR = 2048
 SYSTEM_AREA = 16 * SECTOR
 
 
-def fake_iso(blocks: int = 20, fill: bytes = b"\xaa") -> bytes:
-    """`blocks` * 2048 bytes carrying a valid primary volume descriptor."""
-    if blocks < 18:
-        raise ValueError("an image needs the system area, a descriptor and "
-                         "a terminator: at least 18 blocks")
+def fake_iso(blocks: int = 20, fill: bytes = b"\xaa", *,
+             boot_record_first: bool = False) -> bytes:
+    """`blocks` * 2048 bytes carrying a valid primary volume descriptor.
+
+    `boot_record_first` puts an El Torito style boot record (type 0) ahead
+    of the primary descriptor: the standard does not make the primary the
+    first of the set, and a reader that only looks at sector 16 misses it.
+    """
+    if blocks < 19:
+        raise ValueError("an image needs the system area, a descriptor, a "
+                         "possible boot record and a terminator: at least "
+                         "19 blocks")
+    boot = bytearray(SECTOR)
+    boot[0] = 0
+    boot[1:6] = b"CD001"
+    boot[6] = 1
+    boot[7:30] = b"EL TORITO SPECIFICATION".ljust(23, b"\x00")
     pvd = bytearray(SECTOR)
     pvd[0] = 1                                   # type: primary
     pvd[1:6] = b"CD001"                          # identifier
@@ -28,5 +40,7 @@ def fake_iso(blocks: int = 20, fill: bytes = b"\xaa") -> bytes:
     terminator[0] = 255
     terminator[1:6] = b"CD001"
     terminator[6] = 1
-    body = (fill * (SECTOR // len(fill) + 1))[:SECTOR] * (blocks - 18)
-    return bytes(SYSTEM_AREA * b"\x00") + bytes(pvd) + bytes(terminator) + body
+    body = (fill * (SECTOR // len(fill) + 1))[:SECTOR] * (blocks - 19)
+    descriptors = (bytes(boot) + bytes(pvd)) if boot_record_first \
+        else (bytes(pvd) + bytes(boot))
+    return bytes(SYSTEM_AREA * b"\x00") + descriptors + bytes(terminator) + body

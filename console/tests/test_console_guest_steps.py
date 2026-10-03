@@ -1119,6 +1119,34 @@ with tempfile.TemporaryDirectory() as tmp:
                  lambda: steps.copy_windows_medium(str(gone), str(dest)))
     check("un fichier absent n est pas une copie complete",
           steps.copy_is_complete(root / "nowhere.iso"), False)
+
+    # The primary descriptor need not open the set (review of #32): with
+    # a boot record ahead of it, a reader fixed on sector 16 would call a
+    # complete copy unknown and refuse the replay.
+    booted = fake_iso(blocks=24, boot_record_first=True)
+    dest.write_bytes(booted)
+    check("un descripteur primaire precede d un boot record est trouve",
+          steps.iso_volume_size(dest), len(booted))
+    steps.copy_windows_medium(str(gone), str(dest))
+    check("une copie complete avec boot record en tete est acceptee",
+          dest.read_bytes(), booted)
+
+    # Both halves of a both-endian field must agree: a damaged little-endian
+    # block count (24 -> 20) with an intact big-endian one is contradictory
+    # metadata, never a smaller volume to accept a 20-sector copy against.
+    damaged = bytearray(image)
+    damaged[32768 + 80:32768 + 84] = (20).to_bytes(4, "little")
+    dest.write_bytes(bytes(damaged))
+    check("des moities little/big-endian discordantes rendent None",
+          steps.iso_volume_size(dest), None)
+    check("une copie aux tailles contradictoires n est pas complete",
+          steps.copy_is_complete(dest), False)
+    # A set closed by its terminator without a primary descriptor: unknown.
+    headless = bytearray(image)
+    headless[32768] = 2  # the primary becomes a supplementary descriptor
+    dest.write_bytes(bytes(headless))
+    check("un jeu de descripteurs sans primaire rend None",
+          steps.iso_volume_size(dest), None)
     # Back to the 1000-byte source the checks below were written against.
     source.write_bytes(b"x" * 1000)
     dest.unlink()

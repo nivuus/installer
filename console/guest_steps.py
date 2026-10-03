@@ -636,42 +636,71 @@ def copy_windows_medium(source: str, dest: str, *,
 
 
 # ECMA-119 (ISO 9660): sixteen 2048-byte sectors of system area, then the
-# volume descriptors; the primary one is type 1 with identifier "CD001",
-# carries the volume space size in logical blocks at bytes 80-87 (both-endian
-# 32-bit, little-endian half first) and the logical block size at bytes
-# 128-131 (both-endian 16-bit). Read here by hand rather than through
-# pycdlib: two fields of one sector, on a hook that must run both from the
-# live installer medium and on a bare bookworm target, do not justify a
+# volume descriptor set, one descriptor per sector, closed by a terminator
+# (type 255). The primary descriptor is type 1 with identifier "CD001"; it
+# carries the volume space size in logical blocks at bytes 80-87 and the
+# logical block size at bytes 128-131, each recorded twice, little-endian
+# then big-endian. Read here by hand rather than through pycdlib: a few
+# fields of a few sectors, on a hook that must run both from the live
+# installer medium and on a bare bookworm target, do not justify a
 # dependency in both environments.
 ISO_SYSTEM_AREA = 16 * 2048
 ISO_SECTOR = 2048
 ISO_PVD_TYPE = 1
+ISO_TERMINATOR_TYPE = 255
 ISO_IDENTIFIER = b"CD001"
+# The set is small (a primary, maybe a boot record, maybe a supplementary
+# one for Joliet, then the terminator); an image that goes on much longer
+# without a terminator is not one this reader understands.
+ISO_MAX_DESCRIPTORS = 64
+
+
+def _both_endian(field: bytes) -> int | None:
+    """A both-endian field's value, or None when its two halves disagree -
+    damaged metadata is not metadata to act on."""
+    half = len(field) // 2
+    little = int.from_bytes(field[:half], "little")
+    big = int.from_bytes(field[half:], "big")
+    return little if little == big else None
 
 
 def iso_volume_size(path: str | Path) -> int | None:
     """Bytes the image at `path` says it holds, or None when it carries no
-    primary volume descriptor (absent, too short, not an ISO 9660 image).
-    Not knowing is not knowing: None never means "probably fine"."""
+    usable primary volume descriptor: absent, too short, not an ISO 9660
+    image, a descriptor set with no primary before its terminator, or size
+    fields whose two halves contradict each other. Not knowing is not
+    knowing: None never means "probably fine".
+
+    The primary descriptor is usually the first of the set but the standard
+    does not make it so: the set is walked until a primary, the
+    terminator or the end of the file.
+    """
     try:
         with open(path, "rb") as handle:
             handle.seek(ISO_SYSTEM_AREA)
-            pvd = handle.read(ISO_SECTOR)
+            for _ in range(ISO_MAX_DESCRIPTORS):
+                descriptor = handle.read(ISO_SECTOR)
+                if len(descriptor) < ISO_SECTOR or descriptor[1:6] != ISO_IDENTIFIER:
+                    return None
+                kind = descriptor[0]
+                if kind == ISO_TERMINATOR_TYPE:
+                    return None
+                if kind == ISO_PVD_TYPE:
+                    blocks = _both_endian(descriptor[80:88])
+                    block_size = _both_endian(descriptor[128:132])
+                    if not blocks or not block_size:
+                        return None
+                    return blocks * block_size
     except OSError:
         return None
-    if len(pvd) < 132 or pvd[0] != ISO_PVD_TYPE or pvd[1:6] != ISO_IDENTIFIER:
-        return None
-    blocks = int.from_bytes(pvd[80:84], "little")
-    block_size = int.from_bytes(pvd[128:130], "little")
-    if blocks == 0 or block_size == 0:
-        return None
-    return blocks * block_size
+    return None
 
 
 def copy_is_complete(dest: str | Path) -> bool:
     """True only when `dest` is at least as large as its own primary volume
     descriptor says the volume is: a copy cut short fails this, a complete
-    one passes it, and a file that is no ISO image at all fails it too.
+    one passes it, and a file that is no ISO image at all fails it too, as
+    does one whose size fields contradict themselves.
 
     "At least": completeness is what is judged, not identity. Mastering
     tools may pad an image past its volume, and a padded copy is still a
