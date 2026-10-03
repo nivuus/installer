@@ -653,6 +653,9 @@ ISO_IDENTIFIER = b"CD001"
 # one for Joliet, then the terminator); an image that goes on much longer
 # without a terminator is not one this reader understands.
 ISO_MAX_DESCRIPTORS = 64
+# ECMA-119 6.2.2: a logical block is 2^n bytes, at least 512 and at most
+# one sector. Anything else is a damaged field, whatever its two halves say.
+ISO_BLOCK_SIZES = (512, 1024, 2048)
 
 
 def _both_endian(field: bytes) -> int | None:
@@ -667,9 +670,12 @@ def _both_endian(field: bytes) -> int | None:
 def iso_volume_size(path: str | Path) -> int | None:
     """Bytes the image at `path` says it holds, or None when it carries no
     usable primary volume descriptor: absent, too short, not an ISO 9660
-    image, a descriptor set with no primary before its terminator, or size
-    fields whose two halves contradict each other. Not knowing is not
-    knowing: None never means "probably fine".
+    image, a descriptor set with no primary before its terminator, size
+    fields whose two halves contradict each other, a block size the
+    standard does not allow, or a volume too small to hold the very
+    descriptor that describes it. Not knowing is not knowing: None never
+    means "probably fine" - and a size that cannot be right is not a size
+    a truncated copy gets measured against.
 
     The primary descriptor is usually the first of the set but the standard
     does not make it so: the set is walked until a primary, the
@@ -678,7 +684,7 @@ def iso_volume_size(path: str | Path) -> int | None:
     try:
         with open(path, "rb") as handle:
             handle.seek(ISO_SYSTEM_AREA)
-            for _ in range(ISO_MAX_DESCRIPTORS):
+            for index in range(ISO_MAX_DESCRIPTORS):
                 descriptor = handle.read(ISO_SECTOR)
                 if len(descriptor) < ISO_SECTOR or descriptor[1:6] != ISO_IDENTIFIER:
                     return None
@@ -688,9 +694,12 @@ def iso_volume_size(path: str | Path) -> int | None:
                 if kind == ISO_PVD_TYPE:
                     blocks = _both_endian(descriptor[80:88])
                     block_size = _both_endian(descriptor[128:132])
-                    if not blocks or not block_size:
+                    if not blocks or block_size not in ISO_BLOCK_SIZES:
                         return None
-                    return blocks * block_size
+                    size = blocks * block_size
+                    if size < ISO_SYSTEM_AREA + (index + 1) * ISO_SECTOR:
+                        return None  # a volume that does not even reach its own descriptor
+                    return size
     except OSError:
         return None
     return None

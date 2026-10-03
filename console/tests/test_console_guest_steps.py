@@ -1147,6 +1147,26 @@ with tempfile.TemporaryDirectory() as tmp:
     dest.write_bytes(bytes(headless))
     check("un jeu de descripteurs sans primaire rend None",
           steps.iso_volume_size(dest), None)
+
+    # Agreeing halves are not a plausible size (review of #32): a block
+    # count of 1 or a block size of 1, written consistently in both
+    # halves, would let a 17-sector stump call itself complete.
+    tiny_count = bytearray(image)
+    tiny_count[32768 + 80:32768 + 84] = (1).to_bytes(4, "little")
+    tiny_count[32768 + 84:32768 + 88] = (1).to_bytes(4, "big")
+    dest.write_bytes(bytes(tiny_count)[:17 * 2048])
+    check("un volume d un seul bloc ne contient pas son descripteur : None",
+          steps.iso_volume_size(dest), None)
+    check("un moignon de 17 secteurs n est pas une copie complete",
+          steps.copy_is_complete(dest), False)
+    tiny_block = bytearray(image)
+    tiny_block[32768 + 128:32768 + 130] = (1).to_bytes(2, "little")
+    tiny_block[32768 + 130:32768 + 132] = (1).to_bytes(2, "big")
+    dest.write_bytes(bytes(tiny_block)[:18 * 2048])
+    check("une taille de bloc hors norme rend None",
+          steps.iso_volume_size(dest), None)
+    check("un moignon de 18 secteurs n est pas une copie complete",
+          steps.copy_is_complete(dest), False)
     # Back to the 1000-byte source the checks below were written against.
     source.write_bytes(b"x" * 1000)
     dest.unlink()
