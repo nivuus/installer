@@ -94,3 +94,13 @@ hooks:
   resolve: hooks/resolve.py
   install: hooks/install.py
   activate: hooks/activate.py
+
+# Where `nivuus update` finds this package's releases: console has no
+# repository of its own, it travels inside installer's archive under
+# `console/` (release.yml stamps console/nivuus-package.yaml with installer's
+# version). Without this block the updater cannot follow it, and a package
+# that requires console (desk) can never be adopted or updated on a machine
+# where console was laid by hand.
+source:
+  github: nivuus/installer
+  path: console
