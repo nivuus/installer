@@ -484,7 +484,17 @@ with tempfile.TemporaryDirectory() as tmp:
     check("un repertoire agent/ vide ne suffit pas non plus",
           st["payload"].already_done(), False)
     witness.write_text("MZ")
-    check("un payload portant agent.exe est fait", st["payload"].already_done(), True)
+    # agent.exe alone is no longer enough: the pinned NVIDIA and Apollo
+    # installers are downloads too, and a tree staged before they were - the
+    # reference host's, 2026-10-08 - must replay the step. An installer under
+    # another name (driver.exe above, or a previous pin) does not count.
+    check("agent.exe without the pinned installers is not done",
+          st["payload"].already_done(), False)
+    for rel in steps.payload_witnesses()[1:]:
+        (payload_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+        (payload_dir / rel).write_text("MZ")
+    check("agent.exe plus the pinned installers is done",
+          st["payload"].already_done(), True)
 
     # build: the ISO alone never suffices - the fingerprint must agree.
     # The COPY console/hooks/install.py places under the workdir is what
