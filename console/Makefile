@@ -50,6 +50,7 @@ test:
 	          test_windows_guest_build test_windows_guest_domain \
 	          test_windows_guest_fetch_payload test_windows_guest_iso \
 	          test_windows_guest_media test_windows_guest_payload \
+	          test_windows_guest_pinned_installers \
 	          test_windows_guest_production_domain test_windows_guest_provision \
 	          test_windows_guest_retro_sync test_windows_guest_winrm_exec; do \
 	    echo "--- $$t"; \

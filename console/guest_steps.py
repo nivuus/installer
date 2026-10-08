@@ -103,6 +103,21 @@ DISK_MODES = ("wipe", "rebuild")
 # `dest = drivers_dir / "agent" / "agent.exe"` - copied, not imported (the
 # module docstring's rule). See payload_done() for why it is this file.
 PAYLOAD_WITNESS = Path("agent") / "agent.exe"
+
+
+def payload_witnesses() -> list[Path]:
+    """agent.exe plus the pinned installers, at their pinned names.
+
+    guest/pinned_installers.py is imported lazily and on its own: the other
+    guest/ modules import jinja2 at module scope, and this one must stay
+    importable on a target that has none (same convention as _sysfs_size).
+    """
+    if str(GUEST_DIR) not in sys.path:
+        sys.path.insert(0, str(GUEST_DIR))
+    import pinned_installers  # noqa: PLC0415
+
+    return [PAYLOAD_WITNESS] + [Path(pin.subdir) / pin.filename
+                                for pin in pinned_installers.PINNED]
 # The states in which the guest is already up, listed positively rather than
 # excluding "shut off". `in shutdown` and `crashed` are states to get OUT of,
 # not successes: read as "already started" they would leave a crashed guest
@@ -308,7 +323,7 @@ def payload_tree(directory: str) -> dict[str, str]:
 # here, and is left named rather than papered over.
 BUILD_INPUT_FILES = ("build.py", "unattend_iso.py", "autounattend.py",
                      "apollo.py", "media.py", "payload.py",
-                     "fetch_payload.py")
+                     "fetch_payload.py", "pinned_installers.py")
 BUILD_INPUT_DIRS = ("templates", "provision", "probe", "assets")
 
 # The modules under guest/ that deliberately do NOT enter the fingerprint,
@@ -1094,7 +1109,14 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         # the provisioning with no agent to install: the void the packaging
         # of agent.exe had just filled. Whatever ends up being the last
         # payload piece added, this predicate must name it.
-        return (payload_dir / PAYLOAD_WITNESS).is_file()
+        #
+        # Which, since the NVIDIA driver and Apollo became downloads, means
+        # them too, by their PINNED file names: a payload staged before they
+        # were fetched carries agent.exe and neither installer (measured on
+        # the reference host 2026-10-08), and a pin bump leaves the old
+        # version's name. Either way the step must replay, or build.py stops
+        # at "offline payload incomplete" with nothing left to fetch them.
+        return all((payload_dir / rel).is_file() for rel in payload_witnesses())
 
     # ACCESS IS A PROPERTY OF THE ARTEFACTS - the workdir, the copied
     # Windows medium, the built ISO - not a side effect of having just built

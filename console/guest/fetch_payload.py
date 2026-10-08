@@ -58,6 +58,8 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import pinned_installers
+
 
 class FetchError(RuntimeError):
     """Raised when a payload binary cannot be obtained."""
@@ -68,6 +70,9 @@ class Download:
     name: str
     url: str
     dest: Path
+    # Set for a release pinned by digest (pinned_installers.py): a mismatch
+    # is a refusal, never a first-seen record like the moving pointers'.
+    sha256: str | None = None
 
 
 # virtio-win is fetched as a whole ISO and mined for two drivers: the stable
@@ -239,6 +244,10 @@ def plan_downloads(drivers_dir: Path, retro: bool = False) -> list[Download]:
         Download("steam", STEAM_URL, drivers_dir / "steam" / "SteamSetup.exe"),
         Download("winfsp", WINFSP_URL,
                  drivers_dir / "winfsp" / "winfsp-2.0.23075.msi"),
+        # Pinned by version AND digest: see pinned_installers.py.
+        *(Download(pin.name, pin.url,
+                   drivers_dir / pin.subdir / pin.filename, pin.sha256)
+          for pin in pinned_installers.PINNED),
         Download("virtio-iso", VIRTIO_ISO_URL,
                  drivers_dir / BUILD_CACHE_DIRNAME / "virtio-win.iso"),
         # winget is NOT behind a flag: the owner asked for Gaming Services by
@@ -335,6 +344,11 @@ def fetch(item: Download, drivers_dir: Path) -> str:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
     hexdigest = digest.hexdigest()
+    if item.sha256 is not None and hexdigest != item.sha256:
+        raise FetchError(
+            f"{item.name} ({item.dest}) has sha256 {hexdigest}, but this "
+            f"package pins {item.sha256}: the file is not the pinned release. "
+            "Delete it to download the pinned one, or bump the pin.")
     _check_manifest(drivers_dir, item, hexdigest)
     return hexdigest
 
@@ -601,6 +615,8 @@ def main(argv=None) -> int:
         # un epinglage releve ne change rien tant que l ancien est encore la.
         for gone in prune_stale_winget(drivers):
             print(f"  winget: removed the stale {gone}")
+        for gone in pinned_installers.prune_stale(drivers):
+            print(f"  removed the stale installer {gone}")
         for item in plan_downloads(drivers, retro=retro):
             print(f"  {item.name} sha256 {fetch(item, drivers)}")
         extract_virtio(drivers / BUILD_CACHE_DIRNAME / "virtio-win.iso", drivers)
