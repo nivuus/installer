@@ -93,6 +93,26 @@ check("a later call keeps the recorded secret and changes only what it names",
 check_refused("a package not installed", lambda: answers.record("ghost", []),
               "not installed")
 
+# A wrong secret used to be permanent: later calls keep it and argv refuses
+# it. `key=` with no value asks for it again on the terminal.
+check_refused("re-asking a secret needs a terminal, and names it",
+              lambda: answers.record("desk", ["admin_password="],
+                                     interactive=False),
+              "admin_password must be entered on a terminal")
+check("a refused re-ask keeps the recorded secret",
+      state.load()["desk"]["answers"]["admin_password"], "s3cret")
+asked = []
+fixed = answers.record("desk", ["admin_password="], interactive=True,
+                       prompt=lambda label: asked.append(label) or "corrected")
+check("an empty secret value asks for it again", fixed["admin_password"],
+      "corrected")
+check("asked twice, to confirm", len(asked), 2)
+check("the other answers are untouched", fixed["auth_mode"], "pomerium")
+check_refused("a non-empty secret on argv is still refused, with the way out",
+              lambda: answers.record("desk", ["admin_password=x"],
+                                     interactive=True),
+              "admin_password= with no value asks for it again")
+
 
 if failures:
     print(f"FAIL ({len(failures)})")

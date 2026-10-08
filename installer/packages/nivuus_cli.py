@@ -9,7 +9,8 @@
     nivuus adopt <package-dir>  record a package laid by hand
     nivuus answers <name> [key=value...]
                                 record a package's wizard answers; required
-                                secrets are asked for on the terminal
+                                secrets are asked for on the terminal, and
+                                `secret=` (no value) asks for one again
     nivuus facts <name> [key=<json>...]
                                 show, or record by hand, what `resolve`
                                 would have measured (adopted packages)
