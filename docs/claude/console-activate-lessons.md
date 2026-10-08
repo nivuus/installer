@@ -164,3 +164,30 @@ boot until the stamp exists. The discriminant that does hold is **what the
 domain is wired to**: keys are sent only while it carries BOTH installation
 media — the shape the `define` step produces and `redefine_steady_state()`
 removes once the guest is provisioned.
+
+**THE 2026-08-28 IDENTITY FIX WAS ITSELF INERT IN PRODUCTION (found 2026-10-08).**
+`domain_defined()` checks the passthrough disk's PCI address against the
+domain's `<hostdev>`, but it resolved the `dedicated_nvme` answer through
+`/sys/block` — the same lookup the 2026-09-05 entry above calls impossible once
+vfio-pci owns the disk. So on every activate after the install (the disk is
+bound from the first boot) it read "not done", and the next step was
+`define --replace` over the working console, stopped only by
+`guard_fresh_varstore()`. The 2026-09-05 fix moved the wipe guard to the
+three-way `disk_pci_identity()` but left this caller on the folded answer,
+where "cannot tell" is a safe "not done" — safe for the guard's question, a
+permanent replay loop for this one. **Fix: resolve records the address it
+resolved as a fact**, `dedicated_nvme_pci = {device, address}`, next to
+`dedicated_nvme_size_bytes`; `console/nvme_identity.py::dedicated_nvme_identity()`
+reads sysfs first ("now beats then") and falls back to the fact **only for the
+answer it was measured from**, so a later `nivuus answers console
+dedicated_nvme=…` is never vouched for by a stale address.
+`refuse_implicit_wipe()` deliberately keeps the live-only identity: there a
+fact could only ever *open* a wipe, and doubt must keep refusing.
+`test_console_nvme_identity.py` drives the REAL resolver against a `/sys/block`
+without the disk, and was proven red with `hw` dropped from the
+`domain_matches_disk()` call. **Not covered: a host where `console` was adopted
+rather than installed** — no resolve ever ran there, so it has neither this
+fact nor the size one, and `plan_steps()` refuses at `_disk_bytes()` before any
+step (measured on the reference host 2026-10-08: `cannot read the size of
+/dev/nvme1n1`). Replaying `activate` on such a host needs those two facts
+recorded first; the engine has no command to do that yet.

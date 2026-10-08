@@ -480,6 +480,15 @@ with tempfile.TemporaryDirectory() as tmp:
           facts(events).get("dedicated_nvme_size_bytes"), DEDICATED_NVME_BYTES)
     check("ISO live : le fait ne pollue pas le bloc platform",
           "dedicated_nvme_size_bytes" in (plat or {}), False)
+    # The disk goes to vfio-pci at the first reboot: /sys/block will never
+    # again say which address /dev/nvme9n1 has. resolve is the only phase
+    # that sees it, so it records it - with the answer it came from, so the
+    # fact can never speak for a different answer.
+    check("live ISO: the answered disk's PCI address is emitted as a fact",
+          facts(events).get("dedicated_nvme_pci"),
+          {"device": "/dev/nvme9n1", "address": "0000:03:00.0"})
+    check("live ISO: the address does not leak into the platform block",
+          "dedicated_nvme_pci" in (plat or {}), False)
 
     # Une reponse qui ne designe aucun controleur NVMe : refus motive, pas un
     # choix de repli silencieux sur un autre disque.
@@ -529,8 +538,12 @@ with tempfile.TemporaryDirectory() as tmp:
     plat = platform_event(events)
     check("ISO live sans fichier size : un plan platform est emis quand meme",
           plat is not None, True)
-    check("ISO live sans fichier size : aucun fait n est emis, ni None ni faux",
-          facts(events), {})
+    check("live ISO without a size file: no size fact, neither None nor false",
+          "dedicated_nvme_size_bytes" in facts(events), False)
+    # The address depends on no `size` file: it is always emitted.
+    check("live ISO without a size file: the disk's address is still emitted",
+          facts(events).get("dedicated_nvme_pci"),
+          {"device": "/dev/nvme9n1", "address": "0000:03:00.0"})
 
 # --- la taille suit aussi la selection AUTOMATIQUE (pas de reponse) ------ #
 # Sur un hote DEJA INSTALLE (racine tracable), select_passthrough_nvme()
