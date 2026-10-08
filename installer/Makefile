@@ -94,7 +94,7 @@ test-packages: test-scripts
 	          test_packages_wizard test_packages_runner \
 	          test_packages_state test_packages_releases \
 	          test_packages_updater test_packages_archive \
-	          test_nivuus_cli test_packages_answers test_self_update \
+	          test_nivuus_cli test_packages_answers test_packages_fact_record test_self_update \
 	          test_packages_units \
 	          test_idempotence_harness \
 	          test_install_engine_bootloader test_install_engine_packages \

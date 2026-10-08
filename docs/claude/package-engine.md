@@ -84,7 +84,7 @@ satisfy the new questions, `requires.packages` must be installed and not
 naming it. `adopt` records a hand-laid package (tracked files only, no hook,
 no invented answers); `nivuus answers <name> key=value…` then records them,
 typed and validated by the package's own wizard rules, required secrets
-asked on the terminal (never on argv). `nivuus update --self` lays the
+asked on the terminal (never on argv). An adopted package never ran `resolve`, so it also lacks the facts `activate` may need (the console's NVMe size and PCI address are unreadable once vfio-pci owns the disk); `nivuus facts <name> key=<json>…` (`packages/fact_record.py`) records them, each value decoded as JSON and the whole set validated by the engine's own `parse_facts_event`, under `state[name]["facts"]` — the key the updater and `activate_cli` already read, so a hand-recorded fact and a resolved one are the same thing to `activate`. `nivuus update --self` lays the
 release's `installer/` subtree over the directory the CLI runs from (swap
 with restore, refuses a git checkout, never combined with packages), records
 the version in `STAMP_DIR/installer.json` — **not** in the package state,
