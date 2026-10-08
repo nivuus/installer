@@ -11,6 +11,12 @@ Values arrive as `key=value` strings and are typed by their question: a
 `secret` that is still missing is asked for on the terminal, without echo,
 twice; with no terminal the command refuses and names it - a secret is never
 expected on the command line, where it would land in the shell history.
+
+A secret already recorded is kept by later calls, so a wrong one used to be
+permanent: nothing could ask for it again (the reference host's console,
+2026-10-08, recorded an admin password its guest rejects). `key=` with an
+EMPTY value names a secret to ask again on the terminal - the value itself
+still never travels on argv.
 """
 from __future__ import annotations
 
@@ -41,10 +47,15 @@ def _questions(name: str):
         raise UpdateError(f"{name}: {exc}") from exc
 
 
-def parse_assignments(questions, assignments: list[str]) -> dict:
-    """`key=value` strings typed by their question."""
+def parse_assignments(questions, assignments: list[str]) -> tuple[dict, set]:
+    """`key=value` strings typed by their question.
+
+    Returns the typed values and the secrets named with an empty value,
+    i.e. to be asked again on the terminal.
+    """
     by_key = {q.key: q for q in questions}
     parsed = {}
+    reask = set()
     for assignment in assignments:
         key, sep, raw = assignment.partition("=")
         if not sep:
@@ -54,8 +65,12 @@ def parse_assignments(questions, assignments: list[str]) -> dict:
             raise UpdateError(f"unknown question {key!r}; this package asks: "
                               f"{', '.join(sorted(by_key)) or 'nothing'}")
         if question.type == "secret":
+            if raw == "":
+                reask.add(key)
+                continue
             raise UpdateError(f"{key!r} is a secret: leave it off the command "
-                              "line, it is asked for on the terminal")
+                              f"line, it is asked for on the terminal ({key}= "
+                              "with no value asks for it again)")
         if question.type == "bool":
             word = raw.strip().lower()
             if word not in TRUE_WORDS + FALSE_WORDS:
@@ -63,7 +78,7 @@ def parse_assignments(questions, assignments: list[str]) -> dict:
             parsed[key] = word in TRUE_WORDS
         else:
             parsed[key] = raw
-    return parsed
+    return parsed, reask
 
 
 def _ask_secret(question, prompt=getpass.getpass) -> str:
@@ -90,9 +105,10 @@ def record(name: str, assignments: list[str], *, interactive=None,
             raise UpdateError(f"{name}: not installed on this machine")
         questions = _questions(name)
         answers = dict(current[name].get("answers") or {})
-        answers.update(parse_assignments(questions, assignments))
-        missing = [q for q in questions if q.type == "secret" and q.required
-                   and not answers.get(q.key)]
+        given, reask = parse_assignments(questions, assignments)
+        answers.update(given)
+        missing = [q for q in questions if q.type == "secret"
+                   and (q.key in reask or (q.required and not answers.get(q.key)))]
         if missing and not interactive:
             raise UpdateError(
                 f"{name}: {', '.join(q.key for q in missing)} must be entered on "
