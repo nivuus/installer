@@ -28,6 +28,7 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
 import hardware  # noqa: E402
+import nvme_identity  # noqa: E402
 
 # Guest memory budget. NOT "half the host" - this project already made and
 # corrected that exact mistake: docs/claude/host-ops-audits.md's "Hugepages pool halved" finding
@@ -245,6 +246,14 @@ def main() -> int:
           "kernel-cmdline": cmdline,
           "modules": [],
           "hugepages-mib": guest_mib})
+    # The address travels the same way and for the same reason: once vfio-pci
+    # owns the disk, /sys/block cannot map the `dedicated_nvme` answer to it
+    # any more, and guest_steps' domain_defined() needs exactly that mapping
+    # to recognise the domain it defined (see console/nvme_identity.py). The
+    # answer is recorded WITH the address, so the fact can never vouch for
+    # a different answer given later.
+    facts = {nvme_identity.FACT_KEY: {"device": wanted,
+                                      "address": nvme["address"]}}
     if nvme_size_bytes is not None:
         # A `facts` event, NOT a fourth key of the platform block: this one
         # never reaches the kernel command line. It is a measurement the
@@ -256,8 +265,8 @@ def main() -> int:
         # inside its `hw`. snake_case, like the rest of a hw snapshot
         # (memory_mib, total_cpus, ...), because that is where it lands:
         # guest_steps.plan_steps() reads it there, see _disk_bytes().
-        emit({"event": "facts",
-              "facts": {"dedicated_nvme_size_bytes": nvme_size_bytes}})
+        facts["dedicated_nvme_size_bytes"] = nvme_size_bytes
+    emit({"event": "facts", "facts": facts})
     emit({"event": "done"})
     return 0
 
