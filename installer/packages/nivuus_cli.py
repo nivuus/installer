@@ -10,6 +10,9 @@
     nivuus answers <name> [key=value...]
                                 record a package's wizard answers; required
                                 secrets are asked for on the terminal
+    nivuus facts <name> [key=<json>...]
+                                show, or record by hand, what `resolve`
+                                would have measured (adopted packages)
 
 Any other first word is handed to `nivuus-<word>` from PATH, the way git
 does: `nivuus shell doctor` runs `nivuus-shell doctor` without this command
@@ -32,7 +35,7 @@ INSTALLER_ROOT = os.path.dirname(HERE)
 if INSTALLER_ROOT not in sys.path:
     sys.path.insert(0, INSTALLER_ROOT)
 
-from packages import answers, releases, self_update, state  # noqa: E402
+from packages import answers, fact_record, releases, self_update, state  # noqa: E402
 from packages.adopt import adopt  # noqa: E402
 from packages.state import StateError  # noqa: E402
 from packages.updater import AVAILABLE_NAME, UpdateError, check, update  # noqa: E402
@@ -159,8 +162,19 @@ def cmd_answers(args) -> int:
     return 0
 
 
+def cmd_facts(args) -> int:
+    if not args:
+        print("usage: nivuus facts <name> [key=<json>...]", file=sys.stderr)
+        return 2
+    name, assignments = args[0], args[1:]
+    recorded = fact_record.record(name, assignments)
+    print(json.dumps({name: recorded}, indent=2, ensure_ascii=False))
+    return 0
+
+
 COMMANDS = {"list": cmd_list, "check": cmd_check, "update": cmd_update,
-            "status": cmd_status, "adopt": cmd_adopt, "answers": cmd_answers}
+            "status": cmd_status, "adopt": cmd_adopt, "answers": cmd_answers,
+            "facts": cmd_facts}
 
 
 def main(argv: list[str]) -> int:
