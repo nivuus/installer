@@ -166,43 +166,18 @@ nvidia-smi
 # Power: 3-5W
 ```
 
-### Configurer WinRM (Optionnel mais recommandé)
+### WinRM
 
-WinRM permet de communiquer avec la VM depuis l'hôte Linux pour monitoring et automatisation.
-
-**Dans la VM Windows (PowerShell Admin):**
-
-```powershell
-# Copier le script depuis le partage ou télécharger
-# Exécuter:
-Set-ExecutionPolicy Bypass -Scope Process -Force
-.\setup-winrm.ps1
-```
-
-**Sur l'hôte Linux:**
+Rien à configurer à la main. Le provisionnement de l'invité ouvre WinRM
+(`provision/00-bootstrap.ps1`, NTLM, jamais Basic), et `winvm`, déposé par le
+package `console`, passe par `console/guest/winrm_exec.py` avec le mot de passe
+administrateur que l'étape `secrets` écrit dans
+`/var/lib/nivuus/guest/secrets/windows-admin.pass`.
 
 ```bash
-# Installer winrm-cli
-cd /home/mallanic/Projects/Nivuus
-sudo ./console/host/install-winrm-cli.sh
-
-# Installer wrapper winvm
-sudo install -m 755 console/host/winvm /usr/local/bin/winvm
-
-# Configurer credentials
-mkdir -p ~/.config/nivuus
-cat > ~/.config/nivuus/winvm.conf << 'EOF'
-VM_HOSTNAME="192.168.3.2"
-VM_USERNAME="Administrateur"
-VM_PASSWORD="your-password-here"
-EOF
-chmod 600 ~/.config/nivuus/winvm.conf
-
-# Tester
-winvm "hostname"
+winvm "hostname"             # cmd.exe
+winvm --ps "Get-Date"        # PowerShell
 ```
-
-Voir [docs/winrm-setup.md](docs/winrm-setup.md) pour plus de détails.
 
 ## Vérification Finale
 

@@ -264,7 +264,7 @@ file by file:
   `<<< REMPLACEZ CECI`), which the engine gives `192.168.0.1/24`, while the
   rest of the chain pins the VM to `192.168.3.2` — `internalBridge`
   (`MANAGED_VM_IP` in both `rules.sh`, `VM_IP` in `vm-idle-shutdown.sh`,
-  `VM_HOSTNAME` in `winvm`). The address wait therefore looks on the wrong
+  `GUEST_IP` in `guest/winrm_exec.py`, which `winvm` calls). The address wait therefore looks on the wrong
   bridge.
 - **Hooks reference `/opt/nivuus/…` paths that do not exist on a fresh
   target.** `bind-vfio-gpu.sh` and `rebind-host-gpu.sh` drive
@@ -273,14 +273,6 @@ file by file:
   place, and `vm-idle-shutdown.sh` tries to bring ollama up on every idle
   cycle. All of these are guarded (`|| true`, or their failure is ignored),
   so they are noise rather than breakage.
-- **`winvm` is deployed without the client it needs.** It requires
-  `/usr/local/bin/winrm`, and `console/host/install-winrm-cli.sh` — the script
-  that installs it — is placed by nobody; the password it reads from
-  `~/.config/nivuus/winvm.conf` is created by nobody either. So the hibernation
-  call in `vm-idle-shutdown.sh` always fails, the observation loop runs its 90
-  seconds for nothing, and the VM falls back to the **ACPI shutdown** on the
-  line below — the session is lost instead of being suspended, which is not
-  what the rest of this documentation describes.
 
 Parameterising these constants from `resolve`'s output is the next phase's
 work, not this one's.

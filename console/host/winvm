@@ -1,83 +1,40 @@
 #!/bin/bash
-# WinVM - Execute commands on Windows VM via WinRM
-# Usage: winvm "command to execute"
-
+# Run one command in the Windows guest: `winvm <cmd>` (cmd.exe) or
+# `winvm --ps <cmd>` (PowerShell).
+#
+# A thin wrapper around the package's own guest/winrm_exec.py, run in place -
+# the same client guest-ready-watch.py uses. The previous version drove
+# /usr/local/bin/winrm, which speaks Basic only: the LTSC guest has
+# "Basic = false" and "AllowUnencrypted = false", so every call ended in a 401
+# that never says it is about the authentication mode. pywinrm negotiates
+# NTLM and gets through. That client was also placed by nobody, and its
+# password lived in a config file created by nobody.
+#
+# The password is the file console/guest_steps.py's `secrets` step writes from
+# the wizard's admin_password answer - never argv, so it cannot leak into the
+# process table - and the same file guest-ready-watch.py reads.
+#
+# vm-idle-shutdown.sh depends on this script to measure the guest's CPU and to
+# hibernate it: if it breaks, power saving dies and the VM stays on. So it
+# fails loudly, with the missing piece named, rather than silently.
 set -euo pipefail
 
-# Configuration file
-CONFIG_FILE="${HOME}/.config/nivuus/winvm.conf"
+PACKAGE_DIR="${NIVUUS_CONSOLE_DIR:-/opt/nivuus-packages/console}"
+EXEC="${NIVUUS_WINRM_EXEC:-$PACKAGE_DIR/guest/winrm_exec.py}"
+PASS_FILE="${GUEST_PASS_FILE:-/var/lib/nivuus/guest/secrets/windows-admin.pass}"
 
-# Default configuration
-WINRM_CLI="/usr/local/bin/winrm"
-VM_HOSTNAME="${VM_HOSTNAME:-192.168.3.2}"
-VM_USERNAME="${VM_USERNAME:-Administrateur}"
-VM_PASSWORD="${VM_PASSWORD:-}"
-
-# Load configuration if exists
-if [[ -f "$CONFIG_FILE" ]]; then
-    # shellcheck source=/dev/null
-    source "$CONFIG_FILE"
+if [ $# -eq 0 ]; then
+    echo "usage: winvm <command>            # cmd.exe" >&2
+    echo "       winvm --ps <command>       # powershell" >&2
+    exit 2
 fi
+[ -r "$PASS_FILE" ] || { echo "winvm: guest password unreadable: $PASS_FILE" >&2; exit 1; }
+[ -r "$EXEC" ] || { echo "winvm: winrm_exec.py not found: $EXEC" >&2; exit 1; }
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+MODE="cmd"
+if [ "$1" = "--ps" ]; then MODE="ps"; shift; fi
 
-# Check if winrm-cli exists
-if [[ ! -f "$WINRM_CLI" ]]; then
-    echo -e "${RED}Error: WinRM CLI not found at $WINRM_CLI${NC}" >&2
-    echo -e "${YELLOW}Install with:${NC} cd /home/mallanic/Projects/Nivuus && sudo ./scripts/install-winrm-cli.sh" >&2
-    exit 1
-fi
-
-# Check if password is configured
-if [[ -z "$VM_PASSWORD" ]]; then
-    echo -e "${RED}Error: VM password not configured${NC}" >&2
-    echo -e "${YELLOW}Create config file:${NC} $CONFIG_FILE" >&2
-    echo ""
-    echo "Example configuration:"
-    echo "  VM_HOSTNAME=\"192.168.3.2\""
-    echo "  VM_USERNAME=\"Administrateur\""
-    echo "  VM_PASSWORD=\"your-password-here\""
-    echo ""
-    echo "Or set environment variables:"
-    echo "  export VM_PASSWORD=\"your-password-here\""
-    exit 1
-fi
-
-# Check if command is provided
-if [[ $# -eq 0 ]]; then
-    echo -e "${YELLOW}Usage:${NC} winvm \"command\""
-    echo ""
-    echo "Examples:"
-    echo "  winvm \"hostname\""
-    echo "  winvm \"ipconfig\""
-    echo "  winvm \"nvidia-smi\""
-    echo "  winvm \"powershell -Command 'Get-Process | Select-Object -First 10'\""
-    echo "  winvm \"wmic path win32_VideoController get name,status\""
-    echo ""
-    echo "Configuration:"
-    echo "  Config file: $CONFIG_FILE"
-    echo "  VM Host: $VM_HOSTNAME"
-    echo "  Username: $VM_USERNAME"
-    echo "  Password: $(if [[ -n "$VM_PASSWORD" ]]; then echo "configured ✓"; else echo "not set ✗"; fi)"
-    exit 1
-fi
-
-# Get the command from all arguments
-COMMAND="$*"
-
-# Execute the command via WinRM
-"$WINRM_CLI" \
-    -hostname "$VM_HOSTNAME" \
-    -username "$VM_USERNAME" \
-    -password "$VM_PASSWORD" \
-    "$COMMAND"
-
-# Capture exit code
-EXIT_CODE=$?
-
-# Exit with the same code as the remote command
-exit $EXIT_CODE
+# The names winrm_exec.py actually reads. GUEST_IP and GUEST_USER keep its
+# own defaults (192.168.3.2, Administrator) unless the caller sets them.
+export GUEST_PASS_FILE="$PASS_FILE"
+exec python3 "$EXEC" "$MODE" "$@"
