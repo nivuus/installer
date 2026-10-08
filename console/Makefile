@@ -55,7 +55,7 @@ test:
 	    echo "--- $$t"; \
 	    $(PYTHON) $(CONSOLE_DIR)/tests/$$t.py || exit 1; \
 	done
-	@for t in test_handle_vm_start test_vm_control test_vm_idle_shutdown; do \
+	@for t in test_handle_vm_start test_vm_control test_vm_idle_shutdown test_winvm; do \
 	    echo "--- $$t"; \
 	    bash $(CONSOLE_DIR)/tests/$$t.sh || exit 1; \
 	done
