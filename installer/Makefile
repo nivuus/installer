@@ -102,7 +102,7 @@ test-packages: test-scripts
 	          test_webapp_models \
 	          test_common_hardware \
 	          test_install_engine_features \
-	          test_install_engine_base; do \
+	          test_install_engine_base test_orange_dhcp_options; do \
 	    echo "--- $$t"; \
 	    $(PYTHON) $(dir $(INSTALLER_DIR))scripts/tests/$$t.py || exit 1; \
 	done
