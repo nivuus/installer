@@ -30,7 +30,12 @@ DHCP6_UNIT = "nivuus-wan-orange-dhcp6.service"
 # route. Orange's RA carries no prefix and an MTU above the link's.
 ROUTER_SYSCTLS = {"accept_ra": "2", "accept_ra_defrtr": "1", "accept_ra_pinfo": "0",
                   "autoconf": "0", "accept_ra_mtu": "0"}
+TOOL_TIMEOUT_S = int(os.environ.get("NIVUUS_LAN6_TOOL_TIMEOUT_S", "30"))
+# Runs without a usable gateway before the DHCPv6 client is restarted, then
+# the same count times each of these: every restart sends a RELEASE and a
+# SOLICIT to Orange and makes the LANs lose and regain their prefix.
 SILENT_LIMIT = 4
+BACKOFF = (1, 5, 15, 60)
 
 
 def parse_lans(text):
@@ -61,7 +66,7 @@ def render_radvd(nets):
     for name, net in sorted(nets.items()):
         out += ["interface %s {" % name,
                 "    AdvSendAdvert on;",
-                "    MaxRtrAdvInterval 300;",
+                "    MaxRtrAdvInterval 60;",
                 "    AdvDefaultLifetime 900;",
                 "    prefix %s {" % net,
                 "        AdvValidLifetime 7200;",
@@ -73,7 +78,10 @@ def render_radvd(nets):
 
 
 def tool(*argv, check=False):
-    result = subprocess.run(argv, capture_output=True, text=True)
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=TOOL_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("%s did not return within %d s" % (" ".join(argv), TOOL_TIMEOUT_S)) from None
     if check and result.returncode != 0:
         raise RuntimeError("%s failed: %s" % (" ".join(argv), result.stderr.strip()))
     return result
@@ -97,21 +105,27 @@ def gateway():
 
 
 def applied():
+    """[interface, address] pairs this script may have put on the LANs."""
     try:
-        return json.loads((STATE / "wan-orange.lan6").read_text())
+        return [tuple(pair) for pair in json.loads((STATE / "wan-orange.lan6").read_text())]
     except FileNotFoundError:
-        return {}
+        return []
 
 
 def set_addresses(want):
-    """Addresses this script put on the LANs: remove the stale, (re)assert the wanted."""
-    for name, addr in applied().items():
-        if want.get(name) != addr:
+    """Remove the addresses no longer wanted, (re)assert the wanted ones."""
+    record = STATE / "wan-orange.lan6"
+    known, wanted = applied(), sorted(want.items())
+    # Intent first: an address added just before a failure is then still
+    # known to the withdrawal that follows.
+    record.write_text(json.dumps(sorted(set(known) | set(wanted))))
+    for name, addr in known:
+        if (name, addr) not in wanted:
             tool("ip", "-6", "addr", "del", addr, "dev", name)
-    for name, addr in want.items():
+    for name, addr in wanted:
         # Asserted on every run: NetworkManager drops it when it reactivates the bridge.
         tool("ip", "-6", "addr", "replace", addr, "dev", name, check=True)
-    (STATE / "wan-orange.lan6").write_text(json.dumps(want))
+    record.write_text(json.dumps(wanted))
 
 
 def advertise(text):
@@ -132,24 +146,24 @@ def advertise(text):
         tool("systemctl", "start", RADVD_UNIT, check=True)
 
 
-def gateway_answers(gw):
-    """Neighbor Solicitation, the IPv6 counterpart of the ARP check on IPv4.
+def unusable(reason):
+    """Count a run without a usable gateway; restart the DHCPv6 client when it lasts.
 
-    Orange stops answering it when its side forgets the DHCPv6 exchange; only
-    a new full exchange reopens it, so a lasting silence restarts the client.
+    Orange closes neighbour discovery when its side forgets the DHCPv6
+    exchange, and only a new full exchange reopens it.
     """
-    counter = STATE / "wan-orange.lan6-silent"
-    if tool("ndisc6", "-1", "-q", "-r", "2", "-w", "1000", gw, WAN).returncode == 0:
-        counter.unlink(missing_ok=True)
+    path = STATE / "wan-orange.lan6-health"
+    state = json.loads(path.read_text()) if path.exists() else {"bad": 0, "restarts": 0}
+    state["bad"] += 1
+    limit = SILENT_LIMIT * BACKOFF[min(state["restarts"], len(BACKOFF) - 1)]
+    if state["bad"] == 1:
+        print("wan-orange-lan6: %s; DHCPv6 restart after %d such runs" % (reason, limit), file=sys.stderr)
+    if state["bad"] < limit:
+        path.write_text(json.dumps(state))
         return
-    silent = int(counter.read_text()) + 1 if counter.exists() else 1
-    print("wan-orange-lan6: gateway %s silent, run %d" % (gw, silent), file=sys.stderr)
-    if silent < SILENT_LIMIT:
-        counter.write_text(str(silent))
-        return
-    counter.unlink(missing_ok=True)
-    print("wan-orange-lan6: restarting the DHCPv6 client for a full exchange", file=sys.stderr)
-    tool("systemctl", "--no-block", "restart", DHCP6_UNIT)
+    path.write_text(json.dumps({"bad": 0, "restarts": state["restarts"] + 1}))
+    print("wan-orange-lan6: %s; restarting the DHCPv6 client for a full exchange" % reason, file=sys.stderr)
+    tool("systemctl", "--no-block", "restart", DHCP6_UNIT, check=True)
 
 
 def apply(with_ra=True):
@@ -161,16 +175,27 @@ def apply(with_ra=True):
         tool("rdisc6", "-1", "-q", "-r", "1", "-w", "2000", WAN)
         gw = gateway()
     if not gw:
+        if prefix:
+            unusable("prefix %s but no default route" % prefix)
         advertise(None)
         set_addresses({})
         return
-    gateway_answers(gw)
+    # Neighbor Solicitation, the IPv6 counterpart of the ARP check on IPv4.
+    # Exit 2 is "no answer"; anything else is a local failure, not a verdict.
+    probe = tool("ndisc6", "-1", "-q", "-r", "2", "-w", "1000", gw, WAN)
+    if probe.returncode == 0:
+        (STATE / "wan-orange.lan6-health").unlink(missing_ok=True)
+    elif probe.returncode == 2:
+        unusable("gateway %s silent" % gw)
+    else:
+        raise RuntimeError("ndisc6 failed (%d): %s" % (probe.returncode, probe.stderr.strip()))
     nets = {name: subnet(prefix, index) for name, index in parse_lans(CONF.read_text()).items()}
     set_addresses({name: "%s/64" % (net.network_address + 1) for name, net in nets.items()})
     advertise(render_radvd(nets) if with_ra and nets else None)
 
 
 def withdraw():
+    STATE.mkdir(parents=True, exist_ok=True)
     advertise(None)
     set_addresses({})
     if (PROC / WAN).is_dir():

@@ -9,6 +9,8 @@ PartOf=nivuus-wan-orange-dhcp6.service
 # Active means IPv6 is handed out. Stopping or crashing withdraws it: the loop
 # removes the addresses and stops radvd on its way out.
 ExecStart=/usr/local/sbin/nivuus-wan-orange-lan6.py run
+# A loop that was killed could not withdraw by itself.
+ExecStopPost=/usr/local/sbin/nivuus-wan-orange-lan6.py withdraw
 Restart=on-failure
 RestartSec=30
 

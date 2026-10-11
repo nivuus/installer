@@ -95,3 +95,21 @@ throughput and DNSSEC items of the original brief.
   alone; the acceptance checks an inbound connection from outside is refused.
 - **Orange may renumber.** The prefix has been stable; a change restarts radvd,
   whose shutdown advertisement deprecates the old prefix.
+
+## Amendment after the branch review (2026-10-11)
+
+- **Withdrawal does not depend on the loop surviving.** The unit runs
+  `withdraw` in `ExecStopPost`, and the radvd unit is bound to it: a killed loop
+  no longer leaves radvd advertising alone. Every external tool has a timeout.
+- **A prefix without a default route is treated like a silent gateway**: it is
+  the state Orange leaves behind when it forgets the exchange, and it now leads
+  to a DHCPv6 restart too. Restarts back off (after 4, then 20, 60, 240 runs
+  without a usable gateway), because each one sends a RELEASE and a SOLICIT to
+  Orange and makes the LANs lose and regain their prefix.
+- **Advertisements at most 60 s apart, not 300.** The `public` zone rejects
+  Router Solicitations (firewalld's `allow-host-ipv6` accepts NS, NA, RA and
+  redirects only), so a guest cannot ask and must wait for the periodic one.
+  A short period keeps the "no firewall rule added" decision.
+- **Open before advertising on `localBridge`:** the Thread border router
+  (OTBR, `OTBR_BACKBONE_IF=localBridge`) may already send Router Advertisements
+  there. Measured at deployment, before radvd starts.

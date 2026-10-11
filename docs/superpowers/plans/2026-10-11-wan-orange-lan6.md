@@ -766,6 +766,19 @@ Expected: `PRC: Soliciting for leases (INIT).` and a `RCV: Reply`; no `INIT-REBO
 Run: `ip -6 route | grep unreachable`
 Expected: exactly one line, the current `/56` (the stale `2a01:cb14:9009:5400::/56` is gone).
 
+- [ ] **Step 3b (added after review): the crash path and the neighbours**
+
+Kill the DHCPv6 client with SIGKILL (no Release leaves), wait for systemd to
+restart it (30 s) and for the exchange, then `rdisc6 -1 enp5s0.832` and
+`ndisc6 -1 fe80::ba0:bab enp5s0.832`. Expected: both answered. Delete the stale
+`unreachable 2a01:cb14:9009:5400::/56` by hand if it is still there: nothing
+records it any more.
+Capture Router Advertisements on `localBridge` for 3 minutes before radvd
+exists (`tcpdump -i localBridge -n -v 'icmp6 and ip6[40] == 134'`). Expected:
+none, or only ones whose router lifetime is not 0 from another source than the
+router. An advertisement from the host itself with router lifetime 0 (OTBR)
+must be understood before Step 5.
+
 - [ ] **Step 4: Router only, no advertisement**
 
 Run: `/usr/local/sbin/nivuus-wan-orange-lan6.py apply --no-ra && /usr/local/sbin/nivuus-wan-orange-lan6.py status`
@@ -784,8 +797,10 @@ public IPv6 address in the expected `/64`.
 - [ ] **Step 6: The firewall posture is the IPv4 one**
 
 Run: `nft list ruleset | grep -c "2a01:cb14"` — expected `0` (no rule names the prefix; zones do the work).
-Owner check from outside (phone on mobile data): `ping` and an HTTPS request to
-a LAN device's IPv6 address must fail; HTTPS to the router's own address
+Positive control first: a listener on `[::]:8765` on a LAN device (or the
+router's LAN address is not enough: it is the router), reachable from the
+router with `curl -6`. Then, owner check from outside (phone on mobile data):
+that same URL and a `ping` must fail; HTTPS to the router's own address
 (`…c000::1`) must answer as it does on IPv4.
 
 - [ ] **Step 7: Withdrawal works**

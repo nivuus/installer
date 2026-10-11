@@ -48,18 +48,22 @@ class Pure(unittest.TestCase):
                      "AdvPreferredLifetime 3600;", "DeprecatePrefix on;"):
             self.assertEqual(text.count(line), 2, line)
         self.assertNotIn("RDNSS", text)
+        # The guest zone rejects Router Solicitations: a short period is what
+        # gives a new guest its address without a firewall rule.
+        self.assertEqual(text.count("MaxRtrAdvInterval 60;"), 2)
 
 
 SCRIPT = ROOT / "scripts/wan_orange_lan6.py"
 FAKES = {
     "ip": '''case "$*" in
   "-j -6 route show default dev"*) if [ -e "$T/route" ]; then echo '[{"dst":"default","gateway":"fe80::1"}]'; else echo '[]'; fi ;;
-  *) echo "ip $*" >> "$T/calls"; case "$*" in *"dev $(cat "$T/missing" 2>/dev/null)") exit 2 ;; esac ;;
+  *) echo "ip $*" >> "$T/calls"; [ -e "$T/ip_hangs" ] && sleep 30; case "$*" in *"dev $(cat "$T/missing" 2>/dev/null)") exit 2 ;; esac ;;
 esac''',
     "rdisc6": 'echo "rdisc6 $*" >> "$T/calls"; [ -e "$T/ra_answers" ] && : > "$T/route"; exit 0',
-    "ndisc6": 'echo "ndisc6 $*" >> "$T/calls"; [ -e "$T/alive" ]',
+    "ndisc6": 'echo "ndisc6 $*" >> "$T/calls"; [ -e "$T/alive" ] || exit "$(cat "$T/ndisc6_rc" 2>/dev/null || echo 2)"',
     "systemctl": '''echo "systemctl $*" >> "$T/calls"
-case "$1" in is-active) [ -e "$T/radvd_active" ] ;; restart|start) case "$*" in *radvd*) : > "$T/radvd_active" ;; esac ;;
+[ "$1" = --no-block ] && shift
+case "$1" in is-active) [ -e "$T/radvd_active" ] ;; restart|start) case "$*" in *radvd*) : > "$T/radvd_active" ;; *dhcp6*) [ ! -e "$T/dhcp6_fails" ] ;; esac ;;
   stop) rm -f "$T/radvd_active" ;; esac''',
 }
 
@@ -175,6 +179,58 @@ class Applied(unittest.TestCase):
         result = self.run_cli("apply")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("lan1", result.stderr)
+        # lan0 was addressed before lan1 failed: the withdrawal must know it.
+        self.calls(reset=True)
+        self.assertEqual(self.run_cli("withdraw").returncode, 0)
+        self.assertIn("ip -6 addr del 2a01:db8:0:c000::1/64 dev lan0", self.calls())
+
+    def test_withdraw_works_before_anything_was_applied(self):
+        subprocess.run(["rm", "-rf", str(self.tmp / "state")])
+        self.assertEqual(self.run_cli("withdraw").returncode, 0)
+
+    def test_a_tool_that_hangs_fails_the_run(self):
+        self.healthy()
+        (self.tmp / "ip_hangs").write_text("")
+        started = time.time()
+        result = subprocess.run([sys.executable, str(SCRIPT), "apply"], capture_output=True, text=True,
+                                env=dict(self.env, NIVUUS_LAN6_TOOL_TIMEOUT_S="1"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertLess(time.time() - started, 10)
+        self.assertIn("did not return", result.stderr)
+
+    def test_a_prefix_without_a_route_restarts_dhcp6_on_the_fourth_run(self):
+        self.healthy()
+        (self.tmp / "route").unlink()
+        for _ in range(3):
+            self.run_cli("apply")
+        self.assertNotIn("nivuus-wan-orange-dhcp6", self.calls())
+        self.run_cli("apply")
+        self.assertEqual(self.calls().count("restart nivuus-wan-orange-dhcp6.service"), 1)
+
+    def test_restarts_back_off(self):
+        self.healthy()
+        (self.tmp / "alive").unlink()
+        for _ in range(4 + 19):
+            self.run_cli("apply")
+        self.assertEqual(self.calls().count("restart nivuus-wan-orange-dhcp6.service"), 1)
+        self.run_cli("apply")
+        self.assertEqual(self.calls().count("restart nivuus-wan-orange-dhcp6.service"), 2)
+
+    def test_a_probe_error_is_not_read_as_silence(self):
+        self.healthy()
+        (self.tmp / "alive").unlink()
+        (self.tmp / "ndisc6_rc").write_text("1")
+        results = [self.run_cli("apply") for _ in range(5)]
+        self.assertTrue(all(r.returncode != 0 for r in results))
+        self.assertNotIn("nivuus-wan-orange-dhcp6", self.calls())
+
+    def test_a_restart_that_fails_is_an_error(self):
+        self.healthy()
+        (self.tmp / "alive").unlink()
+        (self.tmp / "dhcp6_fails").write_text("")
+        results = [self.run_cli("apply") for _ in range(4)]
+        self.assertEqual([r.returncode for r in results[:3]], [0, 0, 0])
+        self.assertNotEqual(results[3].returncode, 0)
 
     def test_withdraw_removes_addresses_and_stops_advertising(self):
         self.healthy()
@@ -209,6 +265,10 @@ class Shipped(unittest.TestCase):
         self.assertIn("WantedBy=nivuus-wan-orange-dhcp6.service", lan)
         radvd = (ROOT / "configs/systemd/nivuus-lan6-radvd.service").read_text()
         self.assertIn("--config /run/nivuus/radvd.conf", radvd)
+        # A killed loop cannot run its own withdrawal: systemd must.
+        self.assertIn("ExecStopPost=/usr/local/sbin/nivuus-wan-orange-lan6.py withdraw", lan)
+        self.assertIn("BindsTo=nivuus-wan-orange-lan6.service", radvd)
+        self.assertIn("After=nivuus-wan-orange-lan6.service", radvd)
         self.assertNotIn("[Install]", radvd)
         mapping = lan6.parse_lans((ROOT / "configs/network/orange/wan-orange-lan6.conf").read_text())
         self.assertEqual(mapping, {"localBridge": 0, "publicBridge": 2})
