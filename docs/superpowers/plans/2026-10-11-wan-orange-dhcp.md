@@ -61,7 +61,7 @@ see spec decision 1), firewalld, systemd over D-Bus (`busctl`). No new package.
 - Produces: `authentication(login: bytes, password: bytes, salt: bytes | None) -> bytes`,
   `values(login, password, livebox: int, salt=None) -> dict[str, str]`,
   CLI `orange_dhcp_options.py render --family {4,6} --templates DIR --out DIR [--profile FILE] [--livebox N]`
-  writing `DIR/dhclient-orange-v{4,6}.conf` (mode 0600). Deployed as `/usr/local/sbin/nivuus-orange-dhcp-options.py`.
+  writing `DIR/dhclient-orange-v{4,6}.conf` (mode 0600; default `/etc/dhcp/nivuus-orange`, the only tree AppArmor lets dhclient read). Deployed as `/usr/local/sbin/nivuus-orange-dhcp-options.py`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -241,7 +241,7 @@ def main():
     cmd.add_argument("--family", choices=["4", "6"], required=True)
     cmd.add_argument("--profile", default=DEFAULT_PROFILE)
     cmd.add_argument("--templates", default="/usr/local/share/nivuus/orange")
-    cmd.add_argument("--out", default="/run/nivuus/dhclient")
+    cmd.add_argument("--out", default="/etc/dhcp/nivuus-orange")
     cmd.add_argument("--livebox", type=int, default=5)
     args = parser.parse_args()
     try:
@@ -562,8 +562,8 @@ PartOf=nivuus-wan-orange.service
 [Service]
 Environment=IF_METRIC=50
 ExecStartPre=/usr/local/sbin/nivuus-orange-dhcp-options.py render --family 4
-ExecStart=/sbin/dhclient -4 -d -v -cf /run/nivuus/dhclient/dhclient-orange-v4.conf -lf /var/lib/dhcp/dhclient-orange-v4.lease -pf /run/nivuus/dhclient-orange-v4.pid enp5s0.832
-ExecStop=/sbin/dhclient -4 -r -cf /run/nivuus/dhclient/dhclient-orange-v4.conf -lf /var/lib/dhcp/dhclient-orange-v4.lease -pf /run/nivuus/dhclient-orange-v4.pid enp5s0.832
+ExecStart=/sbin/dhclient -4 -d -v -cf /etc/dhcp/nivuus-orange/dhclient-orange-v4.conf -lf /var/lib/dhcp/dhclient-orange-v4.lease -pf /run/dhclient-orange-v4.pid enp5s0.832
+ExecStop=/sbin/dhclient -4 -r -cf /etc/dhcp/nivuus-orange/dhclient-orange-v4.conf -lf /var/lib/dhcp/dhclient-orange-v4.lease -pf /run/dhclient-orange-v4.pid enp5s0.832
 Restart=on-failure
 RestartSec=30
 
@@ -573,7 +573,7 @@ WantedBy=multi-user.target
 
 `nivuus-wan-orange-dhcp6.service`: same shape, with `After=nivuus-wan-orange-dhcp4.service`
 added, no `IF_METRIC`, `--family 6`, and the command
-`/sbin/dhclient -6 -P -D LL -d -v -cf /run/nivuus/dhclient/dhclient-orange-v6.conf -lf /var/lib/dhcp/dhclient-orange-v6.lease -df /var/lib/dhcp/dhclient-orange-v6.duid -pf /run/nivuus/dhclient-orange-v6.pid enp5s0.832`
+`/sbin/dhclient -6 -P -D LL -d -v -cf /etc/dhcp/nivuus-orange/dhclient-orange-v6.conf -lf /var/lib/dhcp/dhclient-orange-v6.lease -df /var/lib/dhcp/dhclient-orange-v6.duid -pf /run/dhclient-orange-v6.pid enp5s0.832`
 (`ExecStop` is that command with `-r` in place of `-d -v`).
 
 `nivuus-wan-orange-check.service`: `Type=oneshot`, `ExecStart=/usr/local/sbin/nivuus-wan-orange.sh check`.

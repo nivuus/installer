@@ -66,5 +66,38 @@ class Render(unittest.TestCase):
             self.assertNotEqual(rc.returncode, 0)
             self.assertFalse((tmp / "dhclient-orange-v6.conf").exists())
 
+class AppArmorPaths(unittest.TestCase):
+    """dhclient is confined (usr.sbin.dhclient): outside these globs it reads
+    nothing and says nothing, then runs on its defaults. The wire test proves
+    the effect as root; this pins the paths the units and the CLI use."""
+
+    ALLOWED = {"-cf": "/etc/dhcp/*/*", "-lf": "/var/lib/dhcp/dhclient*",
+               "-df": "/var/lib/dhcp/dhclient*", "-pf": "/run/dhclient*.pid"}
+
+    def test_units_only_use_paths_the_profile_allows(self):
+        import fnmatch, shlex
+        for family in ("4", "6"):
+            unit = (ROOT / "configs/systemd" / ("nivuus-wan-orange-dhcp%s.service" % family)).read_text()
+            lines = [l.split("=", 1)[1] for l in unit.splitlines() if l.startswith(("ExecStart=", "ExecStop="))]
+            self.assertEqual(len(lines), 2)
+            for line in lines:
+                argv = shlex.split(line)
+                for flag, glob in self.ALLOWED.items():
+                    if flag in argv:
+                        path = argv[argv.index(flag) + 1]
+                        self.assertTrue(fnmatch.fnmatchcase(path, glob), "%s %s escapes %s" % (flag, path, glob))
+                self.assertIn("-cf", argv)
+                self.assertIn("-pf", argv)
+
+    def test_cli_renders_where_the_units_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = subprocess.run([sys.executable, str(ROOT / "scripts/orange_dhcp_options.py"),
+                                 "render", "--help"], capture_output=True, text=True)
+        self.assertIn("/etc/dhcp/nivuus-orange", rc.stdout)
+        for family in ("4", "6"):
+            unit = (ROOT / "configs/systemd" / ("nivuus-wan-orange-dhcp%s.service" % family)).read_text()
+            self.assertIn("-cf /etc/dhcp/nivuus-orange/dhclient-orange-v%s.conf" % family, unit)
+
+
 if __name__ == "__main__":
     unittest.main()

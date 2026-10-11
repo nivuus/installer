@@ -65,7 +65,8 @@ def main():
     cmd.add_argument("--family", choices=["4", "6"], required=True)
     cmd.add_argument("--profile", default=DEFAULT_PROFILE)
     cmd.add_argument("--templates", default="/usr/local/share/nivuus/orange")
-    cmd.add_argument("--out", default="/run/nivuus/dhclient")
+    cmd.add_argument("--out", default="/etc/dhcp/nivuus-orange",
+                     help="where dhclient may read it: AppArmor confines it to /etc/dhcp (default: %(default)s)")
     cmd.add_argument("--livebox", type=int, default=5)
     args = parser.parse_args()
     try:

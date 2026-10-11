@@ -1,0 +1,16 @@
+[Unit]
+Description=Nivuus WAN: Orange DHCPv4 client
+Requires=nivuus-wan-orange.service
+After=nivuus-wan-orange.service
+PartOf=nivuus-wan-orange.service
+
+[Service]
+Environment=IF_METRIC=50
+ExecStartPre=/usr/local/sbin/nivuus-orange-dhcp-options.py render --family 4
+ExecStart=/sbin/dhclient -4 -d -v -cf /etc/dhcp/nivuus-orange/dhclient-orange-v4.conf -lf /var/lib/dhcp/dhclient-orange-v4.lease -pf /run/dhclient-orange-v4.pid enp5s0.832
+ExecStop=/sbin/dhclient -4 -r -cf /etc/dhcp/nivuus-orange/dhclient-orange-v4.conf -lf /var/lib/dhcp/dhclient-orange-v4.lease -pf /run/dhclient-orange-v4.pid enp5s0.832
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

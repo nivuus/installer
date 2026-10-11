@@ -1,0 +1,38 @@
+#!/usr/sbin/nft -f
+#
+# Nivuus — per-source connection rate-limit on WAN SMB (445/tcp).
+# Deployed 2026-07-27 (harden SMB kept open on the WAN, option C).
+#
+# Runs as its OWN inet table, independent of `table inet firewalld`. This is the
+# same coexistence pattern already proven on this host by fail2ban's `f2b-table`
+# and the crowdsec tables: a `firewall-cmd --reload` recreates only firewalld's
+# table and leaves foreign tables untouched, so this rate-limit survives reloads
+# (the mqtt agent's FirewallManager triggers reloads). A full `systemctl restart
+# firewalld` is handled by the accompanying unit (PartOf=firewalld.service).
+#
+# Hooked at `priority filter - 5`, i.e. BEFORE firewalld's input chain (+10), so
+# an abusive SMB SYN flood is dropped before firewalld would accept 445/tcp.
+# Only WAN traffic is considered (iifname "ppp0" or "enp5s0.832") — the LAN never reaches these
+# rules. Drops are SILENT (counter only; no log) on purpose: logging every dropped
+# SYN of a flood would spam the journal and risk the EventMonitor amplification
+# that already bit this host. Inspect activity with:
+#     nft list table inet nivuus_smb
+#
+# Idempotent load: ensure-exists -> delete -> recreate, so `nft -f` can re-run.
+
+table inet nivuus_smb {}
+delete table inet nivuus_smb
+
+table inet nivuus_smb {
+	chain input {
+		type filter hook input priority filter - 5; policy accept;
+
+		# Per-source token bucket on brand-new inbound SMB connections only.
+		# Sustained 10/min, burst 15 per source IP — hugely generous for one
+		# legitimate remote user, while a credential-stuffing / scanning flood
+		# (hundreds/sec) is throttled to nothing. Established sessions
+		# (ct state != new) are never rate-limited.
+		iifname { "ppp0", "enp5s0.832" } tcp dport 445 ct state new meter smb_flood4 { ip saddr limit rate over 10/minute burst 15 packets } counter drop
+		iifname { "ppp0", "enp5s0.832" } tcp dport 445 ct state new meter smb_flood6 { ip6 saddr limit rate over 10/minute burst 15 packets } counter drop
+	}
+}
