@@ -102,7 +102,7 @@ test-packages: test-scripts
 	          test_webapp_models \
 	          test_common_hardware \
 	          test_install_engine_features \
-	          test_install_engine_base; do \
+	          test_install_engine_base test_orange_dhcp_options; do \
 	    echo "--- $$t"; \
 	    $(PYTHON) $(dir $(INSTALLER_DIR))scripts/tests/$$t.py || exit 1; \
 	done
@@ -137,7 +137,7 @@ test-packages: test-scripts
 # cannot mask them. They need nothing, so they run first and always.
 # Shell, so their own loop, as console/Makefile does for test_handle_vm_start.
 test-scripts:
-	@for t in test_hw_blackbox test_net_rps_ecores test_pcie_wifi_link_guard; do \
+	@for t in test_hw_blackbox test_net_rps_ecores test_pcie_wifi_link_guard test_orange_dhclient_hooks test_wan_cutover test_wan_orange_check; do \
 	    echo "--- $$t"; \
 	    bash $(dir $(INSTALLER_DIR))scripts/tests/$$t.sh || exit 1; \
 	done

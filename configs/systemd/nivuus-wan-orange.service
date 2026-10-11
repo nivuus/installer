@@ -1,0 +1,18 @@
+[Unit]
+Description=Nivuus WAN: Orange VLAN 832 interface (802.1p marking, zone, shaper)
+After=NetworkManager.service firewalld.service sys-subsystem-net-devices-enp5s0.device
+Wants=firewalld.service
+BindsTo=sys-subsystem-net-devices-enp5s0.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/nivuus-wan-orange.sh prepare
+ExecStop=/usr/local/sbin/nivuus-wan-orange.sh teardown
+# With PPPoE autoconnect off, a preparation that fails once at boot (firewalld
+# still starting) would otherwise leave the host without any WAN.
+Restart=on-failure
+RestartSec=20
+
+[Install]
+WantedBy=multi-user.target

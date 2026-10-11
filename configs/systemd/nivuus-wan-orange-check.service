@@ -1,0 +1,8 @@
+[Unit]
+Description=Nivuus WAN: Orange gateway liveness check
+After=nivuus-wan-orange-dhcp4.service
+Requisite=nivuus-wan-orange-dhcp4.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nivuus-wan-orange.sh check

@@ -1,0 +1,10 @@
+[Unit]
+Description=Nivuus WAN: render the Orange DHCP options (one salt for both protocols)
+Requires=nivuus-wan-orange.service
+After=nivuus-wan-orange.service
+PartOf=nivuus-wan-orange.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/nivuus-orange-dhcp-options.py render

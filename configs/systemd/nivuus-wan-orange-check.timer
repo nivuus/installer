@@ -1,0 +1,9 @@
+[Unit]
+Description=Nivuus WAN: check the Orange gateway every 50 s
+
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=50
+
+[Install]
+WantedBy=timers.target

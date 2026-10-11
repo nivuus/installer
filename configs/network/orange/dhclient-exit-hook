@@ -1,0 +1,23 @@
+# Sourced by dhclient-script. Parks the delegated /56 behind an unreachable
+# route, so nothing inside it is ever routed back to Orange, and records it
+# for the LAN side (plan 2).
+nivuus_wan_prefix() {
+    [ "$interface" = "${NIVUUS_WAN_IF:-enp5s0.832}" ] || return 0
+    state=${NIVUUS_WAN_STATE_DIR:-/run/nivuus}
+    case "$reason" in
+        BOUND6|RENEW6|REBIND6|REBOOT6)
+            [ -n "$new_ip6_prefix" ] || return 0
+            if [ -n "$old_ip6_prefix" ] && [ "$old_ip6_prefix" != "$new_ip6_prefix" ]; then
+                ip -6 route del unreachable "$old_ip6_prefix" 2>/dev/null
+            fi
+            ip -6 route replace unreachable "$new_ip6_prefix"
+            mkdir -p "$state"
+            printf '%s\n' "$new_ip6_prefix" > "$state/wan-orange.prefix"
+            ;;
+        EXPIRE6|RELEASE6|STOP6)
+            [ -n "$old_ip6_prefix" ] && ip -6 route del unreachable "$old_ip6_prefix" 2>/dev/null
+            rm -f "$state/wan-orange.prefix"
+            ;;
+    esac
+}
+nivuus_wan_prefix
