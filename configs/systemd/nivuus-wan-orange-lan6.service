@@ -1,0 +1,18 @@
+[Unit]
+Description=Nivuus WAN: hand the Orange IPv6 prefix to the LANs
+After=nivuus-wan-orange-dhcp6.service
+Requires=nivuus-wan-orange.service
+# Restarted with the DHCPv6 client: a new exchange starts from a withdrawn LAN.
+PartOf=nivuus-wan-orange-dhcp6.service
+
+[Service]
+# Active means IPv6 is handed out. Stopping or crashing withdraws it: the loop
+# removes the addresses and stops radvd on its way out.
+ExecStart=/usr/local/sbin/nivuus-wan-orange-lan6.py run
+# A loop that was killed could not withdraw by itself.
+ExecStopPost=/usr/local/sbin/nivuus-wan-orange-lan6.py withdraw
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=nivuus-wan-orange-dhcp6.service

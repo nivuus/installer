@@ -5,6 +5,10 @@ After=nivuus-wan-orange.service nivuus-wan-orange-options.service nivuus-wan-ora
 PartOf=nivuus-wan-orange.service
 
 [Service]
+# Orange answers Router and Neighbor Solicitations only after a full exchange.
+# A start that finds a lease only Confirms it and the gateway stays silent, so
+# the lease is forgotten; the DUID is kept and Orange hands the same prefix back.
+ExecStartPre=/bin/rm -f /var/lib/dhcp/dhclient-orange-v6.lease
 ExecStart=/sbin/dhclient -6 -P -D LL -d -v -cf /etc/dhcp/nivuus-orange/dhclient-orange-v6.conf -lf /var/lib/dhcp/dhclient-orange-v6.lease -df /var/lib/dhcp/dhclient-orange-v6.duid -pf /run/dhclient-orange-v6.pid enp5s0.832
 ExecStop=/sbin/dhclient -6 -P -D LL -r -cf /etc/dhcp/nivuus-orange/dhclient-orange-v6.conf -lf /var/lib/dhcp/dhclient-orange-v6.lease -df /var/lib/dhcp/dhclient-orange-v6.duid -pf /run/dhclient-orange-v6.pid enp5s0.832
 Restart=on-failure

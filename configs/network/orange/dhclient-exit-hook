@@ -7,9 +7,11 @@ nivuus_wan_prefix() {
     case "$reason" in
         BOUND6|RENEW6|REBIND6|REBOOT6)
             [ -n "$new_ip6_prefix" ] || return 0
-            if [ -n "$old_ip6_prefix" ] && [ "$old_ip6_prefix" != "$new_ip6_prefix" ]; then
-                ip -6 route del unreachable "$old_ip6_prefix" 2>/dev/null
-            fi
+            # After a lease removal dhclient has no old prefix to report: the
+            # state file is the record of what was parked.
+            for old in "$old_ip6_prefix" "$(cat "$state/wan-orange.prefix" 2>/dev/null)"; do
+                [ -n "$old" ] && [ "$old" != "$new_ip6_prefix" ] && ip -6 route del unreachable "$old" 2>/dev/null
+            done
             ip -6 route replace unreachable "$new_ip6_prefix"
             mkdir -p "$state"
             printf '%s\n' "$new_ip6_prefix" > "$state/wan-orange.prefix"
