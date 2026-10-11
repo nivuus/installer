@@ -1,0 +1,27 @@
+#!/bin/sh
+# pppd runs every script here when a link comes up; $1 is the fresh interface.
+# ppp0 is recreated at each reconnection with a bare `noqueue` root qdisc, so
+# the shaper has to be attached here rather than once at boot.
+#
+# Without a shaper the upload queue builds where the host cannot manage it, in
+# the ONT and at Orange, as soon as the uplink saturates. CAKE set just under
+# the contracted rate moves that queue here, where it is flow-isolated. Measured
+# 2026-10-11 against Scaleway Paris (Ookla), four alternating passes:
+#
+#     no shaper   up 802 / 801 Mbit/s   latency under load 65 / 55 ms, peaks 463 / 251 ms
+#     cake 780    up 722 / 721 Mbit/s   latency under load 10 / 10 ms, peaks  12 /  12 ms
+#
+# Download is untouched (925-935 Mbit/s either way): only egress is shaped.
+#
+# RATE must stay below the uplink the subscription really delivers, or the
+# queue moves back upstream. It is a property of the line and cannot be derived
+# on the host: override it in /etc/default/nivuus-wan-cake when the offer changes.
+#
+# overhead 50 = PPPoE 8 + Ethernet 14 + VLAN 4 + FCS 4 + preamble and gap 20,
+# none of which ppp0 sees. `nat` makes CAKE read the pre-masquerade address from
+# conntrack, so `dual-srchost` shares the uplink per LAN host, not per flow.
+RATE=780mbit
+[ -r /etc/default/nivuus-wan-cake ] && . /etc/default/nivuus-wan-cake
+
+exec /usr/sbin/tc qdisc replace dev "$1" root cake bandwidth "$RATE" \
+    besteffort nat dual-srchost overhead 50 mpu 84
