@@ -51,8 +51,15 @@ echo "== Orange resolvers never reach systemd-resolved, timesyncd or resolv.conf
 leak() { ( new_domain_name_servers="81.253.149.5 80.10.246.134" new_domain_name=orange.fr new_domain_search=orange.fr
            new_dhcp6_name_servers=2a01:cb00::1 new_dhcp6_domain_search=orange.fr new_ntp_servers=192.0.2.9
            interface=$1; . "$DIR/dhclient-enter-hook"
-           echo "$new_domain_name_servers$new_domain_name$new_domain_search$new_dhcp6_name_servers$new_dhcp6_domain_search$new_ntp_servers" ); }
+           echo "${new_domain_name_servers-}${new_domain_name-}${new_domain_search-}${new_dhcp6_name_servers-}${new_dhcp6_domain_search-}${new_ntp_servers-}" ); }
 out=$(leak enp5s0.832); [ -z "$out" ] && ok "dropped on the WAN" || bad "dropped on the WAN" "$out"
 out=$(leak eth9); [ -n "$out" ] && ok "kept on other interfaces" || bad "kept on other interfaces" "empty"
+
+echo "== a fresh Solicit has no old prefix: the recorded one is cleaned =="
+: > "$TMP/ip.log"; run_exit BOUND6 2a01:cb00:2:200::/56 ""
+: > "$TMP/ip.log"; run_exit BOUND6 2a01:cb00:3:300::/56 ""
+grep -q "route del unreachable 2a01:cb00:2:200::/56" "$TMP/ip.log" && ok "recorded route removed" || bad "recorded route removed" "$(cat "$TMP/ip.log")"
+: > "$TMP/ip.log"; run_exit BOUND6 2a01:cb00:3:300::/56 ""
+grep -q "route del" "$TMP/ip.log" && bad "same prefix deletes nothing" "$(cat "$TMP/ip.log")" || ok "same prefix deletes nothing"
 
 echo; echo "$PASS passed, $FAIL failed"; [ "$FAIL" -eq 0 ]

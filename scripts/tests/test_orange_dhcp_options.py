@@ -106,7 +106,7 @@ class Coherence(unittest.TestCase):
         self.assertIn("nivuus-orange-dhcp-options.py render\n", options)
         for family in ("4", "6"):
             unit = (units / ("nivuus-wan-orange-dhcp%s.service" % family)).read_text()
-            self.assertNotIn("ExecStartPre", unit)
+            self.assertNotIn("dhcp-options", unit)
             self.assertIn("Requires=nivuus-wan-orange.service nivuus-wan-orange-options.service", unit)
 
 
@@ -149,6 +149,13 @@ class Units(unittest.TestCase):
     def test_a_failed_preparation_is_retried(self):
         unit = (ROOT / "configs/systemd/nivuus-wan-orange.service").read_text()
         self.assertIn("Restart=on-failure", unit)
+
+
+class Dhcp6AlwaysSolicits(unittest.TestCase):
+    def test_dhcp6_unit_forgets_its_lease_before_starting(self):
+        unit = (ROOT / "configs/systemd/nivuus-wan-orange-dhcp6.service").read_text()
+        self.assertIn("ExecStartPre=/bin/rm -f /var/lib/dhcp/dhclient-orange-v6.lease", unit)
+        self.assertNotIn("rm -f /var/lib/dhcp/dhclient-orange-v6.duid", unit)
 
 
 class AppArmorPaths(unittest.TestCase):
