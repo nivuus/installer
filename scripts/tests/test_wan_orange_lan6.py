@@ -118,8 +118,11 @@ class Applied(unittest.TestCase):
         self.assertIn("ip -6 addr replace 2a01:db8:0:c002::1/64 dev lan1", calls)
         self.assertIn("systemctl restart nivuus-lan6-radvd.service", calls)
         self.assertIn("prefix 2a01:db8:0:c002::/64", (self.tmp / "state/radvd.conf").read_text())
-        self.assertIn("ip -6 addr replace fe80::1/64 dev lan0", calls)
-        self.assertIn("ip -6 addr replace fe80::1/64 dev lan1", calls)
+        # Deprecated: the kernel then never picks it for a socket that did not
+        # ask for it, so no other daemon on the host advertises from it.
+        self.assertIn("ip -6 addr replace fe80::1/64 dev lan0 preferred_lft 0\n", calls)
+        self.assertIn("ip -6 addr replace fe80::1/64 dev lan1 preferred_lft 0\n", calls)
+        self.assertIn("ip -6 addr replace 2a01:db8:0:c000::1/64 dev lan0\n", calls)
 
     def test_a_duplicate_address_stops_before_advertising(self):
         self.healthy()

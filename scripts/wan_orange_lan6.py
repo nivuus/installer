@@ -39,6 +39,9 @@ BACKOFF = (1, 5, 15, 60)
 # The link-local address radvd advertises from. Not the bridge's own: the
 # Thread border router advertises from that one with router lifetime 0, which
 # makes every client drop it as default router until the next advertisement.
+# It is set deprecated (preferred lifetime 0): the kernel then never picks it
+# for a socket that did not ask for it, so only radvd, which names its source,
+# sends from it.
 ROUTER_LL = "fe80::1"
 
 
@@ -131,7 +134,8 @@ def set_addresses(want):
             tool("ip", "-6", "addr", "del", addr, "dev", name)
     for name, addr in wanted:
         # Asserted on every run: NetworkManager drops it when it reactivates the bridge.
-        tool("ip", "-6", "addr", "replace", addr, "dev", name, check=True)
+        deprecated = ("preferred_lft", "0") if addr.startswith(ROUTER_LL + "/") else ()
+        tool("ip", "-6", "addr", "replace", addr, "dev", name, *deprecated, check=True)
     record.write_text(json.dumps(wanted))
     for name in sorted({name for name, _ in wanted}):
         settle(name)
