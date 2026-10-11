@@ -93,9 +93,12 @@ to_dhcp() {
     start_units
     if [ "$DRY" = 0 ]; then
         proven=0
-        while [ $(( $(date +%s) - DOWN_AT )) -lt "$WAIT_S" ]; do
+        # Probe at least once, whatever the clock says: a deadline already
+        # passed must not turn into a rollback that never looked.
+        while :; do
             sleep 5
             if http_ok "$IF"; then proven=1; break; fi
+            [ $(( $(date +%s) - DOWN_AT )) -lt "$WAIT_S" ] || break
         done
         if [ "$proven" = 0 ]; then
             log "no Internet through $IF after ${WAIT_S}s: rolling back to PPPoE"

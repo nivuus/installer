@@ -52,7 +52,7 @@ EOF
 cutover() { # runs the script against the current fake world
     OUT=$(NIVUUS_TEST_PATH="$F/bin" NIVUUS_UNIT_DIR="${UNITS:-$UNITS_DIR}" NIVUUS_TETHER_OK="${TETHER:-1}" \
           NIVUUS_CUTOVER_LOCK="$F/lock" NIVUUS_CUTOVER_LOG="$F/log" \
-          NIVUUS_CUTOVER_WAIT_S=1 NIVUUS_CUTOVER_COOLDOWN_S=0 NIVUUS_CUTOVER_RETRY_S=0 "$SCRIPT" "$@" 2>&1); RC=$?
+          NIVUUS_CUTOVER_WAIT_S=0 NIVUUS_CUTOVER_COOLDOWN_S=0 NIVUUS_CUTOVER_RETRY_S=0 "$SCRIPT" "$@" 2>&1); RC=$?
 }
 called() { grep -qE "$1" "$F/calls"; }
 count()  { grep -cE "$1" "$F/calls"; }

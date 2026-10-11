@@ -74,3 +74,12 @@ From the lafibre.info conformity thread (opened 2022-11-07, last edited
 
 IPTV and VoIP VLANs; the installer wizard (which only knows PPPoE); the `mqtt`
 agent's `PppoeCredentials` feature, noted as a follow-up in that repository.
+
+## Amendment, 2026-10-11: the marking is nftables, not tc
+
+The design above marks 802.1p priority with `tc` filters on the VLAN. That was
+replaced after two diagnostic outages: on a parent NIC without VLAN tx offload
+(the real one), `tc flower` cannot parse frames sent from a packet socket, and
+the DHCPv4 DISCOVER left with priority 0. The marking is an nftables `netdev`
+egress hook reading from the link-layer header. The requirement is unchanged:
+6 on DHCPv4, DHCPv6, ARP and ICMPv6 RS/NS/NA, 0 on everything else.
