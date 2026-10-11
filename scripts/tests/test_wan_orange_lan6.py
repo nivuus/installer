@@ -201,5 +201,18 @@ class Applied(unittest.TestCase):
         self.assertFalse((self.tmp / "state/radvd.conf").exists())
 
 
+class Shipped(unittest.TestCase):
+    def test_units_and_mapping_agree_with_the_script(self):
+        lan = (ROOT / "configs/systemd/nivuus-wan-orange-lan6.service").read_text()
+        self.assertIn("ExecStart=/usr/local/sbin/nivuus-wan-orange-lan6.py run", lan)
+        self.assertIn("PartOf=nivuus-wan-orange-dhcp6.service", lan)
+        self.assertIn("WantedBy=nivuus-wan-orange-dhcp6.service", lan)
+        radvd = (ROOT / "configs/systemd/nivuus-lan6-radvd.service").read_text()
+        self.assertIn("--config /run/nivuus/radvd.conf", radvd)
+        self.assertNotIn("[Install]", radvd)
+        mapping = lan6.parse_lans((ROOT / "configs/network/orange/wan-orange-lan6.conf").read_text())
+        self.assertEqual(mapping, {"localBridge": 0, "publicBridge": 2})
+
+
 if __name__ == "__main__":
     unittest.main()

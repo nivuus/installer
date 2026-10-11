@@ -1,0 +1,10 @@
+[Unit]
+Description=Nivuus LAN: IPv6 router advertisements for the Orange prefix
+# Started and stopped by nivuus-wan-orange-lan6.py only: never enabled.
+ConditionPathExists=/run/nivuus/radvd.conf
+
+[Service]
+ExecStartPre=/usr/sbin/radvd --configtest --config /run/nivuus/radvd.conf
+ExecStart=/usr/sbin/radvd --nodaemon --config /run/nivuus/radvd.conf --pidfile /run/nivuus-lan6-radvd.pid
+Restart=on-failure
+RestartSec=10
