@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
 """Tests for scripts/orange_dhcp_options.py. Run: python3 scripts/tests/test_orange_dhcp_options.py"""
-import hashlib, os, pathlib, stat, subprocess, sys, tempfile, unittest
+import fnmatch
+import hashlib
+import os
+import pathlib
+import shlex
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
-import orange_dhcp_options as o
+import orange_dhcp_options as o  # noqa: E402
 
 SALT = b"0123456789abcdef"
 
@@ -76,7 +85,7 @@ def render_cli(tmp, profile_bytes, *extra):
 
 def sent(tmp, family, statement):
     text = (tmp / ("dhclient-orange-v%s.conf" % family)).read_text()
-    line = [l for l in text.splitlines() if l.startswith("send %s " % statement)][0]
+    line = [row for row in text.splitlines() if row.startswith("send %s " % statement)][0]
     return bytes.fromhex(line.split()[-1].rstrip(";").replace(":", ""))
 
 
@@ -151,10 +160,9 @@ class AppArmorPaths(unittest.TestCase):
                "-df": "/var/lib/dhcp/dhclient*", "-pf": "/run/dhclient*.pid"}
 
     def test_units_only_use_paths_the_profile_allows(self):
-        import fnmatch, shlex
         for family in ("4", "6"):
             unit = (ROOT / "configs/systemd" / ("nivuus-wan-orange-dhcp%s.service" % family)).read_text()
-            lines = [l.split("=", 1)[1] for l in unit.splitlines() if l.startswith(("ExecStart=", "ExecStop="))]
+            lines = [row.split("=", 1)[1] for row in unit.splitlines() if row.startswith(("ExecStart=", "ExecStop="))]
             self.assertEqual(len(lines), 2)
             for line in lines:
                 argv = shlex.split(line)
@@ -166,9 +174,8 @@ class AppArmorPaths(unittest.TestCase):
                 self.assertIn("-pf", argv)
 
     def test_cli_renders_where_the_units_read(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            rc = subprocess.run([sys.executable, str(ROOT / "scripts/orange_dhcp_options.py"),
-                                 "render", "--help"], capture_output=True, text=True)
+        rc = subprocess.run([sys.executable, str(ROOT / "scripts/orange_dhcp_options.py"),
+                             "render", "--help"], capture_output=True, text=True)
         self.assertIn("/etc/dhcp/nivuus-orange", rc.stdout)
         for family in ("4", "6"):
             unit = (ROOT / "configs/systemd" / ("nivuus-wan-orange-dhcp%s.service" % family)).read_text()

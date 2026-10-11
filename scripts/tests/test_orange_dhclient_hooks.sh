@@ -8,6 +8,8 @@ PASS=0 FAIL=0
 ok()  { PASS=$((PASS+1)); echo "  ok   — $1"; }
 bad() { FAIL=$((FAIL+1)); echo "  FAIL — $1"; echo "         got: $2"; }
 mkdir -p "$TMP/bin"; printf '#!/bin/sh\necho "$*" >> "%s/ip.log"\n' "$TMP" > "$TMP/bin/ip"; chmod +x "$TMP/bin/ip"
+# The hooks are sourced: they read these variables, which is all dhclient gives them.
+# shellcheck disable=SC2034
 run_exit() { # reason new old interface
     ( PATH="$TMP/bin:$PATH"; export NIVUUS_WAN_STATE_DIR="$TMP/state"
       reason=$1 new_ip6_prefix=$2 old_ip6_prefix=$3 interface=${4:-enp5s0.832}
@@ -45,6 +47,7 @@ echo "== Orange resolvers never reach systemd-resolved, timesyncd or resolv.conf
 # The exit hooks `resolved` and `timesyncd` run in the same shell after the
 # enter hooks and act on these variables; nsswitch asks resolved before
 # /etc/resolv.conf, so an Orange resolver set there would be used by the host.
+# shellcheck disable=SC2034
 leak() { ( new_domain_name_servers="81.253.149.5 80.10.246.134" new_domain_name=orange.fr new_domain_search=orange.fr
            new_dhcp6_name_servers=2a01:cb00::1 new_dhcp6_domain_search=orange.fr new_ntp_servers=192.0.2.9
            interface=$1; . "$DIR/dhclient-enter-hook"

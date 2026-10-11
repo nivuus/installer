@@ -47,7 +47,7 @@ done
 log() { echo "$(date '+%F %T') $*"; }
 run() { if [ "$DRY" = 1 ]; then echo "would run: $*"; else log "+ $*"; "$@"; fi; }
 http_ok() { [ "$(curl -4 -s -m 8 --interface "$1" -o /dev/null -w '%{http_code}' "$PROBE")" = 204 ]; }
-tether() { ls /sys/class/net | grep -E '^enx' | head -1; }
+tether() { for d in /sys/class/net/enx*; do [ -e "$d" ] && { echo "${d##*/}"; return; }; done; }
 tether_ok() {
     [ -n "${NIVUUS_TETHER_OK:-}" ] && { [ "$NIVUUS_TETHER_OK" = 1 ]; return; }
     t=$(tether); [ -n "$t" ] && http_ok "$t"

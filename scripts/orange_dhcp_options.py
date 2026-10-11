@@ -4,7 +4,14 @@
 The DHCP credentials are the PPPoE ones; they are read from the NetworkManager
 profile and never printed. Layout: docs/superpowers/specs/2026-10-11-wan-orange-dhcp-design.md.
 """
-import argparse, hashlib, os, pathlib, re, secrets, string, sys
+import argparse
+import hashlib
+import os
+import pathlib
+import re
+import secrets
+import string
+import sys
 
 ORANGE_PREFIX = bytes(11) + bytes.fromhex("1a0900000558010341")
 VENDOR = b"sagem"
