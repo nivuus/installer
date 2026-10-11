@@ -1,0 +1,5 @@
+# Sourced by dhclient-script. /etc/resolv.conf is static on this host and feeds
+# the three LAN dnsmasq instances: the WAN lease must not rewrite it.
+if [ "$interface" = "${NIVUUS_WAN_IF:-enp5s0.832}" ]; then
+    make_resolv_conf() { :; }
+fi
