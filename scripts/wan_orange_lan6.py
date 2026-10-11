@@ -36,6 +36,10 @@ TOOL_TIMEOUT_S = int(os.environ.get("NIVUUS_LAN6_TOOL_TIMEOUT_S", "30"))
 # SOLICIT to Orange and makes the LANs lose and regain their prefix.
 SILENT_LIMIT = 4
 BACKOFF = (1, 5, 15, 60)
+# The link-local address radvd advertises from. Not the bridge's own: the
+# Thread border router advertises from that one with router lifetime 0, which
+# makes every client drop it as default router until the next advertisement.
+ROUTER_LL = "fe80::1"
 
 
 def parse_lans(text):
@@ -68,6 +72,9 @@ def render_radvd(nets):
                 "    AdvSendAdvert on;",
                 "    MaxRtrAdvInterval 60;",
                 "    AdvDefaultLifetime 900;",
+                "    AdvRASrcAddress {",
+                "        %s;" % ROUTER_LL,
+                "    };",
                 "    prefix %s {" % net,
                 "        AdvValidLifetime 7200;",
                 "        AdvPreferredLifetime 3600;",
@@ -115,7 +122,7 @@ def applied():
 def set_addresses(want):
     """Remove the addresses no longer wanted, (re)assert the wanted ones."""
     record = STATE / "wan-orange.lan6"
-    known, wanted = applied(), sorted(want.items())
+    known, wanted = applied(), sorted(want)
     # Intent first: an address added just before a failure is then still
     # known to the withdrawal that follows.
     record.write_text(json.dumps(sorted(set(known) | set(wanted))))
@@ -126,6 +133,22 @@ def set_addresses(want):
         # Asserted on every run: NetworkManager drops it when it reactivates the bridge.
         tool("ip", "-6", "addr", "replace", addr, "dev", name, check=True)
     record.write_text(json.dumps(wanted))
+    for name in sorted({name for name, _ in wanted}):
+        settle(name)
+
+
+def settle(name):
+    """Wait for duplicate address detection: radvd cannot send from a tentative address."""
+    for _ in range(50):
+        listing = json.loads(tool("ip", "-j", "-6", "addr", "show", "dev", name).stdout or "[]")
+        addrs = [addr for entry in listing for addr in entry.get("addr_info", [])]
+        failed = [addr["local"] for addr in addrs if addr.get("dadfailed")]
+        if failed:
+            raise RuntimeError("duplicate address on %s: %s" % (name, ", ".join(failed)))
+        if not any(addr.get("tentative") for addr in addrs):
+            return
+        time.sleep(0.1)
+    raise RuntimeError("addresses on %s still tentative after 5 s" % name)
 
 
 def advertise(text):
@@ -178,7 +201,7 @@ def apply(with_ra=True):
         if prefix:
             unusable("prefix %s but no default route" % prefix)
         advertise(None)
-        set_addresses({})
+        set_addresses([])
         return
     # Neighbor Solicitation, the IPv6 counterpart of the ARP check on IPv4.
     # Exit 2 is "no answer"; anything else is a local failure, not a verdict.
@@ -190,14 +213,15 @@ def apply(with_ra=True):
     else:
         raise RuntimeError("ndisc6 failed (%d): %s" % (probe.returncode, probe.stderr.strip()))
     nets = {name: subnet(prefix, index) for name, index in parse_lans(CONF.read_text()).items()}
-    set_addresses({name: "%s/64" % (net.network_address + 1) for name, net in nets.items()})
+    set_addresses([(name, addr) for name, net in nets.items()
+                   for addr in (ROUTER_LL + "/64", "%s/64" % (net.network_address + 1))])
     advertise(render_radvd(nets) if with_ra and nets else None)
 
 
 def withdraw():
     STATE.mkdir(parents=True, exist_ok=True)
     advertise(None)
-    set_addresses({})
+    set_addresses([])
     if (PROC / WAN).is_dir():
         sysctl({"accept_ra": "0"})
         tool("ip", "-6", "route", "del", "default", "dev", WAN)

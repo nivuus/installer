@@ -51,12 +51,16 @@ class Pure(unittest.TestCase):
         # The guest zone rejects Router Solicitations: a short period is what
         # gives a new guest its address without a firewall rule.
         self.assertEqual(text.count("MaxRtrAdvInterval 60;"), 2)
+        # Another daemon (the Thread border router) advertises from the bridge's
+        # own link-local address with router lifetime 0: radvd needs its own.
+        self.assertEqual(text.count("AdvRASrcAddress {\n        fe80::1;\n    };"), 2)
 
 
 SCRIPT = ROOT / "scripts/wan_orange_lan6.py"
 FAKES = {
     "ip": '''case "$*" in
   "-j -6 route show default dev"*) if [ -e "$T/route" ]; then echo '[{"dst":"default","gateway":"fe80::1"}]'; else echo '[]'; fi ;;
+  "-j -6 addr show dev"*) [ -e "$T/dadfailed" ] && echo '[{"addr_info":[{"local":"fe80::1","dadfailed":true}]}]' ;;
   *) echo "ip $*" >> "$T/calls"; [ -e "$T/ip_hangs" ] && sleep 30; case "$*" in *"dev $(cat "$T/missing" 2>/dev/null)") exit 2 ;; esac ;;
 esac''',
     "rdisc6": 'echo "rdisc6 $*" >> "$T/calls"; [ -e "$T/ra_answers" ] && : > "$T/route"; exit 0',
@@ -114,6 +118,16 @@ class Applied(unittest.TestCase):
         self.assertIn("ip -6 addr replace 2a01:db8:0:c002::1/64 dev lan1", calls)
         self.assertIn("systemctl restart nivuus-lan6-radvd.service", calls)
         self.assertIn("prefix 2a01:db8:0:c002::/64", (self.tmp / "state/radvd.conf").read_text())
+        self.assertIn("ip -6 addr replace fe80::1/64 dev lan0", calls)
+        self.assertIn("ip -6 addr replace fe80::1/64 dev lan1", calls)
+
+    def test_a_duplicate_address_stops_before_advertising(self):
+        self.healthy()
+        (self.tmp / "dadfailed").write_text("")
+        result = self.run_cli("apply")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("duplicate", result.stderr)
+        self.assertNotIn("radvd", self.calls())
 
     def test_second_run_does_not_restart_radvd(self):
         self.healthy()
@@ -241,6 +255,7 @@ class Applied(unittest.TestCase):
         self.assertIn("systemctl stop nivuus-lan6-radvd.service", calls)
         self.assertIn("ip -6 addr del 2a01:db8:0:c000::1/64 dev lan0", calls)
         self.assertIn("ip -6 addr del 2a01:db8:0:c002::1/64 dev lan1", calls)
+        self.assertIn("ip -6 addr del fe80::1/64 dev lan0", calls)
         self.assertEqual((self.tmp / "proc/wan0/accept_ra").read_text().strip(), "0")
         self.assertFalse((self.tmp / "state/radvd.conf").exists())
 

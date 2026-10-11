@@ -113,3 +113,16 @@ throughput and DNSSEC items of the original brief.
 - **Open before advertising on `localBridge`:** the Thread border router
   (OTBR, `OTBR_BACKBONE_IF=localBridge`) may already send Router Advertisements
   there. Measured at deployment, before radvd starts.
+
+## Amendment at deployment (2026-10-11): radvd advertises from `fe80::1`
+
+Measured on `localBridge` once radvd was running: the Thread border router
+(OTBR, same host, `OTBR_BACKBONE_IF=localBridge`) sends its own Router
+Advertisements from the bridge's link-local address with **router lifetime 0**
+(it only announces the ULA `/64` and the route to the Thread prefix). A client
+identifies a default router by its link-local address, so each of those made
+it drop the router radvd had just announced, until radvd's next one. radvd
+now advertises from a dedicated link-local address, `fe80::1`, set on each LAN
+bridge by the same loop (`AdvRASrcAddress`); the loop waits for duplicate
+address detection and refuses to advertise on a duplicate. The spec's "nothing
+on the host sends RAs today" was wrong for `localBridge`.
