@@ -1,11 +1,10 @@
 [Unit]
 Description=Nivuus WAN: Orange DHCPv6 client (prefix delegation)
-Requires=nivuus-wan-orange.service
-After=nivuus-wan-orange.service nivuus-wan-orange-dhcp4.service
+Requires=nivuus-wan-orange.service nivuus-wan-orange-options.service
+After=nivuus-wan-orange.service nivuus-wan-orange-options.service nivuus-wan-orange-dhcp4.service
 PartOf=nivuus-wan-orange.service
 
 [Service]
-ExecStartPre=/usr/local/sbin/nivuus-orange-dhcp-options.py render --family 6
 ExecStart=/sbin/dhclient -6 -P -D LL -d -v -cf /etc/dhcp/nivuus-orange/dhclient-orange-v6.conf -lf /var/lib/dhcp/dhclient-orange-v6.lease -df /var/lib/dhcp/dhclient-orange-v6.duid -pf /run/dhclient-orange-v6.pid enp5s0.832
 ExecStop=/sbin/dhclient -6 -P -D LL -r -cf /etc/dhcp/nivuus-orange/dhclient-orange-v6.conf -lf /var/lib/dhcp/dhclient-orange-v6.lease -df /var/lib/dhcp/dhclient-orange-v6.duid -pf /run/dhclient-orange-v6.pid enp5s0.832
 Restart=on-failure

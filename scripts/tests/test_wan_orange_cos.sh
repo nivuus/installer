@@ -14,6 +14,10 @@ ip -n $NS link add wan0 type veth peer name peer0
 ip -n $NS link set wan0 up; ip -n $NS link set peer0 up
 n() { ip netns exec $NS env NIVUUS_WAN_PARENT=wan0 NIVUUS_WAN_NO_FIREWALL=1 "$@"; }
 n "$SCRIPT" prepare || { echo "prepare failed"; exit 1; }
+# dhclient -6 binds the link-local address at once and dies if it is still
+# tentative ("Can't bind to dhcp address", seen for real on 2026-10-11).
+[ -z "$(n ip -6 addr show dev wan0.832 scope link tentative)" ] && [ -n "$(n ip -6 addr show dev wan0.832 scope link)" ] &&
+    ok "prepare returns with a usable link-local address" || bad "link-local still tentative" "$(n ip -6 addr show dev wan0.832)"
 n ip addr add 192.0.2.2/24 dev wan0.832
 ip netns exec $NS tcpdump -i peer0 -e -n -l -c 40 vlan 832 > "$TMP/cap" 2>/dev/null &
 CAP=$!; sleep 1

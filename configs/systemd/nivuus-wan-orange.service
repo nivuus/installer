@@ -9,6 +9,10 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/sbin/nivuus-wan-orange.sh prepare
 ExecStop=/usr/local/sbin/nivuus-wan-orange.sh teardown
+# With PPPoE autoconnect off, a preparation that fails once at boot (firewalld
+# still starting) would otherwise leave the host without any WAN.
+Restart=on-failure
+RestartSec=20
 
 [Install]
 WantedBy=multi-user.target

@@ -29,11 +29,10 @@ has() { if grep -qE "$2" "$TMP/cap"; then ok "$1"; else bad "$1"; fi; }
 lacks() { if grep -qE "$2" "$TMP/cap"; then bad "$1"; else ok "$1"; fi; }
 
 printf '[pppoe]\nusername=fti/abcdefg\npassword=secret\n' > "$TMP/profile"
-for family in 4 6; do
-    python3 "$ROOT/scripts/orange_dhcp_options.py" render --family $family \
-        --profile "$TMP/profile" --templates "$ROOT/configs/network/orange" --out "$CONF" ||
-        { echo "render failed"; exit 1; }
-done
+# One call, as in production: both files must come from the same salt.
+python3 "$ROOT/scripts/orange_dhcp_options.py" render \
+    --profile "$TMP/profile" --templates "$ROOT/configs/network/orange" --out "$CONF" ||
+    { echo "render failed"; exit 1; }
 
 ip netns add $NS
 ip -n $NS link add w0 type veth peer name w1

@@ -4,7 +4,7 @@
 The DHCP credentials are the PPPoE ones; they are read from the NetworkManager
 profile and never printed. Layout: docs/superpowers/specs/2026-10-11-wan-orange-dhcp-design.md.
 """
-import argparse, configparser, hashlib, os, pathlib, secrets, string, sys
+import argparse, hashlib, os, pathlib, re, secrets, string, sys
 
 ORANGE_PREFIX = bytes(11) + bytes.fromhex("1a0900000558010341")
 VENDOR = b"sagem"
@@ -37,32 +37,59 @@ def values(login, password, livebox, salt=None):
     }
 
 
+KEYFILE_ESCAPES = {b"s": b" ", b"n": b"\n", b"t": b"\t", b"r": b"\r", b"\\": b"\\"}
+
+
+def keyfile_value(profile, section, key):
+    """One value of a NetworkManager keyfile, byte-exact.
+
+    A keyfile is a GKeyFile, not an INI file: the value starts after the first
+    `=` with leading blanks dropped, keeps its trailing blanks, and escapes
+    backslash, leading space, newline, tab and carriage return. configparser
+    trims and does not unescape, which would hash the wrong password.
+    """
+    current = None
+    with open(profile, "rb") as handle:
+        for raw in handle.read().split(b"\n"):
+            line = raw.rstrip(b"\r")
+            if line.startswith(b"[") and line.rstrip().endswith(b"]"):
+                current = line.strip()[1:-1]
+            elif current == section and b"=" in line and not line.lstrip().startswith(b"#"):
+                name, value = line.split(b"=", 1)
+                if name.strip() == key:
+                    return re.sub(rb"\\(.)", lambda m: KEYFILE_ESCAPES.get(m.group(1), m.group(0)),
+                                  value.lstrip(b" \t"))
+    raise KeyError(key.decode())
+
+
 def credentials(profile):
-    cfg = configparser.RawConfigParser()
-    with open(profile, encoding="utf-8") as handle:
-        cfg.read_file(handle)
-    return cfg["pppoe"]["username"].encode(), cfg["pppoe"]["password"].encode()
+    return keyfile_value(profile, b"pppoe", b"username"), keyfile_value(profile, b"pppoe", b"password")
 
 
-def render(family, profile, templates, out, livebox):
+def render(families, profile, templates, out, livebox):
+    """Render every family from ONE salt: Orange wants option 90 and option 11
+    to carry the same bytes, so the two files must come from the same draw."""
     login, password = credentials(profile)
-    name = "dhclient-orange-v%s.conf" % family
-    template = (pathlib.Path(templates) / (name + ".template")).read_text(encoding="utf-8")
-    text = string.Template(template).substitute(values(login, password, livebox))
+    rendered = values(login, password, livebox)
     out = pathlib.Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    target = out / name
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(text)
-    os.chmod(target, 0o600)
+    for family in families:
+        name = "dhclient-orange-v%s.conf" % family
+        template = (pathlib.Path(templates) / (name + ".template")).read_text(encoding="utf-8")
+        text = string.Template(template).substitute(rendered)
+        target = out / name
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(target, 0o600)
 
 
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     cmd = sub.add_parser("render")
-    cmd.add_argument("--family", choices=["4", "6"], required=True)
+    cmd.add_argument("--family", choices=["4", "6"], action="append",
+                     help="render only this family (default: both, from one salt)")
     cmd.add_argument("--profile", default=DEFAULT_PROFILE)
     cmd.add_argument("--templates", default="/usr/local/share/nivuus/orange")
     cmd.add_argument("--out", default="/etc/dhcp/nivuus-orange",
@@ -70,8 +97,8 @@ def main():
     cmd.add_argument("--livebox", type=int, default=5)
     args = parser.parse_args()
     try:
-        render(args.family, args.profile, args.templates, args.out, args.livebox)
-    except (OSError, KeyError) as error:
+        render(args.family or ["4", "6"], args.profile, args.templates, args.out, args.livebox)
+    except (OSError, KeyError, ValueError) as error:
         print("orange_dhcp_options: cannot render: %s" % type(error).__name__, file=sys.stderr)
         return 1
     return 0

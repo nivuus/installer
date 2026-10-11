@@ -7,7 +7,8 @@
 # for any DHCP client, for the kernel's own ARP and ND, and for forwarded
 # traffic, whose TOS would otherwise map to priority 6 (IPTOS_LOWDELAY).
 set -u
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# NIVUUS_TEST_PATH lets the test suite put fakes ahead of the real tools.
+PATH=${NIVUUS_TEST_PATH:+$NIVUUS_TEST_PATH:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 PARENT=${NIVUUS_WAN_PARENT:-enp5s0}
 IF=${NIVUUS_WAN_IF:-$PARENT.832}
 [ -r /etc/default/nivuus-wan-cake ] && . /etc/default/nivuus-wan-cake
@@ -35,7 +36,14 @@ prepare() {
     [ "${NIVUUS_WAN_NO_FIREWALL:-0}" = 1 ] || firewall-cmd --zone=external --add-interface="$IF" || return 1
     mark || return 1
     tc qdisc replace dev "$IF" root cake bandwidth "$RATE" besteffort nat dual-srchost ethernet ether-vlan || return 1
-    ip link set "$IF" up
+    ip link set "$IF" up || return 1
+    # dhclient -6 binds the link-local address at once and exits if duplicate
+    # address detection has not finished ("Can't bind to dhcp address").
+    n=0
+    while [ "$n" -lt 50 ] && { ip -6 addr show dev "$IF" scope link tentative | grep -q inet6 ||
+                               ! ip -6 addr show dev "$IF" scope link | grep -q inet6; }; do
+        sleep 0.1; n=$((n + 1))
+    done
 }
 
 teardown() {
@@ -54,19 +62,26 @@ status() {
 
 # Orange asks for a restart from DISCOVER once the gateway has been silent for
 # 150 s: three consecutive failures of a check run every 50 s.
+#
+# The probe is ARP, as on a Livebox, never ICMP: a gateway may ignore echo
+# requests for ever while routing perfectly, and each restart sends a RELEASE
+# and drops the route. A router cannot ignore ARP and still route.
 check() {
     mkdir -p "$STATE"
     gw=$(ip route show default dev "$IF" 2>/dev/null | awk '{print $3; exit}')
-    if [ -n "$gw" ] && ping -I "$IF" -c 2 -W 3 -q "$gw" >/dev/null 2>&1; then
+    # No default route means no lease yet: the client is still asking and
+    # retries by itself. Restarting it would only add RELEASEs and DISCOVERs.
+    if [ -z "$gw" ]; then rm -f "$STATE/wan-orange.failures"; return 0; fi
+    if arping -q -I "$IF" -c 2 -w 3 "$gw" >/dev/null 2>&1; then
         rm -f "$STATE/wan-orange.failures"; return 0
     fi
     n=$(( $(cat "$STATE/wan-orange.failures" 2>/dev/null || echo 0) + 1 ))
     echo "$n" > "$STATE/wan-orange.failures"
-    echo "wan-orange: gateway ${gw:-unknown} silent, failure $n" >&2
+    echo "wan-orange: gateway $gw silent, failure $n" >&2
     [ "$n" -lt 3 ] && return 0
     rm -f "$STATE/wan-orange.failures"
-    echo "wan-orange: restarting both DHCP clients" >&2
-    systemctl restart nivuus-wan-orange-dhcp4.service nivuus-wan-orange-dhcp6.service
+    echo "wan-orange: rendering fresh options and restarting both DHCP clients" >&2
+    systemctl restart nivuus-wan-orange-options.service nivuus-wan-orange-dhcp4.service nivuus-wan-orange-dhcp6.service
 }
 
 case "${1:-}" in

@@ -66,6 +66,82 @@ class Render(unittest.TestCase):
             self.assertNotEqual(rc.returncode, 0)
             self.assertFalse((tmp / "dhclient-orange-v6.conf").exists())
 
+def render_cli(tmp, profile_bytes, *extra):
+    (tmp / "p.nmconnection").write_bytes(profile_bytes)
+    return subprocess.run([sys.executable, str(ROOT / "scripts/orange_dhcp_options.py"), "render",
+                           "--profile", str(tmp / "p.nmconnection"),
+                           "--templates", str(ROOT / "configs/network/orange"), "--out", str(tmp), *extra],
+                          capture_output=True, text=True)
+
+
+def sent(tmp, family, statement):
+    text = (tmp / ("dhclient-orange-v%s.conf" % family)).read_text()
+    line = [l for l in text.splitlines() if l.startswith("send %s " % statement)][0]
+    return bytes.fromhex(line.split()[-1].rstrip(";").replace(":", ""))
+
+
+class Coherence(unittest.TestCase):
+    """Orange wants option 90 and option 11 to carry the same bytes, and parks
+    or disconnects a client whose two protocols disagree."""
+
+    def test_one_render_gives_both_families_the_same_authentication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            rc = render_cli(tmp, b"[pppoe]\nusername=fti/abcdefg\npassword=secret\n")
+            self.assertEqual(rc.returncode, 0, rc.stderr)
+            self.assertEqual(sent(tmp, "4", "authentication"), sent(tmp, "6", "dhcp6.auth"))
+
+    def test_the_units_render_once_for_both_clients(self):
+        units = ROOT / "configs/systemd"
+        options = (units / "nivuus-wan-orange-options.service").read_text()
+        self.assertIn("nivuus-orange-dhcp-options.py render\n", options)
+        for family in ("4", "6"):
+            unit = (units / ("nivuus-wan-orange-dhcp%s.service" % family)).read_text()
+            self.assertNotIn("ExecStartPre", unit)
+            self.assertIn("Requires=nivuus-wan-orange.service nivuus-wan-orange-options.service", unit)
+
+
+class KeyfileCredentials(unittest.TestCase):
+    """NetworkManager writes a GKeyFile: backslash and leading-space escapes,
+    no trailing-space trimming. The hash must be computed on the real bytes."""
+
+    def digest_of(self, stored, real):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            rc = render_cli(tmp, b"[pppoe]\nusername=fti/abcdefg\npassword=" + stored + b"\n", "--family", "4")
+            self.assertEqual(rc.returncode, 0, rc.stderr)
+            auth = sent(tmp, "4", "authentication")
+        salt, ident, digest = auth[35:51], auth[53:54], auth[54:]
+        self.assertEqual(digest, hashlib.md5(ident + real + salt).digest())
+
+    def test_plain(self):
+        self.digest_of(b"secret", b"secret")
+
+    def test_backslash_is_unescaped(self):
+        self.digest_of(rb"a\\b", rb"a\b")
+
+    def test_leading_space_escape(self):
+        self.digest_of(rb"\sa", b" a")
+
+    def test_trailing_space_is_kept(self):
+        self.digest_of(b"a ", b"a ")
+
+    def test_hash_percent_dollar_semicolon_and_utf8_are_literal(self):
+        self.digest_of("p#1;%s$xé".encode(), "p#1;%s$xé".encode())
+
+
+class Units(unittest.TestCase):
+    def test_route_metric_reaches_dhclient_script(self):
+        # dhclient builds its script's environment itself: only -e gets through.
+        unit = (ROOT / "configs/systemd/nivuus-wan-orange-dhcp4.service").read_text()
+        self.assertIn(" -e IF_METRIC=50 ", unit)
+        self.assertNotIn("Environment=IF_METRIC", unit)
+
+    def test_a_failed_preparation_is_retried(self):
+        unit = (ROOT / "configs/systemd/nivuus-wan-orange.service").read_text()
+        self.assertIn("Restart=on-failure", unit)
+
+
 class AppArmorPaths(unittest.TestCase):
     """dhclient is confined (usr.sbin.dhclient): outside these globs it reads
     nothing and says nothing, then runs on its defaults. The wire test proves
