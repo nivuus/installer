@@ -79,3 +79,9 @@ jobs:
       # added to cover, all run here.
       - name: Run the package engine suites
         run: make -C installer test-packages CONSOLE_SUITES=0
+
+  dependabot-auto-merge:
+    uses: nivuus/.github/.github/workflows/dependabot-auto-merge.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
