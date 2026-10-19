@@ -1110,6 +1110,11 @@ Les quinze fichiers portent désormais `policy: allow-fr-file` **avec un motif
 écrit**, l'échappatoire que `check-english.sh` annonce lui-même. Même nuance
 qu'en CI-1 : exception nommée, pas contrôle baissé.
 
+**Payé en partie le 2026-10-19 :** `console/host/handle-vm-start.sh` a été réécrit
+en anglais en corrigeant son réveil à froid (voir
+`docs/claude/host-stability-incidents.md`) ; il ne porte plus l'exemption.
+Restent quatorze fichiers.
+
 **Ce qui reste dû :** la traduction. Elle n'a pas été faite ici parce que ces
 commentaires portent des **mesures** — des dates, des versions, des observations
 faites sur cette machine (« `fuser` ne voit PAS les process conteneurisés,
