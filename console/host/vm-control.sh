@@ -7,8 +7,9 @@
 # always the one this host owns, so a client cannot name another target.
 #
 #   wake -> ask systemd to start nivuus-vm-wake.service (handle-vm-start.sh).
-#           --no-block: handle-vm-start.sh waits up to 180 s for the guest IP,
-#           and the caller only needs to know the start was REQUESTED.
+#           --no-block: handle-vm-start.sh waits for the VM to start and for
+#           the libvirt hook's forward-ports, and the caller only needs to
+#           know the start was REQUESTED.
 #   busy -> record "a desk app window is open right now" for
 #           vm-idle-shutdown.sh, which reads it on its next pass.
 

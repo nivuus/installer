@@ -259,13 +259,13 @@ file by file:
   nothing substitutes it. On a machine whose GPU sits elsewhere, the rebind
   loop simply times out with a `WARNING` — the host silently never gets its
   card back.
-- **The two halves of the wake path disagree about the VM's bridge.**
-  `handle-vm-start.sh` sets `VM_INTERFACE="localBridge"` (still annotated
-  `<<< REMPLACEZ CECI`), which the engine gives `192.168.0.1/24`, while the
-  rest of the chain pins the VM to `192.168.3.2` — `internalBridge`
-  (`MANAGED_VM_IP` in both `rules.sh`, `VM_IP` in `vm-idle-shutdown.sh`,
-  `GUEST_IP` in `guest/winrm_exec.py`, which `winvm` calls). The address wait therefore looks on the wrong
-  bridge.
+- **The VM's address is repeated, not shared.** The chain pins the VM to
+  `192.168.3.2` on `internalBridge` in four places: `MANAGED_VM_IP` in both
+  `rules.sh`, `VM_IP` in `vm-idle-shutdown.sh`, `GUEST_IP` in
+  `guest/winrm_exec.py` (which `winvm` calls). `handle-vm-start.sh` used to
+  look it up itself, on the wrong bridge and through a `virsh domifaddr` that
+  cannot answer here; since 2026-10-19 it no longer needs it and leaves the
+  forward-ports to the `started/begin` hook.
 - **Hooks reference `/opt/nivuus/…` paths that do not exist on a fresh
   target.** `bind-vfio-gpu.sh` and `rebind-host-gpu.sh` drive
   `docker compose -f /opt/nivuus/{ollama,media-manager}/docker-compose.yml`,

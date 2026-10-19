@@ -9,6 +9,14 @@ Historique des versions et modifications de Nivuus.
   pré-requis. Les installations sont ordonnées topologiquement, et un
   pré-requis manquant est refusé au wizard plutôt qu'en cours d'installation.
 
+### Corrigé
+- Réveil de la VM à froid : `handle-vm-start.sh` cherchait l'adresse de
+  la VM par `virsh domifaddr`, qui ne répond jamais sur ce pont, et appelait
+  `firewall-cmd --wait`, refusé par firewalld 2.x. Chaque réveil d'une VM
+  éteinte réussissait puis sortait en erreur au bout de 180 s, laissant
+  `nivuus-vm-wake.service` en échec. Le script laisse désormais les
+  redirections au hook libvirt `started/begin` et vérifie qu'elles sont posées.
+
 ### Modifié
 - Une clé inconnue sous `requires:` est désormais une erreur de manifeste.
   Aucun manifeste existant n'est concerné.

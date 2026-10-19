@@ -85,15 +85,16 @@ main()'s READY branch.
 
 The IP-discovery method is the host's own neighbour table, keyed by the
 domain's MAC address (see find_guest_ip()) - NOT virsh domifaddr, which
-handle-vm-start.sh also uses but which cannot ever answer on this topology.
+cannot ever answer on this topology.
 Measured on the running production VM (2026-08-28): `--source agent` fails
 (the domain declares no <channel>, so no guest agent ever answers),
 `--source lease` and `--source arp` both return empty tables, and `virsh
 net-list --all` declares no libvirt network at all - the domain sits on an
 externally managed bridge, not a libvirt one with a lease file of its own.
-handle-vm-start.sh carries the same defect; it goes unnoticed there only
-because started/begin/rules.sh installs the forward-ports unconditionally,
-regardless of whether the IP lookup found anything.
+handle-vm-start.sh carried the same defect until 2026-10-19: every cold
+start waited 180 s for an address that never came and exited 1, after
+started/begin/rules.sh had already installed the forward-ports. It no longer
+looks the address up at all.
 
 Deployed to /usr/local/sbin/ by console/hooks/install.py, armed (as a timer
 only - nivuus-guest-ready.service carries no [Install] section of its own,

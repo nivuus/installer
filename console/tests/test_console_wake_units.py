@@ -86,8 +86,9 @@ for port in ("47984", "47989"):
                f"/usr/local/sbin/vm-wake-gate.py {port}")
     get_safely(svc_unit, "Service", "Type",
                f"{port}: oneshot", "oneshot")
-    # The gate waits on the VM's IP for up to 180 s; a shorter deadline kills
-    # a wake that was working.
+    # The gate runs handle-vm-start.sh, which can wait 90 s for a
+    # transitional state to settle, then for the VM's boot and its hook; a
+    # short deadline kills a wake that was working.
     get_safely(svc_unit, "Service", "TimeoutStartSec",
                f"{port}: start deadline leaves room for a VM boot", "300")
 
