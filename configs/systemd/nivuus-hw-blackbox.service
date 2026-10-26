@@ -11,7 +11,9 @@ Type=simple
 ExecStart=/usr/local/sbin/nivuus-hw-blackbox.py run
 Restart=always
 RestartSec=5
-# Drift alerts go to stderr so journald records them at error priority.
+# Drift alerts go to stderr, which journald stores at priority 6 (info) and,
+# like any non-CRIT message, syncs only every SyncIntervalSec - kept at 5 s by
+# journald.conf.d/50-nivuus-forensics.conf. The CSV itself is fsynced per line.
 StandardError=journal
 # The whole point is to still be writing while the box is saturated, so keep it
 # ahead of the transcoding load and out of reach of the OOM killer.
