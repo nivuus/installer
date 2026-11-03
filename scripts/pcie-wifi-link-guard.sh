@@ -98,9 +98,9 @@ do_apply() {
 
 # --- check -----------------------------------------------------------------
 # AER counters are the leading indicator: the 04/08 freeze was preceded by
-# correctable errors on the endpoint. Anything non-zero is logged at error
-# priority so journald syncs it to disk immediately — a buffered message would
-# be lost in the freeze it is meant to explain.
+# correctable errors on the endpoint. Anything non-zero goes to stderr; journald
+# stores it at priority 6 and syncs it within SyncIntervalSec (5 s, see
+# configs/systemd/journald.conf.d/50-nivuus-forensics.conf), not immediately.
 counters_of() {
     local dev="$1" kind f
     for kind in correctable nonfatal fatal; do

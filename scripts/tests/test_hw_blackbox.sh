@@ -46,6 +46,34 @@ EOF
 
 mkdir -p "$TMP/edac"   # present but with no controller, like this board
 
+# Per-device interrupt counts. Both WiFi cards share one /proc/interrupts label
+# ("ath10k_pci"), so the device has to be resolved through its PCI address and
+# msi_irqs, never by name. The legacy-INTx device (ahci) has no msi_irqs and
+# only an irq file. A non-device entry (new_id) must be skipped.
+cat >> "$TMP/interrupts" <<'EOF'
+ 230:         10         20         30  IR-PCI-MSI-0000:0a:00.0    0-edge      ath10k_pci
+ 231:        100        200        300  IR-PCI-MSI-0000:0b:00.0    0-edge      ath10k_pci
+ 232:          7          0          0  IR-PCI-MSI-0000:01:00.0    0-edge      nvidia
+  16:          1          1          1   IO-APIC   16-fasteoi   ahci[0000:00:17.0]
+EOF
+PCI="$TMP/pci"
+for d in ath10k_pci/0000:0a:00.0:230 ath10k_pci/0000:0b:00.0:231 nvidia/0000:01:00.0:232; do
+    path=${d%:*}; irq=${d##*:}
+    mkdir -p "$PCI/drivers/$path/msi_irqs"; touch "$PCI/drivers/$path/msi_irqs/$irq"
+done
+mkdir -p "$PCI/drivers/ahci/0000:00:17.0"; echo 16 > "$PCI/drivers/ahci/0000:00:17.0/irq"
+touch "$PCI/drivers/ahci/new_id"
+
+# Block devices: in-flight requests, the state a hung disk or controller leaves.
+for d in sdb:"       2        1" nvme0n1:"       0        0" dm-0:"       9        9"; do
+    mkdir -p "$TMP/block/${d%%:*}"; echo "${d#*:}" > "$TMP/block/${d%%:*}/inflight"
+done
+mkdir -p "$TMP/pressure"
+printf 'some avg10=6.03 avg60=5.92 avg300=2.72 total=1\nfull avg10=5.43 avg60=5.19 avg300=2.37 total=1\n' > "$TMP/pressure/io"
+printf 'some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.25 avg60=0.00 avg300=0.00 total=1\n' > "$TMP/pressure/memory"
+printf 'MemTotal:       65000000 kB\nMemFree:         1000000 kB\nMemAvailable:   38067012 kB\n' > "$TMP/meminfo"
+export NIVUUS_PCI="$PCI" NIVUUS_BLOCK="$TMP/block" NIVUUS_PSI="$TMP/pressure" NIVUUS_MEMINFO="$TMP/meminfo"
+
 export NIVUUS_HWMON_NAME=nct6798
 export NIVUUS_NVME_HWMON_NAME=nvme
 export NIVUUS_INTERRUPTS="$TMP/interrupts"
@@ -89,6 +117,39 @@ check "sums MCP across CPUs (5+6+6)"      ",17," "$out"
 check "sums TRM across CPUs (967x2+974)"  "2908" "$out"
 check "memory-error columns exist"        "edac_ce,edac_ue" "$out"
 check "memory errors read as blank here"  ",," "$(sed -n 2p <<<"$out")"
+
+echo "== device activity: interrupts, in-flight I/O, pressure, memory =="
+hdr=$(sed -n 1p <<<"$out"); row=$(sed -n 2p <<<"$out")
+col() { python3 -c '
+import sys; h=sys.argv[1].split(","); r=sys.argv[2].split(",")
+print(r[h.index(sys.argv[3])] if sys.argv[3] in h else "MISSING")' "$hdr" "$row" "$1"; }
+check "the two WiFi cards are told apart"  "60"   "$(col irq_ath10k_pci_0a:00.0)"
+check "second card counted on its own IRQ" "600"  "$(col irq_ath10k_pci_0b:00.0)"
+check "GPU interrupts recorded"            "7"    "$(col irq_nvidia_01:00.0)"
+check "legacy INTx device read from irq"   "3"    "$(col irq_ahci_00:17.0)"
+check_absent "driver control files skipped" "new_id" "$hdr"
+check "in-flight requests summed (2+1)"    "3"    "$(col inflight_sdb)"
+check_absent "device-mapper volumes skipped" "inflight_dm-0" "$hdr"
+check "io full pressure (avg10)"           "5.43" "$(col psi_io_full)"
+check "memory full pressure (avg10)"       "0.25" "$(col psi_mem_full)"
+check "available memory in MiB"            "37175" "$(col mem_avail_mb)"
+
+echo "== a changed column set starts a new file instead of mixing layouts =="
+rm -f "$TMP/bb.csv"*
+echo "ts,in0,old_layout" > "$TMP/bb.csv"; echo "1.0,1,2" >> "$TMP/bb.csv"
+timeout 5 python3 -c '
+import os, sys, importlib.util, threading
+spec = importlib.util.spec_from_file_location("bb", os.environ["BB_PATH"])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+mod.HWMON = os.environ["FAKE_HWMON"]
+threading.Timer(0.5, lambda: os._exit(0)).start()
+sys.argv = ["bb", "run"]
+mod.main()
+' >/dev/null 2>&1
+check "the old layout is kept aside"  "old_layout" "$(head -1 "$TMP/bb.csv.1" 2>/dev/null)"
+check_absent "the new file has only the new header" "old_layout" "$(cat "$TMP/bb.csv")"
+rm -f "$TMP/bb.csv"*
 
 echo "== a rising machine-check count is reported =="
 sed -i 's/^ MCE:          0          0          0/ MCE:          0          0          1/' "$TMP/interrupts"

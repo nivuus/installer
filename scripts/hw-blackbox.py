@@ -11,6 +11,14 @@ This records the analogue state the freeze is suspected to come from (PSU rails,
 package power, temperatures, fans) and fsyncs every sample, so the last line on
 disk is the last moment the machine was alive.
 
+Since 2026-10-23 it also records what the devices were doing in that last
+second: per-device interrupt counts (the two WiFi cards, the GPU, SATA, NVMe,
+USB, NICs), requests in flight on each disk, pressure stall averages and
+available memory. Three freezes in 34 h on 21-23/10 left flat rails and no
+kernel message; a device that stopped interrupting, a disk holding requests it
+never completed, or a stall building up is the next layer that can still be
+seen from here.
+
 Deliberately mapping-agnostic: nct6798 exposes in0..in14 as raw millivolts with
 no labels, and the board-specific multipliers (+12V is probably in1 x12, +5V
 probably in4 x5) are a guess. Rather than bake that guess in, every rail is
@@ -34,6 +42,16 @@ NVME_CHIP = os.environ.get("NIVUUS_NVME_HWMON_NAME", "nvme")
 EDAC = os.environ.get("NIVUUS_EDAC", "/sys/devices/system/edac/mc")
 INTERRUPTS = os.environ.get("NIVUUS_INTERRUPTS", "/proc/interrupts")
 RAPL = os.environ.get("NIVUUS_RAPL", "/sys/class/powercap/intel-rapl:0/energy_uj")
+PCI = os.environ.get("NIVUUS_PCI", "/sys/bus/pci")
+BLOCK = os.environ.get("NIVUUS_BLOCK", "/sys/block")
+PSI = os.environ.get("NIVUUS_PSI", "/proc/pressure")
+MEMINFO = os.environ.get("NIVUUS_MEMINFO", "/proc/meminfo")
+# Drivers whose devices get one interrupt column each. Matched by driver, never
+# by the /proc/interrupts label: both QCA9984 cards are labelled "ath10k_pci",
+# so only the PCI address tells them apart.
+IRQ_DRIVERS = os.environ.get(
+    "NIVUUS_BLACKBOX_IRQ_DRIVERS",
+    "ath10k_pci,nvidia,vfio-pci,ahci,nvme,xhci_hcd,igc,ixgbe,i915").split(",")
 OUT = os.environ.get("NIVUUS_BLACKBOX", "/var/log/nivuus-blackbox.csv")
 STATE = os.environ.get("NIVUUS_BLACKBOX_STATE", "/var/lib/nivuus/blackbox-baseline.json")
 INTERVAL = float(os.environ.get("NIVUUS_BLACKBOX_INTERVAL", "1"))
@@ -61,19 +79,114 @@ FANS = {"fan1_input": "fan1", "fan2_input": "fan2"}
 IRQ_COUNTERS = ("MCE", "MCP", "THR", "TRM")
 
 
-def irq_totals():
-    """Sum each counter in IRQ_COUNTERS across all CPUs."""
-    totals = dict.fromkeys(IRQ_COUNTERS, None)
+def read_interrupts():
+    """Every /proc/interrupts line summed across CPUs, keyed by its first field.
+
+    Only the per-CPU columns are summed: the trailing fields can be numeric too
+    (an IO-APIC pin, an MSI vector), and adding them would corrupt the count.
+    """
+    totals = {}
     try:
         with open(INTERRUPTS) as fh:
+            ncpu = len(fh.readline().split())
             for line in fh:
                 name, _, rest = line.partition(":")
-                key = name.strip()
-                if key in totals:
-                    totals[key] = sum(int(v) for v in rest.split() if v.isdigit())
+                counts = rest.split()[:ncpu]
+                if counts and all(v.isdigit() for v in counts):
+                    totals[name.strip()] = sum(int(v) for v in counts)
     except OSError:
         pass
     return totals
+
+
+def irq_totals(table):
+    """The counters in IRQ_COUNTERS, None when the line is absent."""
+    return {key: table.get(key) for key in IRQ_COUNTERS}
+
+
+def irq_devices():
+    """(column, device directory) for every bound device of IRQ_DRIVERS."""
+    found = []
+    for driver in IRQ_DRIVERS:
+        base = os.path.join(PCI, "drivers", driver)
+        try:
+            entries = sorted(os.listdir(base))
+        except OSError:
+            continue
+        for addr in entries:
+            # Only PCI addresses: the driver directory also holds bind/new_id.
+            if addr.count(":") == 2 and "." in addr:
+                found.append(("irq_%s_%s" % (driver, addr.split(":", 1)[1]),
+                              os.path.join(base, addr)))
+    return found
+
+
+def device_irq_count(path, table):
+    """Interrupts a device has taken, from its MSI vectors or its legacy line.
+
+    Resolved at every sample, not once: a driver reload (the GPU moving to
+    vfio-pci at VM start) hands out new vectors, and a device that is gone
+    reads blank rather than as the old count frozen in place.
+    """
+    try:
+        irqs = os.listdir(os.path.join(path, "msi_irqs"))
+    except OSError:
+        irqs = []
+    if not irqs:
+        legacy = read_int(os.path.join(path, "irq"))
+        irqs = [str(legacy)] if legacy else []
+    counts = [table[i] for i in irqs if i in table]
+    return str(sum(counts)) if counts else ""
+
+
+def block_devices():
+    """Whole disks only: dm, loop and zram volumes just mirror them."""
+    try:
+        names = sorted(os.listdir(BLOCK))
+    except OSError:
+        return []
+    return [n for n in names if not n.startswith(("dm-", "loop", "zram", "ram"))]
+
+
+def inflight(dev):
+    """Read + write requests issued to the device and not yet completed."""
+    try:
+        with open(os.path.join(BLOCK, dev, "inflight")) as fh:
+            return str(sum(int(v) for v in fh.read().split()))
+    except (OSError, ValueError):
+        return ""
+
+
+# (column, /proc/pressure file, line). "full" = every task stalled at once,
+# the signature of the 2026-08-22 swap outage; cpu has no meaningful "full".
+PSI_FIELDS = (("psi_cpu_some", "cpu", "some"), ("psi_io_full", "io", "full"),
+              ("psi_mem_full", "memory", "full"))
+
+
+def psi(resource, kind):
+    """The avg10 figure of one pressure line."""
+    try:
+        with open(os.path.join(PSI, resource)) as fh:
+            for line in fh:
+                fields = line.split()
+                if fields and fields[0] == kind:
+                    for field in fields[1:]:
+                        if field.startswith("avg10="):
+                            return field[6:]
+    except OSError:
+        pass
+    return ""
+
+
+def mem_available_mb():
+    try:
+        with open(MEMINFO) as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return str(round(int(line.split()[1]) / 1024))
+    except (OSError, ValueError, IndexError):
+        pass
+    return ""
 
 
 def edac_totals():
@@ -224,9 +337,9 @@ class Baseline:
                  "(%d mV vs normal %d-%d mV)" % (rail, drift, value, lo, hi))
 
 
-def rotate(path):
+def rotate(path, force=False):
     try:
-        if os.path.getsize(path) < MAX_BYTES:
+        if os.path.getsize(path) < MAX_BYTES and not force:
             return
     except OSError:
         return
@@ -238,6 +351,15 @@ def rotate(path):
 
 
 def open_log(path, header):
+    # A file written with other columns (an older version, a device that has
+    # since appeared or gone) is set aside whole: rows of two layouts under one
+    # header would be read against the wrong columns.
+    try:
+        with open(path) as fh:
+            if fh.readline().rstrip("\n") not in ("", header):
+                rotate(path, force=True)
+    except OSError:
+        pass
     fresh = not os.path.exists(path) or os.path.getsize(path) == 0
     fh = open(path, "a")
     if fresh:
@@ -254,9 +376,12 @@ def main():
 
     rails = rail_names(chip)
     nvme = find_chip(NVME_CHIP)
+    devices, disks = irq_devices(), block_devices()
     columns = (["ts"] + rails + list(TEMPS.values()) + list(FANS.values())
                + ["nvme_c", "watts", "load1"] + [c.lower() for c in IRQ_COUNTERS]
-               + ["edac_ce", "edac_ue"])
+               + ["edac_ce", "edac_ue"] + [name for name, _ in devices]
+               + ["inflight_" + d for d in disks] + [f[0] for f in PSI_FIELDS]
+               + ["mem_avail_mb"])
     header = ",".join(columns)
     power, baseline = Power(), Baseline(STATE)
     seen_irq = {}
@@ -282,7 +407,8 @@ def main():
             row.append(open("/proc/loadavg").read().split()[0])
         except OSError:
             row.append("")
-        for name, total in irq_totals().items():
+        table = read_interrupts()
+        for name, total in irq_totals(table).items():
             row.append("" if total is None else str(total))
             # A machine check that was not there a second ago is a hardware
             # fault the CPU itself reported — always worth a journal entry.
@@ -292,6 +418,10 @@ def main():
                     warn("blackbox: %s counter rose %d -> %d" % (name, before, total))
                 seen_irq[name] = total
         row.extend(edac_totals())
+        row.extend(device_irq_count(path, table) for _, path in devices)
+        row.extend(inflight(d) for d in disks)
+        row.extend(psi(resource, kind) for _, resource, kind in PSI_FIELDS)
+        row.append(mem_available_mb())
         return ",".join(row)
 
     if mode == "once":
