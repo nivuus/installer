@@ -22,6 +22,8 @@ set_rail() { echo "$2" > "$CHIP/in${1}_input"; }
 for i in 0 1 4; do set_rail "$i" 1000; done
 echo 49000 > "$CHIP/temp1_input"
 echo 69000 > "$CHIP/temp8_input"
+echo 61500 > "$CHIP/temp2_input"   # CPUTIN
+echo 55000 > "$CHIP/temp3_input"   # AUXTIN0
 echo 75000 > "$CHIP/temp11_input"
 echo 1185  > "$CHIP/fan1_input"
 echo 1638  > "$CHIP/fan2_input"
@@ -43,6 +45,34 @@ for dimm in 6:10-0053:66000 5:10-0051:68500; do
     echo "$temp" > "$TMP/sys/hwmon$idx/temp1_input"
     ln -s "$TMP/i2c/$addr" "$TMP/sys/hwmon$idx/device"
 done
+
+# Slow sensors: two ath10k radios (named by PCI address), two drivetemp disks
+# (named by block device, through the SCSI device), one NVIDIA GPU listed from
+# the PCI bus and read through a fake nvidia-smi.
+for w in 8/0000:0a:00.0/55000 7/0000:0b:00.0/48000; do
+    IFS=/ read -r idx addr temp <<<"$w"
+    mkdir -p "$TMP/sys/hwmon$idx" "$TMP/pcidev/$addr"
+    echo ath10k_hwmon > "$TMP/sys/hwmon$idx/name"
+    echo "$temp" > "$TMP/sys/hwmon$idx/temp1_input"
+    ln -s "$TMP/pcidev/$addr" "$TMP/sys/hwmon$idx/device"
+done
+for d in 10/4:0:0:0/sda/26000 11/6:0:0:0/sdb/33000; do
+    IFS=/ read -r idx scsi disk temp <<<"$d"
+    mkdir -p "$TMP/sys/hwmon$idx" "$TMP/scsi/$scsi/block/$disk"
+    echo drivetemp > "$TMP/sys/hwmon$idx/name"
+    echo "$temp" > "$TMP/sys/hwmon$idx/temp1_input"
+    ln -s "$TMP/scsi/$scsi" "$TMP/sys/hwmon$idx/device"
+done
+for dev in 0000:01:00.0/0x10de/0x030000 0000:00:17.0/0x8086/0x010601; do
+    IFS=/ read -r addr vendor class <<<"$dev"
+    mkdir -p "$TMP/pci/devices/$addr"
+    echo "$vendor" > "$TMP/pci/devices/$addr/vendor"
+    echo "$class" > "$TMP/pci/devices/$addr/class"
+done
+printf '#!/bin/sh\n[ -n "${FAKE_SMI_HANG:-}" ] && exec sleep "$FAKE_SMI_HANG"\necho "00000000:01:00.0, 41"\n' > "$TMP/nvidia-smi"
+chmod +x "$TMP/nvidia-smi"
+touch "$TMP/persistenced.socket"
+export NIVUUS_NVIDIA_SMI="$TMP/nvidia-smi" NIVUUS_PERSISTENCED_SOCKET="$TMP/persistenced.socket"
 
 # /proc/interrupts is per-CPU columns that must be summed, and carries plenty of
 # lines that look similar (MCP vs MCE) — hence a realistic fake.
@@ -99,6 +129,7 @@ PASS=0 FAIL=0
 ok()  { PASS=$((PASS+1)); echo "  ok   — $1"; }
 bad() { FAIL=$((FAIL+1)); echo "  FAIL — $1"; echo "         got: $2"; }
 check()        { case "$3" in *"$2"*) ok "$1";; *) bad "$1" "$3";; esac; }
+is_blank() { [ -z "$2" ] && ok "$1" || bad "$1" "'$2'"; }
 check_absent() { case "$3" in *"$2"*) bad "$1" "$3";; *) ok "$1";; esac; }
 
 # The module reads HWMON at import time from a module-level constant, so the
@@ -149,6 +180,43 @@ echo "== DDR5 module temperatures, one column per module =="
 check "module at 10-0051 in degrees"       "68.5" "$(col dimm_10-0051_c)"
 check "module at 10-0053 in degrees"       "66.0" "$(col dimm_10-0053_c)"
 check "modules ordered by I2C address"     "dimm_10-0051_c,dimm_10-0053_c" "$hdr"
+
+echo "== board probes and slow device sensors =="
+check "CPUTIN recorded"                    "61.5" "$(col cputin)"
+check "AUXTIN0 recorded"                   "55.0" "$(col auxtin0)"
+check "WiFi radio named by PCI address"    "55.0" "$(col wifi_0a:00.0_c)"
+check "second radio on its own column"     "48.0" "$(col wifi_0b:00.0_c)"
+check "SATA disk named by block device"    "26.0" "$(col drive_sda_c)"
+check "second disk on its own column"      "33.0" "$(col drive_sdb_c)"
+check "GPU temperature via nvidia-smi"     "41.0" "$(col gpu_01:00.0_c)"
+check_absent "non-NVIDIA PCI device skipped" "gpu_00:17.0" "$hdr"
+
+echo "== nvidia-smi only runs while persistenced holds the card =="
+mv "$TMP/persistenced.socket" "$TMP/persistenced.away"
+out=$(sample once); hdr=$(sed -n 1p <<<"$out"); row=$(sed -n 2p <<<"$out")
+check "GPU column kept while the VM owns the card" "gpu_01:00.0_c" "$hdr"
+is_blank "GPU value blank while the VM owns the card" "$(col gpu_01:00.0_c)"
+mv "$TMP/persistenced.away" "$TMP/persistenced.socket"
+
+echo "== a hung slow sensor never stalls the per-second record =="
+rm -f "$TMP/bb.csv"*
+FAKE_SMI_HANG=3 timeout 5 python3 -c '
+import os, sys, importlib.util, threading
+spec = importlib.util.spec_from_file_location("bb", os.environ["BB_PATH"])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+mod.HWMON = os.environ["FAKE_HWMON"]
+threading.Timer(1.0, lambda: os._exit(0)).start()
+sys.argv = ["bb", "run"]
+mod.main()
+' >/dev/null 2>&1
+rows=$(($(wc -l < "$TMP/bb.csv") - 1))
+[ "$rows" -ge 20 ] && ok "kept sampling while nvidia-smi hung ($rows rows)" \
+                   || bad "kept sampling while nvidia-smi hung" "$rows rows"
+hdr=$(head -1 "$TMP/bb.csv"); row=$(tail -1 "$TMP/bb.csv")
+is_blank "hung GPU reads blank" "$(col gpu_01:00.0_c)"
+check "other slow sensors still read" "33.0" "$(col drive_sdb_c)"
+rm -f "$TMP/bb.csv"*
 
 echo "== a changed column set starts a new file instead of mixing layouts =="
 rm -f "$TMP/bb.csv"*
