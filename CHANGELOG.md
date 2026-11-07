@@ -21,6 +21,12 @@ Historique des versions et modifications de Nivuus.
 - Une clé inconnue sous `requires:` est désormais une erreur de manifeste.
   Aucun manifeste existant n'est concerné.
 
+### Supprimé
+- `scripts/ups-shutdown.sh` : il n'était déployé par rien, et sa copie
+  attendait une VM nommée `win10` au lieu de `Windows`. Le script d'arrêt
+  sur batterie est désormais livré par le paquet `nivuus/mqtt`, dont l'agent
+  et `upsmon` l'appellent (`/opt/mqtt-system-agent/scripts/ups-shutdown.sh`).
+
 ## [2.1.0] - 2026-04-09
 
 ### Optimisé
