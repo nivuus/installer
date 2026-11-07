@@ -39,6 +39,10 @@ import time
 HWMON = "/sys/class/hwmon"
 CHIP = os.environ.get("NIVUUS_HWMON_NAME", "nct6798")
 NVME_CHIP = os.environ.get("NIVUUS_NVME_HWMON_NAME", "nvme")
+# DDR5 modules expose their SPD hub's sensor as one hwmon each. Under load in
+# this case they sit above their own 55 C warning threshold (measured
+# 2026-11-07), and nothing recorded them before.
+DIMM_CHIP = os.environ.get("NIVUUS_DIMM_HWMON_NAME", "spd5118")
 EDAC = os.environ.get("NIVUUS_EDAC", "/sys/devices/system/edac/mc")
 INTERRUPTS = os.environ.get("NIVUUS_INTERRUPTS", "/proc/interrupts")
 RAPL = os.environ.get("NIVUUS_RAPL", "/sys/class/powercap/intel-rapl:0/energy_uj")
@@ -247,6 +251,30 @@ def find_chip(name=None):
     return None
 
 
+def dimm_sensors():
+    """(column, temp1_input path) for every DDR5 module, ordered by I2C address.
+
+    The column carries the SPD hub's address (`10-0051`), not the hwmon index,
+    so a module keeps its column across boots and kernel enumeration order.
+    """
+    try:
+        entries = os.listdir(HWMON)
+    except OSError:
+        return []
+    found = []
+    for entry in entries:
+        path = os.path.join(HWMON, entry)
+        try:
+            with open(os.path.join(path, "name")) as fh:
+                if fh.read().strip() != DIMM_CHIP:
+                    continue
+        except OSError:
+            continue
+        address = os.path.basename(os.path.realpath(os.path.join(path, "device")))
+        found.append(("dimm_%s_c" % address, os.path.join(path, "temp1_input")))
+    return sorted(found)
+
+
 def rail_names(chip):
     if not chip:
         return []
@@ -376,12 +404,12 @@ def main():
 
     rails = rail_names(chip)
     nvme = find_chip(NVME_CHIP)
-    devices, disks = irq_devices(), block_devices()
+    devices, disks, dimms = irq_devices(), block_devices(), dimm_sensors()
     columns = (["ts"] + rails + list(TEMPS.values()) + list(FANS.values())
                + ["nvme_c", "watts", "load1"] + [c.lower() for c in IRQ_COUNTERS]
                + ["edac_ce", "edac_ue"] + [name for name, _ in devices]
                + ["inflight_" + d for d in disks] + [f[0] for f in PSI_FIELDS]
-               + ["mem_avail_mb"])
+               + ["mem_avail_mb"] + [name for name, _ in dimms])
     header = ",".join(columns)
     power, baseline = Power(), Baseline(STATE)
     seen_irq = {}
@@ -422,6 +450,9 @@ def main():
         row.extend(inflight(d) for d in disks)
         row.extend(psi(resource, kind) for _, resource, kind in PSI_FIELDS)
         row.append(mem_available_mb())
+        for _, path in dimms:
+            value = read_int(path)
+            row.append("" if value is None else "%.1f" % (value / 1000.0))
         return ",".join(row)
 
     if mode == "once":

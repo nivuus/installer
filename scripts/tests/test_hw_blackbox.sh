@@ -33,6 +33,17 @@ mkdir -p "$TMP/sys/hwmon3"
 echo nvme  > "$TMP/sys/hwmon3/name"
 echo 59000 > "$TMP/sys/hwmon3/temp1_input"
 
+# One spd5118 hwmon per DDR5 module, named after its SPD hub's I2C address. The
+# indexes are deliberately out of address order: the column must follow the
+# module, not whichever hwmon number the kernel handed out this boot.
+for dimm in 6:10-0053:66000 5:10-0051:68500; do
+    IFS=: read -r idx addr temp <<<"$dimm"
+    mkdir -p "$TMP/sys/hwmon$idx" "$TMP/i2c/$addr"
+    echo spd5118 > "$TMP/sys/hwmon$idx/name"
+    echo "$temp" > "$TMP/sys/hwmon$idx/temp1_input"
+    ln -s "$TMP/i2c/$addr" "$TMP/sys/hwmon$idx/device"
+done
+
 # /proc/interrupts is per-CPU columns that must be summed, and carries plenty of
 # lines that look similar (MCP vs MCE) — hence a realistic fake.
 cat > "$TMP/interrupts" <<'EOF'
@@ -133,6 +144,11 @@ check_absent "device-mapper volumes skipped" "inflight_dm-0" "$hdr"
 check "io full pressure (avg10)"           "5.43" "$(col psi_io_full)"
 check "memory full pressure (avg10)"       "0.25" "$(col psi_mem_full)"
 check "available memory in MiB"            "37175" "$(col mem_avail_mb)"
+
+echo "== DDR5 module temperatures, one column per module =="
+check "module at 10-0051 in degrees"       "68.5" "$(col dimm_10-0051_c)"
+check "module at 10-0053 in degrees"       "66.0" "$(col dimm_10-0053_c)"
+check "modules ordered by I2C address"     "dimm_10-0051_c,dimm_10-0053_c" "$hdr"
 
 echo "== a changed column set starts a new file instead of mixing layouts =="
 rm -f "$TMP/bb.csv"*
