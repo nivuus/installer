@@ -5,6 +5,11 @@ Historique des versions et modifications de Nivuus.
 ## [Non publié]
 
 ### Ajouté
+- Boîte noire : températures de tous les composants qui en exposent une —
+  sondes CPUTIN et AUXTIN0 de la carte mère, cartes Wi-Fi ath10k, disques
+  SATA (module `drivetemp`, chargé au démarrage) et GPU NVIDIA. Les capteurs
+  lents sont interrogés toutes les 30 s hors du fil d'échantillonnage : un
+  périphérique bloqué laisse un trou, il ne fige plus l'enregistrement.
 - Contrat `nivuus.dev/v1` : `requires.packages` déclare les packages
   pré-requis. Les installations sont ordonnées topologiquement, et un
   pré-requis manquant est refusé au wizard plutôt qu'en cours d'installation.

@@ -19,6 +19,11 @@ kernel message; a device that stopped interrupting, a disk holding requests it
 never completed, or a stall building up is the next layer that can still be
 seen from here.
 
+Since 2026-11-07 it also records every temperature the board exposes beyond
+the CPU: the DDR5 modules, CPUTIN and AUXTIN0 (likely the VRM), both WiFi
+radios, the SATA disks (drivetemp) and the GPU. The device readers live in
+hw_blackbox_temps.py; the slow ones are polled off the sampling thread.
+
 Deliberately mapping-agnostic: nct6798 exposes in0..in14 as raw millivolts with
 no labels, and the board-specific multipliers (+12V is probably in1 x12, +5V
 probably in4 x5) are a guess. Rather than bake that guess in, every rail is
@@ -36,13 +41,14 @@ import os
 import sys
 import time
 
+# The device temperature readers live beside this file; resolve through the
+# /usr/local/sbin symlink to find them.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import hw_blackbox_temps as temps  # noqa: E402
+
 HWMON = "/sys/class/hwmon"
 CHIP = os.environ.get("NIVUUS_HWMON_NAME", "nct6798")
 NVME_CHIP = os.environ.get("NIVUUS_NVME_HWMON_NAME", "nvme")
-# DDR5 modules expose their SPD hub's sensor as one hwmon each. Under load in
-# this case they sit above their own 55 C warning threshold (measured
-# 2026-11-07), and nothing recorded them before.
-DIMM_CHIP = os.environ.get("NIVUUS_DIMM_HWMON_NAME", "spd5118")
 EDAC = os.environ.get("NIVUUS_EDAC", "/sys/devices/system/edac/mc")
 INTERRUPTS = os.environ.get("NIVUUS_INTERRUPTS", "/proc/interrupts")
 RAPL = os.environ.get("NIVUUS_RAPL", "/sys/class/powercap/intel-rapl:0/energy_uj")
@@ -73,7 +79,11 @@ BASELINE_SAMPLES = int(os.environ.get("NIVUUS_BLACKBOX_BASELINE", "3600"))
 # Only the temperatures worth the bytes. temp8 is the package Tj the CPU
 # actually throttles on; the coretemp DTS sensors on this box under-read by
 # ~25 C and must never be used for thermal decisions (see CLAUDE.md).
-TEMPS = {"temp1_input": "systin", "temp8_input": "peci", "temp11_input": "pch"}
+# temp2 (CPUTIN) is the board's own probe under the socket, a cross-check on
+# PECI; temp3 (AUXTIN0) is unlabelled by ASUS and reads like the VRM (55 C
+# when PECI is 68 C). AUXTIN1/2/4 have no probe wired and read garbage.
+TEMPS = {"temp1_input": "systin", "temp8_input": "peci", "temp11_input": "pch",
+         "temp2_input": "cputin", "temp3_input": "auxtin0"}
 FANS = {"fan1_input": "fan1", "fan2_input": "fan2"}
 
 # Machine checks and thermal events, summed across CPUs. MCE counts hardware
@@ -251,30 +261,6 @@ def find_chip(name=None):
     return None
 
 
-def dimm_sensors():
-    """(column, temp1_input path) for every DDR5 module, ordered by I2C address.
-
-    The column carries the SPD hub's address (`10-0051`), not the hwmon index,
-    so a module keeps its column across boots and kernel enumeration order.
-    """
-    try:
-        entries = os.listdir(HWMON)
-    except OSError:
-        return []
-    found = []
-    for entry in entries:
-        path = os.path.join(HWMON, entry)
-        try:
-            with open(os.path.join(path, "name")) as fh:
-                if fh.read().strip() != DIMM_CHIP:
-                    continue
-        except OSError:
-            continue
-        address = os.path.basename(os.path.realpath(os.path.join(path, "device")))
-        found.append(("dimm_%s_c" % address, os.path.join(path, "temp1_input")))
-    return sorted(found)
-
-
 def rail_names(chip):
     if not chip:
         return []
@@ -404,12 +390,15 @@ def main():
 
     rails = rail_names(chip)
     nvme = find_chip(NVME_CHIP)
-    devices, disks, dimms = irq_devices(), block_devices(), dimm_sensors()
+    devices, disks = irq_devices(), block_devices()
+    dimms = temps.dimm_sensors(HWMON)
+    slow = temps.slow_sensors(HWMON, BLOCK, PCI)
     columns = (["ts"] + rails + list(TEMPS.values()) + list(FANS.values())
                + ["nvme_c", "watts", "load1"] + [c.lower() for c in IRQ_COUNTERS]
                + ["edac_ce", "edac_ue"] + [name for name, _ in devices]
                + ["inflight_" + d for d in disks] + [f[0] for f in PSI_FIELDS]
-               + ["mem_avail_mb"] + [name for name, _ in dimms])
+               + ["mem_avail_mb"] + [name for name, _ in dimms]
+               + [name for name, _ in slow])
     header = ",".join(columns)
     power, baseline = Power(), Baseline(STATE)
     seen_irq = {}
@@ -450,13 +439,14 @@ def main():
         row.extend(inflight(d) for d in disks)
         row.extend(psi(resource, kind) for _, resource, kind in PSI_FIELDS)
         row.append(mem_available_mb())
-        for _, path in dimms:
-            value = read_int(path)
-            row.append("" if value is None else "%.1f" % (value / 1000.0))
+        row.extend(read() for _, read in dimms)
+        row.extend(sensor.value() for _, sensor in slow)
         return ",".join(row)
 
     if mode == "once":
         print(header)
+        for _, sensor in slow:
+            sensor.first.wait(15)
         time.sleep(min(INTERVAL, 1))
         print(sample())
         return 0
