@@ -5,6 +5,10 @@ Historique des versions et modifications de Nivuus.
 ## [Non publié]
 
 ### Ajouté
+- `nivuus-bios` : liste et modifie les réglages du BIOS depuis Linux, à partir
+  du menu de configuration décompilé de la version exacte du BIOS. Les
+  conditions d'affichage sont évaluées comme dans le menu, chaque valeur est
+  validée, la variable est sauvegardée avant l'écriture puis relue.
 - Limites de puissance du CPU relevées à 80 W en continu et 90 W en pointe
   (au lieu de 60/68 W ; 100 W en pointe essayé puis écarté, le ventilateur du
   boîtier atteignant son maximum en jeu ; 85 W en continu ramené à 80 W
