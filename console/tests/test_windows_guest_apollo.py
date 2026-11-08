@@ -189,6 +189,12 @@ check("sunshine.conf nomme l hote pour les clients",
       any(ligne.strip() == "sunshine_name = Nivuus"
           for ligne in _conf.splitlines()), True)
 
+# Two-pass NVENC timed out on every frame while a game saturated the GPU
+# (2026-11-08): the stream froze black every few seconds. See the template.
+check("sunshine.conf runs NVENC in a single pass",
+      any(line.strip() == "nvenc_twopass = disabled"
+          for line in _conf.splitlines()), True)
+
 # min_log_level est la SEULE chose qui rende la dette C1 observable. Aucune
 # manette ne vibre nulle part, et le maillon qui appartient a ce depot -
 # Apollo qui renvoie le rumble au client - ne se mesure que dans sunshine.log.
