@@ -5,6 +5,9 @@ Historique des versions et modifications de Nivuus.
 ## [Non publié]
 
 ### Ajouté
+- Boîte noire : état de l'onduleur (statut, tension secteur, charge, batterie)
+  relevé toutes les 2 s par NUT, et chaque changement de statut écrit dans le
+  journal, pour savoir au prochain gel si le secteur a bougé.
 - `nivuus-bios` : liste et modifie les réglages du BIOS depuis Linux, à partir
   du menu de configuration décompilé de la version exacte du BIOS. Les
   conditions d'affichage sont évaluées comme dans le menu, chaque valeur est
