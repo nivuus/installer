@@ -119,7 +119,13 @@ if (Get-Process -Name 'steam' -ErrorAction SilentlyContinue) {
     # aussi plutot que de supposer que le controle d entree de script suffit
     # encore, 45 s plus tard.
     if (Test-SteamHold) { return }
-    if ($Mode -eq 'BigPicture') { Start-Process 'steam://open/bigpicture' }
+    # The URI goes to steam.exe itself, exactly as Steam's own protocol handler
+    # does it (HKCR\steam\Shell\Open\Command = steam.exe -- "%1"); the
+    # running instance picks it up. Handing the bare URI to the shell instead
+    # depends on a per-user default-app choice that nothing here can set, and
+    # without one Windows 11 opens the "How do you want to open this?" picker
+    # behind Big Picture (measured 2026-11-08, OpenWith.exe 8 s after launch).
+    if ($Mode -eq 'BigPicture') { Start-Process $SteamExe -ArgumentList '--', 'steam://open/bigpicture' }
     Write-Log 'Steam tournait deja'
     return
 }
