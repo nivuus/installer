@@ -72,5 +72,9 @@ Host-only configuration, backups next to each file (`*.bak-20261108`).
   only a forced `fsck` at reboot would check it (last full check: 2023-07-15).
 - **UPS quick battery test**: monthly, from the MQTT agent (`nivuus/mqtt` PR #29), with
   `ups.test.result` in Home Assistant.
-- Still open: root's crontab runs `e4defrag /dev/sda1 /dev/sdb1` every Sunday 06:00,
-  counterproductive on the SMR sda (see host-stability-incidents).
+- **Weekly `e4defrag /dev/sda1 /dev/sdb1` removed from root's crontab** (backup
+  `/root/crontab.bak-20261108`). On the SMR sda every moved extent rewrites whole bands,
+  and sda already runs near its rated workload (~41 TB/year read+written against 55 TB/year
+  for the ST5000LM000, over 38 500 power-on hours); on sdb, mostly large media files
+  written in one go, it bought nothing. `e4defrag -c` measures fragmentation without
+  moving anything, if a check is ever wanted.
