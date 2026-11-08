@@ -5,6 +5,11 @@ Historique des versions et modifications de Nivuus.
 ## [Non publié]
 
 ### Ajouté
+- Limites de puissance du CPU relevées à 85 W en continu et 100 W en pointe
+  (au lieu de 60/68 W), après changement de pâte thermique et pose d'un cadre
+  de contact : 76 °C en régime établi à 85 W tous cœurs. Le script du dépôt
+  reprend aussi la courbe de ventilateurs « silence d'abord » qui tournait
+  déjà sur l'hôte depuis juillet.
 - Boîte noire : températures de tous les composants qui en exposent une —
   sondes CPUTIN et AUXTIN0 de la carte mère, cartes Wi-Fi ath10k, disques
   SATA (module `drivetemp`, chargé au démarrage) et GPU NVIDIA. Les capteurs
