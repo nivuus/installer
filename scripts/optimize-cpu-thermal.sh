@@ -65,7 +65,7 @@ case "$MODE" in
         ;;
 esac
 
-RAPL_PL1_UW=85000000    # 85 W sustained. Raised from 60 W on 2026-11-08 after a repaste + contact frame: all-core 85 W at 5.1 GHz settles at PECI 76 C (max 79 C over 10 min); 60 W was ~90 C before the repaste.
+RAPL_PL1_UW=80000000    # 80 W sustained. Raised from 60 W to 85 W on 2026-11-08 after a repaste + contact frame (all-core 85 W settled at PECI 76 C), then set to 80 W the same day: a heat-soaked Forza Horizon 6 session at 85 W averaged 84 C with peaks at 88-90 C and the chassis fan at its ceiling, leaving no summer margin.
 RAPL_PL1_TAU_US=4000000 # 4 s averaging window (small thermal overshoot)
 RAPL_PL2_UW=90000000    # 90 W burst ceiling (4 s window). 100 W was tried on 2026-11-08: during a Forza update + benchmark PECI touched 90 C and the chassis fan hit its 2652 RPM ceiling, so the bursts were clipped back to 90 W.
 
