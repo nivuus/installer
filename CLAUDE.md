@@ -129,6 +129,7 @@ The detail below was moved out of this file to keep it small. It is NOT imported
 
 - [docs/claude/dev-commands.md](docs/claude/dev-commands.md) - read for the full command block: ISO build, staged engine run, Windows guest scripts, `retro_sync.py` refusals, host script tests.
 - [docs/claude/host-shell-gotchas.md](docs/claude/host-shell-gotchas.md) - read before running shell commands on the host (zsh profile hangs, `grep` function, `systemctl` unusable from a Claude session, D-Bus workaround).
+- [docs/claude/bios-settings.md](docs/claude/bios-settings.md) - read before changing a BIOS setting from Linux (`nivuus-bios`: extracting the menu of a BIOS version, checks, limits; `in10` is VDD2).
 - [docs/claude/home-assistant-cli.md](docs/claude/home-assistant-cli.md) - read before changing Home Assistant configuration (`ha` CLI usage; never edit `.storage/`).
 
 ### Host infrastructure (the reference server)
