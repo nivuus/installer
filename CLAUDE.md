@@ -136,7 +136,7 @@ The detail below was moved out of this file to keep it small. It is NOT imported
 
 - [docs/claude/host-infrastructure.md](docs/claude/host-infrastructure.md) - read for boot chain (systemd-boot), CPU thermal/RAPL and fan policy, CPU partitioning, GPU ownership, libvirt hook traps, hypervisor/network/docker basics.
 - [docs/claude/host-trixie-upgrade.md](docs/claude/host-trixie-upgrade.md) - read for Debian 13 upgrade fallout (SSH/utmp, virtiofsd, OVMF, VM shutdown, MQTT credentials, fail2ban, SMB hardening, clamonacc, Claude sessions during system ops).
-- [docs/claude/host-ops-audits.md](docs/claude/host-ops-audits.md) - read for energy/perf pass, disk space bounds, security follow-ups audit, HA service registration trap.
+- [docs/claude/host-ops-audits.md](docs/claude/host-ops-audits.md) - read for energy/perf pass, disk space bounds, security follow-ups audit, disk health checks (SMART schedule, barriers, e2scrub), HA service registration trap.
 - [docs/claude/host-cloud-gaming-apollo.md](docs/claude/host-cloud-gaming-apollo.md) - read for Apollo/Sunshine + SudoVDA streaming, HDR, Moonlight, and the Dockerised Ollama API.
 - [docs/claude/host-stability-incidents.md](docs/claude/host-stability-incidents.md) - read when the host freezes, halts or swaps (hard-freeze investigation, swap thrashing outage).
 - [docs/claude/host-network-rf-wan.md](docs/claude/host-network-rf-wan.md) - read for RF/2.4 GHz coexistence, VM wake-on-demand, and WAN/PPPoE (Orange) recovery.
