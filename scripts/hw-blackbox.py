@@ -24,6 +24,10 @@ the CPU: the DDR5 modules, CPUTIN and AUXTIN0 (likely the VRM), both WiFi
 radios, the SATA disks (drivetemp) and the GPU. The device readers live in
 hw_blackbox_temps.py; the slow ones are polled off the sampling thread.
 
+Since 2026-11-08 it also records the UPS (status, input voltage, load,
+charge) through NUT, in hw_blackbox_ups.py: mains quality was the one
+input to the freezes nothing recorded.
+
 Deliberately mapping-agnostic: nct6798 exposes in0..in14 as raw millivolts with
 no labels, and the board-specific multipliers (+12V is probably in1 x12, +5V
 probably in4 x5) are a guess. Rather than bake that guess in, every rail is
@@ -45,6 +49,7 @@ import time
 # /usr/local/sbin symlink to find them.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import hw_blackbox_temps as temps  # noqa: E402
+import hw_blackbox_ups  # noqa: E402
 
 HWMON = "/sys/class/hwmon"
 CHIP = os.environ.get("NIVUUS_HWMON_NAME", "nct6798")
@@ -393,12 +398,13 @@ def main():
     devices, disks = irq_devices(), block_devices()
     dimms = temps.dimm_sensors(HWMON)
     slow = temps.slow_sensors(HWMON, BLOCK, PCI)
+    ups, ups_poller = hw_blackbox_ups.ups_sensors()
     columns = (["ts"] + rails + list(TEMPS.values()) + list(FANS.values())
                + ["nvme_c", "watts", "load1"] + [c.lower() for c in IRQ_COUNTERS]
                + ["edac_ce", "edac_ue"] + [name for name, _ in devices]
                + ["inflight_" + d for d in disks] + [f[0] for f in PSI_FIELDS]
                + ["mem_avail_mb"] + [name for name, _ in dimms]
-               + [name for name, _ in slow])
+               + [name for name, _ in slow] + [name for name, _ in ups])
     header = ",".join(columns)
     power, baseline = Power(), Baseline(STATE)
     seen_irq = {}
@@ -441,12 +447,15 @@ def main():
         row.append(mem_available_mb())
         row.extend(read() for _, read in dimms)
         row.extend(sensor.value() for _, sensor in slow)
+        row.extend(read() for _, read in ups)
         return ",".join(row)
 
     if mode == "once":
         print(header)
         for _, sensor in slow:
             sensor.first.wait(15)
+        if ups_poller:
+            ups_poller.first.wait(5)
         time.sleep(min(INTERVAL, 1))
         print(sample())
         return 0

@@ -124,6 +124,7 @@ export NIVUUS_BLACKBOX="$TMP/bb.csv"
 export NIVUUS_BLACKBOX_STATE="$TMP/state/baseline.json"
 export NIVUUS_BLACKBOX_INTERVAL=0.02
 export NIVUUS_BLACKBOX_BASELINE=5
+export NIVUUS_BLACKBOX_UPS=0   # never query the upsd of the machine running the suite
 
 PASS=0 FAIL=0
 ok()  { PASS=$((PASS+1)); echo "  ok   — $1"; }
