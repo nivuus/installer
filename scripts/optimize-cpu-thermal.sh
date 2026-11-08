@@ -65,9 +65,9 @@ case "$MODE" in
         ;;
 esac
 
-RAPL_PL1_UW=50000000    # 50 W sustained (≈85 °C with fans at max)
+RAPL_PL1_UW=85000000    # 85 W sustained. Raised from 60 W on 2026-11-08 after a repaste + contact frame: all-core 85 W at 5.1 GHz settles at PECI 76 C (max 79 C over 10 min); 60 W was ~90 C before the repaste.
 RAPL_PL1_TAU_US=4000000 # 4 s averaging window (small thermal overshoot)
-RAPL_PL2_UW=58000000    # 58 W instantaneous burst ceiling (≈93 °C peak)
+RAPL_PL2_UW=100000000   # 100 W burst ceiling (4 s window): first seconds of the 2026-11-08 test ran at 92-100 W, PECI 77 C max.
 
 # --- RAPL package power limits (the actual thermal contract; full apply only) ---
 
@@ -147,26 +147,51 @@ if [ "$FULL_APPLY" = 1 ]; then
 
     if [ -n "$NCT_HWMON" ]; then
         echo ""
-        echo "Applying fan curve optimization (nct6798)..."
+        echo "Applying silence-first fan curve (nct6798)..."
 
-        # More aggressive fan curve: ramp up earlier
-        # Point 1: 35°C → 30% PWM (was 20°C → 20%)
-        echo 35000 > "$NCT_HWMON/pwm1_auto_point1_temp" 2>/dev/null || true
-        echo 77    > "$NCT_HWMON/pwm1_auto_point1_pwm"  2>/dev/null || true
-        # Point 2: 50°C → 50% PWM (was 70°C → 70%)
-        echo 50000 > "$NCT_HWMON/pwm1_auto_point2_temp" 2>/dev/null || true
-        echo 128   > "$NCT_HWMON/pwm1_auto_point2_pwm"  2>/dev/null || true
-        # Point 3: 60°C → 75% PWM (was 75°C → 100%)
-        echo 60000 > "$NCT_HWMON/pwm1_auto_point3_temp" 2>/dev/null || true
-        echo 191   > "$NCT_HWMON/pwm1_auto_point3_pwm"  2>/dev/null || true
-        # Point 4: 70°C → 90% PWM (was 100°C → 100%)
-        echo 70000 > "$NCT_HWMON/pwm1_auto_point4_temp" 2>/dev/null || true
-        echo 230   > "$NCT_HWMON/pwm1_auto_point4_pwm"  2>/dev/null || true
-        # Point 5: 80°C → 100% PWM (unchanged threshold)
-        echo 80000 > "$NCT_HWMON/pwm1_auto_point5_temp" 2>/dev/null || true
+        # Silence-first curve, calibrated by stress campaign 2026-07-23.
+        # CRITICAL: both fans are driven by PECI Agent 0 (temp source 8 = the
+        # real CPU Tj). The BIOS default drives them from "PECI Agent 0
+        # Calibration" (temp source 9), a bogus +20 °C-offset reading that idles
+        # at ~63 °C and makes both fans over-spin at ~1500 RPM for no thermal
+        # reason. SYSTIN/PCH are useless here (they barely move even under 250 W).
+        echo 8 > "$NCT_HWMON/pwm1_temp_sel" 2>/dev/null || true
+        echo 8 > "$NCT_HWMON/pwm2_temp_sel" 2>/dev/null || true
+
+        # fan1 = CPU header. Idle floor is BIOS-locked to ~33 % (~800 RPM); the
+        # low point1 just keeps it there below 52 °C. Ramps to 100 % by 88 °C.
+        echo 52000 > "$NCT_HWMON/pwm1_auto_point1_temp" 2>/dev/null || true
+        echo 1     > "$NCT_HWMON/pwm1_auto_point1_pwm"  2>/dev/null || true
+        echo 64000 > "$NCT_HWMON/pwm1_auto_point2_temp" 2>/dev/null || true
+        echo 70    > "$NCT_HWMON/pwm1_auto_point2_pwm"  2>/dev/null || true
+        echo 74000 > "$NCT_HWMON/pwm1_auto_point3_temp" 2>/dev/null || true
+        echo 140   > "$NCT_HWMON/pwm1_auto_point3_pwm"  2>/dev/null || true
+        echo 82000 > "$NCT_HWMON/pwm1_auto_point4_temp" 2>/dev/null || true
+        echo 210   > "$NCT_HWMON/pwm1_auto_point4_pwm"  2>/dev/null || true
+        echo 88000 > "$NCT_HWMON/pwm1_auto_point5_temp" 2>/dev/null || true
         echo 255   > "$NCT_HWMON/pwm1_auto_point5_pwm"  2>/dev/null || true
 
-        echo "  Fan curve: 35°C/30% → 50°C/50% → 60°C/75% → 70°C/90% → 80°C/100%"
+        # fan2 = chassis header. NEVER stops (point1 pwm=58 ≈ 950 RPM): the
+        # chassis fan cools the UNMONITORED VRM/M.2/GPU-intake air — fully
+        # stopping it is the prime suspect of the 2026-07-23 hard crash. Ramps
+        # to 100 % by 88 °C.
+        echo 46000 > "$NCT_HWMON/pwm2_auto_point1_temp" 2>/dev/null || true
+        echo 58    > "$NCT_HWMON/pwm2_auto_point1_pwm"  2>/dev/null || true
+        echo 64000 > "$NCT_HWMON/pwm2_auto_point2_temp" 2>/dev/null || true
+        echo 95    > "$NCT_HWMON/pwm2_auto_point2_pwm"  2>/dev/null || true
+        echo 74000 > "$NCT_HWMON/pwm2_auto_point3_temp" 2>/dev/null || true
+        echo 150   > "$NCT_HWMON/pwm2_auto_point3_pwm"  2>/dev/null || true
+        echo 82000 > "$NCT_HWMON/pwm2_auto_point4_temp" 2>/dev/null || true
+        echo 230   > "$NCT_HWMON/pwm2_auto_point4_pwm"  2>/dev/null || true
+        echo 88000 > "$NCT_HWMON/pwm2_auto_point5_temp" 2>/dev/null || true
+        echo 255   > "$NCT_HWMON/pwm2_auto_point5_pwm"  2>/dev/null || true
+
+        # Ensure SmartFan IV auto mode (survives prior runtime manual tinkering)
+        echo 5 > "$NCT_HWMON/pwm1_enable" 2>/dev/null || true
+        echo 5 > "$NCT_HWMON/pwm2_enable" 2>/dev/null || true
+
+        echo "  fan1 CPU     (PECI): floor→64°C/70 → 74°C/140 → 82°C/210 → 88°C/255"
+        echo "  fan2 chassis (PECI): 950RPM→64°C/95 → 74°C/150 → 82°C/230 → 88°C/255"
     else
         echo ""
         echo "⚠ nct6798 hwmon not found, skipping fan curve optimization"
