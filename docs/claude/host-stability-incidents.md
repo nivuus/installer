@@ -27,7 +27,7 @@ Everything above the hardware is eliminated for the 07/08 freeze: no AER, ASPM a
 - Tdarr throttled 4→2 CPUs per node in `/opt/nivuus/MediaManager/docker-compose.yml` (backup in `/media/backup/`). Load reduction during observation, **not** a fix — Tdarr was transcoding at all four freezes, but it transcodes nearly always, so the correlation is weak.
 - **Crash forensics are perishable**: `/var/log/journal` lost every archived boot (only rsyslog's `kern.log`/`syslog` survived, so use those), and the recorder DB (`purge_keep_days: 5`) only still held the crash windows because the box was down. The 2 h before each freeze are preserved in `/media/backup/crash-forensics-20260816/`.
 
-**Also flagged, not acted on**: `/media/data` and `/media/backup` are mounted `data=writeback,barrier=0` (see `/etc/fstab`) — with repeated instant power cuts that is a real data-loss exposure. (The swapfile *used* to live on `/media/backup`; it was moved to the NVMe on 2026-08-24, see below.) And the 9 `winvm-proxy-*.socket` entries in `/etc/systemd/system/sockets.target.wants/` are regular files, not symlinks, so systemd ignores them (`is not a symlink, ignoring`).
+**Also flagged**: `/media/data` and `/media/backup` were mounted `data=writeback,barrier=0`, a real data-loss exposure with repeated instant power cuts — **fixed 2026-11-08** (see host-ops-audits, *Disk health checks*). (The swapfile *used* to live on `/media/backup`; it was moved to the NVMe on 2026-08-24, see below.) And the 9 `winvm-proxy-*.socket` entries in `/etc/systemd/system/sockets.target.wants/` are regular files, not symlinks, so systemd ignores them (`is not a symlink, ignoring`).
 
 ### Swap thrashing outage 2026-08-22→24: one capped container froze the whole host
 

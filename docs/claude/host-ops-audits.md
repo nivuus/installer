@@ -45,3 +45,32 @@ found on `docker_marketplace` and is documented in **`nivuus/marketplace`**'s ow
 CLAUDE.md. It is a general Home Assistant lesson, worth reading before registering
 a service from any integration: a plain lambda is typed `HassJobType.Executor`, so
 HA discards the coroutine and the handler never runs. Use `functools.partial`.
+
+### Disk health checks (2026-11-08)
+
+Host-only configuration, backups next to each file (`*.bak-20261108`).
+
+- **SMART self-tests are scheduled in `/etc/smartd.conf`** — before, `DEVICESCAN -m root`
+  had no `-s`, so no self-test ever ran unless started by hand. Per disk: short test every
+  Wednesday 03:00; long test monthly, staggered so two never overlap — NVMe the 2nd 02:00
+  (minutes), sda (5 TB SMR) the 9th 01:00 (~14 h), sdb (18 TB) the 16th 01:00 (~27 h).
+  Two traps, both measured with `smartd -q showtests`: **`DEVICESCAN` must be the LAST
+  directive** (every line after it is silently ignored — the schedule showed 0 tests), and
+  the NVMe must be named `/dev/nvme0`, because its by-id link points at the namespace
+  `nvme0n1`, which `DEVICESCAN` does not recognise as a duplicate. The long tests of sda
+  had always ended `Interrupted (host reset)` — a reboot within its 14 h window.
+- **Write barriers restored on `/media/data` and `/media/backup`.** fstab carried
+  `data=writeback,barrier=0,nobh` on both HDDs (not the superblock defaults): with the
+  platform freezes, that is metadata able to point at unwritten blocks after a cut.
+  Now `defaults,errors=remount-ro,noatime`. `barrier` was re-enabled with a live remount;
+  **the `data=` mode cannot change on remount**, so `data=writeback` stays until the next
+  reboot — check `findmnt -no OPTIONS /media/data` afterwards: it must no longer list it.
+- **`e2scrub_all.timer` and `xfs_scrub_all.timer` are masked.** e2scrub checks an ext4 LV
+  through an LVM snapshot, and `nivuus-vg` has **0 free extents** (the `root` LV takes the
+  whole group), so it could never run — a green timer that checked nothing. No XFS exists.
+  Consequence, stated rather than hidden: the root filesystem gets **no** online check;
+  only a forced `fsck` at reboot would check it (last full check: 2023-07-15).
+- **UPS quick battery test**: monthly, from the MQTT agent (`nivuus/mqtt` PR #29), with
+  `ups.test.result` in Home Assistant.
+- Still open: root's crontab runs `e4defrag /dev/sda1 /dev/sdb1` every Sunday 06:00,
+  counterproductive on the SMR sda (see host-stability-incidents).
