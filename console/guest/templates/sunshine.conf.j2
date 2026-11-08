@@ -132,3 +132,12 @@ gamepad = x360
 # dinput de RetroArch traite). Mesure du 2026-08-29 : le tactile de la DS ne
 # repondait pas, et le propriétaire a confirme qu'il repond avec « enabled ».
 native_pen_touch = enabled
+
+# Single-pass NVENC. The default two-pass mode (quarter_res) runs a second
+# analysis pass per frame, which costs encoder time and VRAM. With a game
+# holding the RTX 4070 at 100 % and 11 GB of its 12 GB (Forza Horizon 6,
+# Extreme, 2026-11-08), every encode waited past its deadline: "NvEnc: frame
+# encode wait timeout" every 1-3 s, Apollo rebuilt the encoder each time, and
+# the TV showed a ~0.5 s black frame and ~15 fps. Single pass: 55-60 fps and
+# no timeout over the same benchmark, at a quality cost not visible on the TV.
+nvenc_twopass = disabled

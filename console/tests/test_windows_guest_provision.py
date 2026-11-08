@@ -944,12 +944,17 @@ def line_index(lines, needle, start=0):
 
 
 _idx_wait = line_index(_launch_lines, "$deadline = (Get-Date).AddSeconds($WaitSeconds)")
-_idx_bigpicture_uri = line_index(_launch_lines, "Start-Process 'steam://open/bigpicture'")
+_idx_bigpicture_uri = line_index(_launch_lines, "Start-Process $SteamExe -ArgumentList '--', 'steam://open/bigpicture'")
 _idx_final_bigpicture = line_index(_launch_lines, "Start-Process -FilePath $SteamExe -ArgumentList")
 _idx_final_default = line_index(_launch_lines, "else { Start-Process -FilePath $SteamExe }")
 _guard = "if (Test-SteamHold) { return }"
 check("tous les anchors necessaires a ces controles ont ete localises",
       -1 not in (_idx_wait, _idx_bigpicture_uri, _idx_final_bigpicture, _idx_final_default), True)
+# A bare steam:// handed to the shell opens Windows' "open with" picker when
+# no default app was chosen for the protocol (2026-11-08): the URI must go to
+# steam.exe itself.
+check("no steam:// URI is handed to the shell",
+      any("Start-Process 'steam://" in ln for ln in _launch_lines), False)
 _idx_first_guard = line_index(_launch_lines, _guard)
 check("un premier controle precede l attente d affichage (evite d attendre 45 s pour rien)",
       _idx_first_guard != -1 and _idx_wait != -1 and _idx_first_guard < _idx_wait, True)

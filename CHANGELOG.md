@@ -20,6 +20,12 @@ Historique des versions et modifications de Nivuus.
   pré-requis manquant est refusé au wizard plutôt qu'en cours d'installation.
 
 ### Corrigé
+- Console : Big Picture ouvre de nouveau sans fenêtre « Ouvrir avec »
+  quand Steam tourne déjà. Le lien `steam://open/bigpicture` est confié à
+  `steam.exe` au lieu de passer par les associations de Windows.
+- Console : encodage NVENC en une seule passe dans Apollo. En deux passes,
+  l'encodeur dépassait son délai dès qu'un jeu saturait le GPU, et la TV
+  affichait un écran noir toutes les quelques secondes.
 - Réveil de la VM à froid : `handle-vm-start.sh` cherchait l'adresse de
   la VM par `virsh domifaddr`, qui ne répond jamais sur ce pont, et appelait
   `firewall-cmd --wait`, refusé par firewalld 2.x. Chaque réveil d'une VM
