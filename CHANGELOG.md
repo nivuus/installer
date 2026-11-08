@@ -5,9 +5,10 @@ Historique des versions et modifications de Nivuus.
 ## [Non publié]
 
 ### Ajouté
-- Limites de puissance du CPU relevées à 85 W en continu et 90 W en pointe
+- Limites de puissance du CPU relevées à 80 W en continu et 90 W en pointe
   (au lieu de 60/68 W ; 100 W en pointe essayé puis écarté, le ventilateur du
-  boîtier atteignant son maximum en jeu), après changement de pâte thermique et pose d'un cadre
+  boîtier atteignant son maximum en jeu ; 85 W en continu ramené à 80 W
+  pour garder de la marge en été), après changement de pâte thermique et pose d'un cadre
   de contact : 76 °C en régime établi à 85 W tous cœurs. Le script du dépôt
   reprend aussi la courbe de ventilateurs « silence d'abord » qui tournait
   déjà sur l'hôte depuis juillet.
