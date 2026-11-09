@@ -186,6 +186,9 @@ def _firewall(config, target, emit) -> None:
     chroot_run(target, ["systemctl", "enable", "firewalld"], check=False)
     chroot_run(target, ["systemctl", "enable", "fail2ban"], check=False)
     # Permanent configuration only: firewalld picks it up when it starts.
+    if not os.path.isdir(os.path.join(target, "usr/lib/firewalld/zones")):
+        raise StepError("firewalld did not install (no usr/lib/firewalld/zones in the target); "
+                        "see the apt-get output above")
     try:
         bind_interface(target, "external", GUEST_VPN_TUN)
     except ZoneFileError as exc:

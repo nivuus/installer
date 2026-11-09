@@ -161,6 +161,63 @@ class BindInterface(unittest.TestCase):
             b'<?xml version="1.0" encoding="utf-8"?>\n<zone>\n  <interface name="nvguest0"/>\n</zone>\n')
         self.assertTrue(self.tree.bind())
 
+    def test_conflict_is_refused_even_when_the_target_already_lists_it(self):
+        text = HOST_EXTERNAL.replace(b"</zone>", LINE + b"</zone>")
+        self.ext.write_bytes(text)
+        (self.tree.etc / "internal.xml").write_bytes(
+            b'<?xml version="1.0" encoding="utf-8"?>\n<zone>\n  <interface name="nvguest0"/>\n</zone>\n')
+        with self.assertRaises(fz.ZoneFileError):
+            self.tree.bind()
+        self.assertEqual(self.ext.read_bytes(), text)
+
+    def test_a_malformed_unrelated_zone_is_named_in_the_refusal(self):
+        self.ext.write_bytes(HOST_EXTERNAL)
+        (self.tree.etc / "work.xml").write_bytes(b"<zone>\n")
+        with self.assertRaises(fz.ZoneFileError) as ctx:
+            self.tree.bind()
+        self.assertIn("work.xml", str(ctx.exception))
+        self.assertIn("refus", str(ctx.exception))
+        self.assertEqual(self.ext.read_bytes(), HOST_EXTERNAL)
+
+    def _profile(self, name, body):
+        nm = self.tree.root / fz.NM_CONNECTIONS
+        nm.mkdir(parents=True, exist_ok=True)
+        (nm / name).write_text(body)
+
+    def test_an_nm_profile_putting_the_interface_elsewhere_is_refused(self):
+        # The 12:09 cause was a zone file against NM's connection.zone.
+        self.ext.write_bytes(HOST_EXTERNAL)
+        for name, body in (
+                ("guest.nmconnection", "[connection]\nid=guest\ntype=vpn\nzone=internal\n\n"
+                                       "[vpn]\ndev=nvguest0\nservice-type=org.freedesktop.NetworkManager.openvpn\n"),
+                ("tun.nmconnection", "[connection]\nid=tun\ninterface-name=nvguest0\nzone=home\n")):
+            self._profile(name, body)
+            with self.assertRaises(fz.ZoneFileError, msg=name) as ctx:
+                self.tree.bind()
+            self.assertIn(name, str(ctx.exception))
+            self.assertEqual(self.ext.read_bytes(), HOST_EXTERNAL)
+            (self.tree.root / fz.NM_CONNECTIONS / name).unlink()
+
+    def test_nm_profiles_that_agree_or_concern_others_are_accepted(self):
+        self.ext.write_bytes(HOST_EXTERNAL)
+        self._profile("guest.nmconnection", "[connection]\nid=guest\ntype=vpn\nzone=external\n\n"
+                                            "[vpn]\ndev=nvguest0\n")
+        self._profile("lan.nmconnection", "[connection]\nid=lan\ninterface-name=enp15s0\nzone=home\n")
+        self._profile("nozone.nmconnection", "[connection]\nid=x\ninterface-name=nvguest0\n")
+        self._profile("notes.txt", "[connection]\ninterface-name=nvguest0\nzone=home\n")
+        self.assertTrue(self.tree.bind())
+
+    def test_the_directory_is_synced_after_the_rename(self):
+        self.ext.write_bytes(HOST_EXTERNAL)
+        synced, real = [], os.fsync
+
+        def record(fd):
+            synced.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+            real(fd)
+        with mock.patch.object(fz.os, "fsync", record):
+            self.tree.bind()
+        self.assertEqual(synced, [False, True])
+
     def test_unparsable_or_foreign_xml_is_refused_untouched(self):
         for text in (b"<zone>\n  <short>x</short>\n", b"<service>\n</service>\n", b"<zone/>\n",
                      b"<zone><short>x</short></zone>\n"):

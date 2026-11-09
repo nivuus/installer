@@ -100,6 +100,16 @@ with tempfile.TemporaryDirectory() as tmp:
           [c for c in calls if any(w in " ".join(c) for w in ("firewall-cmd", "reload", "nmcli"))],
           [])
 
+# A firewalld that did not install is named as such, not as a missing zone.
+with tempfile.TemporaryDirectory() as tmp:
+    try:
+        features.apply_features({"features": ["os-base", "firewall"]}, tmp,
+                                "/opt/nivuus", {}, FakeEmit())
+        failures.append("missing firewalld: no StepError")
+    except features.StepError as exc:
+        check("missing firewalld is reported as such",
+              "firewalld did not install" in str(exc), True)
+
 # Les features VM ont quitte ce fichier.
 check("plus de _kvm_vfio_thermal", hasattr(features, "_kvm_vfio_thermal"), False)
 check("plus de _retro", hasattr(features, "_retro"), False)
