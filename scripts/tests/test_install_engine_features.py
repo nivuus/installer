@@ -82,6 +82,34 @@ with tempfile.TemporaryDirectory() as tmp:
           any("cpu-thermal-optimization.service" in " ".join(c) for c in calls),
           True)
 
+# The firewall feature binds the guest VPN tunnel to the permanent external
+# zone, on the chroot's files only: no reload, no firewall-cmd.
+with tempfile.TemporaryDirectory() as tmp:
+    target = pathlib.Path(tmp)
+    vendor = target / "usr/lib/firewalld/zones"
+    vendor.mkdir(parents=True)
+    (vendor / "external.xml").write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n<zone>\n  <short>External</short>\n</zone>\n')
+    calls.clear()
+    features.apply_features({"features": ["os-base", "firewall"]}, str(target),
+                            "/opt/nivuus", {}, FakeEmit())
+    external = target / "etc/firewalld/zones/external.xml"
+    check("the external zone lists the guest VPN tunnel",
+          external.is_file() and external.read_text().count('<interface name="nvguest0"/>'), 1)
+    check("no firewall command reaches the chroot",
+          [c for c in calls if any(w in " ".join(c) for w in ("firewall-cmd", "reload", "nmcli"))],
+          [])
+
+# A firewalld that did not install is named as such, not as a missing zone.
+with tempfile.TemporaryDirectory() as tmp:
+    try:
+        features.apply_features({"features": ["os-base", "firewall"]}, tmp,
+                                "/opt/nivuus", {}, FakeEmit())
+        failures.append("missing firewalld: no StepError")
+    except features.StepError as exc:
+        check("missing firewalld is reported as such",
+              "firewalld did not install" in str(exc), True)
+
 # Les features VM ont quitte ce fichier.
 check("plus de _kvm_vfio_thermal", hasattr(features, "_kvm_vfio_thermal"), False)
 check("plus de _retro", hasattr(features, "_retro"), False)

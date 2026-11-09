@@ -15,6 +15,7 @@ import uuid
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from .firewalld_zone import ZoneFileError, bind_interface
 from .util import StepError, chroot_run, write_file
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates")
@@ -27,6 +28,11 @@ BRIDGES = {
 }
 
 NM_DIR = "etc/NetworkManager/system-connections"
+
+# The guest VPN tunnel (nivuus/mqtt). Its NM profile says connection.zone
+# external, but NM does not re-bind a VPN interface after a firewalld reload
+# or restart: the permanent zone must list it too, or guests are blackholed.
+GUEST_VPN_TUN = "nvguest0"
 
 
 def _env() -> Environment:
@@ -179,6 +185,14 @@ def _firewall(config, target, emit) -> None:
                         "nftables"], check=False)
     chroot_run(target, ["systemctl", "enable", "firewalld"], check=False)
     chroot_run(target, ["systemctl", "enable", "fail2ban"], check=False)
+    # Permanent configuration only: firewalld picks it up when it starts.
+    if not os.path.isdir(os.path.join(target, "usr/lib/firewalld/zones")):
+        raise StepError("firewalld did not install (no usr/lib/firewalld/zones in the target); "
+                        "see the apt-get output above")
+    try:
+        bind_interface(target, "external", GUEST_VPN_TUN)
+    except ZoneFileError as exc:
+        raise StepError(f"cannot bind {GUEST_VPN_TUN} to the external zone: {exc}") from exc
     # Persist IP forwarding for routing between WAN and bridges.
     write_file(os.path.join(target, "etc/sysctl.d/99-nivuus-forward.conf"),
                "net.ipv4.ip_forward = 1\n")
