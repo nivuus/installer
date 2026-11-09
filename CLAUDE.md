@@ -140,4 +140,5 @@ The detail below was moved out of this file to keep it small. It is NOT imported
 - [docs/claude/host-cloud-gaming-apollo.md](docs/claude/host-cloud-gaming-apollo.md) - read for Apollo/Sunshine + SudoVDA streaming, HDR, Moonlight, and the Dockerised Ollama API.
 - [docs/claude/host-stability-incidents.md](docs/claude/host-stability-incidents.md) - read when the host freezes, halts or swaps (hard-freeze investigation, swap thrashing outage).
 - [docs/claude/host-network-rf-wan.md](docs/claude/host-network-rf-wan.md) - read for RF/2.4 GHz coexistence, VM wake-on-demand, and WAN/PPPoE (Orange) recovery.
+- [docs/claude/wifi-performance.md](docs/claude/wifi-performance.md) - read before trying to make the WiFi faster or changing the WiFi cards/antennas (2026-11-09 baseline, ruled-out causes, `frame_mode=2` tried and reverted, 5 GHz antenna loss, AW7916-AED replacement plan).
 - [docs/claude/host-security-hardening.md](docs/claude/host-security-hardening.md) - read before hardening a systemd unit (SHH limits, options deliberately left out of clamd/hostapd/atop/auditd), touching journal sealing (FSS key handling) or the lynis profile/locale.
