@@ -16,9 +16,10 @@ tried:
 | `auditd` | `Type=forking`; the generated options made it fail "Cannot daemonize" | `auditd.service.d/50-hardening.conf` (minimal set only) |
 | `atop` | `KillSignal=SIGUSR2` kills the `shh run` wrapper, so no profile is written | `atop.service.d/50-hardening.conf` |
 | `hostapd` | not profiled (Wi-Fi outage per attempt) | `hostapd.service.d/50-hardening.conf` |
+| `smbd` | not profiled (would need every client operation during the window) | `smbd.service.d/50-hardening.conf` (replaces an older `harden.conf`) |
 
 Exposure (`systemd-analyze security`) before → after: clamd 9.6 → 5.6, clamonacc 9.6 → 5.4,
-atop 9.6 → 5.3, hostapd 9.6 → 6.3, auditd 8.9 → 7.0.
+atop 9.6 → 5.3, hostapd 9.6 → 6.3, auditd 8.9 → 7.0, smbd 9.0 → 4.9.
 
 **Options left out on purpose (each one breaks something):**
 
@@ -30,6 +31,11 @@ atop 9.6 → 5.3, hostapd 9.6 → 6.3, auditd 8.9 → 7.0.
 - **hostapd, no `ProtectKernelTunables` or `PrivateDevices`.** It and its `ExecStartPost`
   lines write `/proc/sys` and `/sys` (bridge port flags, txpower), and it watches `/dev/rfkill`.
 - **ClamAV, no `ProtectHome` or `PrivateTmp`.** clamd scans any path anywhere.
+- **smbd, no `ProtectHome` and only `ProtectSystem=yes`.** The `[projects]` share is under
+  `/home`; `ExecStartPre` rewrites the AppArmor share list in `/etc`, and `unix password
+  sync` runs `passwd`. Capabilities are a deny-list, not an allow-list: it needs SETUID/SETGID,
+  LEASE (kernel oplocks), DAC override and chown. `RestrictSUIDSGID` is safe only while no
+  share directory carries the setgid bit (none did on 2026-11-09).
 - **No capability limits on any of them.** atop needs root's view of `/proc` and taskstats,
   and hostapd needs `CAP_NET_ADMIN` and `CAP_NET_RAW`.
 
