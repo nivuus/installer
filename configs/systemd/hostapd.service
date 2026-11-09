@@ -1,0 +1,32 @@
+# Nivuus: hostapd runs the two QCA9984 radios from their own files. Replaces
+# the packaged unit, which can only start /etc/hostapd/hostapd.conf (hence the
+# old DAEMON_CONF="-t" trick and the empty hostapd.conf kept for its
+# ConditionFileNotEmpty) and cannot reload.
+# Per-port settings hostapd cannot carry live in nivuus-wifi-post.service.
+[Unit]
+Description=Access point and authentication server for Wi-Fi and Ethernet
+Documentation=man:hostapd(8)
+After=network.target NetworkManager.service network-online.target
+Requires=NetworkManager.service
+ConditionFileNotEmpty=/etc/hostapd/2.4Ghz.conf
+ConditionFileNotEmpty=/etc/hostapd/5Ghz.conf
+Wants=nivuus-wifi-post.service
+
+[Service]
+Type=forking
+PIDFile=/run/hostapd.pid
+Restart=on-failure
+RestartSec=2
+# 5 GHz first: hostapd brings radios up in this order, and a radio that comes up
+# first collects the dual-band clients reconnecting after a restart.
+ExecStart=/usr/sbin/hostapd -B -P /run/hostapd.pid /etc/hostapd/5Ghz.conf /etc/hostapd/2.4Ghz.conf
+# SIGHUP re-reads both files without re-initialising the radios. It is not
+# hitless: measured 2026-11-09, every client re-associates (all 31 back within
+# 25 s). Channel, width and adding/removing a BSS still need a restart.
+ExecReload=/bin/kill -HUP $MAINPID
+# The 5 GHz radio runs a 20/40 MHz coexistence scan before forking (~6 s).
+TimeoutStartSec=60
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
