@@ -26,11 +26,15 @@ It refuses, writing nothing, when the binding would contradict another
 source of zones:
 - another zone file listing the interface (two zones claiming it);
 - a NetworkManager keyfile in etc/NetworkManager/system-connections whose
-  `interface-name` or `[vpn] dev` is the interface and whose `zone=` is a
-  different zone. That is the 2026-11-09 failure: every reload on the
-  reference host failed because internal.xml listed enp15s0 while NM's
-  connection.zone said home. The keyfiles are read; nmcli is never called.
-A zone file or keyfile that cannot be parsed also refuses the bind, named.
+  `interface-name` or `[vpn] dev` is the interface and whose zone is a
+  different zone. A profile without `zone=` is in firewalld's DefaultZone,
+  read from etc/firewalld/firewalld.conf (`public` when unset). That is the
+  2026-11-09 failure: every reload on the reference host failed because
+  internal.xml listed enp15s0 while NM's connection.zone said home. The
+  keyfiles are read; nmcli is never called.
+A zone file or keyfile that cannot be parsed also refuses the bind, named by
+its path only: keyfiles hold secrets, so the error gives the exception class
+and line number, never the line. A leading UTF-8 BOM is accepted in both.
 
 Standard library only, so the same file serves the install engine (on the
 chroot) and the host, run by path:
@@ -51,6 +55,9 @@ from xml.sax.saxutils import quoteattr
 ETC_ZONES = "etc/firewalld/zones"
 VENDOR_ZONES = "usr/lib/firewalld/zones"
 NM_CONNECTIONS = "etc/NetworkManager/system-connections"
+FIREWALLD_CONF = "etc/firewalld/firewalld.conf"
+# firewalld.conf without DefaultZone: firewalld falls back to this one.
+FALLBACK_ZONE = "public"
 # firewalld's own rule (functions.checkInterface): at most 15 bytes, no
 # whitespace, no "/".
 _IFNAME = re.compile(r"[^\s/]{1,15}")
@@ -94,22 +101,55 @@ def _claimed_elsewhere(etc_dir: pathlib.Path, zone_file: pathlib.Path, interface
     return claimed
 
 
-def _nm_disagreeing(nm_dir: pathlib.Path, zone: str, interface: str) -> list[str]:
-    """NM keyfiles that put `interface` in a zone other than `zone`."""
+def _default_zone(root: str) -> str:
+    """firewalld's DefaultZone, read from firewalld.conf; `public` when unset."""
+    conf = pathlib.Path(root, FIREWALLD_CONF)
+    zone = FALLBACK_ZONE
+    if conf.is_file():
+        for line in conf.read_text(encoding="utf-8-sig").splitlines():
+            key, sep, value = line.partition("=")
+            if sep and key.strip() == "DefaultZone" and value.strip():
+                zone = value.strip()
+    return zone
+
+
+def _unreadable(path: pathlib.Path, exc: Exception) -> ZoneFileError:
+    """A refusal naming the keyfile, never its content.
+
+    Keyfiles hold Wi-Fi and PPPoE secrets, and configparser quotes the
+    offending line in its messages: only the class and line number go out.
+    """
+    lineno = getattr(exc, "lineno", None)
+    if lineno is None and getattr(exc, "errors", None):
+        lineno = exc.errors[0][0]
+    where = f" at line {lineno}" if isinstance(lineno, int) else ""
+    return ZoneFileError(f"refusing to bind: cannot check {path} for a conflicting zone "
+                         f"({type(exc).__name__}{where})")
+
+
+def _nm_disagreeing(root: str, zone: str, interface: str) -> list[str]:
+    """NM keyfiles that put `interface` in a zone other than `zone`.
+
+    A profile without zone= puts its interface in firewalld's DefaultZone.
+    """
+    nm_dir = pathlib.Path(root, NM_CONNECTIONS)
     if not nm_dir.is_dir():
         return []
     found = []
     for path in sorted(nm_dir.glob("*.nmconnection")):
         keyfile = configparser.ConfigParser(interpolation=None, strict=False)
         try:
-            keyfile.read_string(path.read_text(encoding="utf-8"), source=str(path))
+            # utf-8-sig drops a leading BOM, which GKeyFile accepts too.
+            keyfile.read_string(path.read_text(encoding="utf-8-sig"), source=path.name)
         except (configparser.Error, UnicodeDecodeError) as exc:
-            raise ZoneFileError(f"refusing to bind: cannot check {path} for a conflicting "
-                                f"zone ({exc})") from exc
+            # "from None": the original exception would carry the line.
+            raise _unreadable(path, exc) from None
         names = {keyfile.get("connection", "interface-name", fallback=""),
                  keyfile.get("vpn", "dev", fallback="")}
-        other = keyfile.get("connection", "zone", fallback="").strip()
-        if interface in names and other and other != zone:
+        if interface not in names:
+            continue
+        other = keyfile.get("connection", "zone", fallback="").strip() or _default_zone(root)
+        if other != zone:
             found.append(f"{path.name} (zone={other})")
     return found
 
@@ -171,7 +211,7 @@ def bind_interface(root: str, zone: str, interface: str) -> bool:
     if others:
         raise ZoneFileError(f"{interface} is already bound in {', '.join(others)}; "
                             f"refusing to bind it to {zone} as well")
-    profiles = _nm_disagreeing(pathlib.Path(root, NM_CONNECTIONS), zone, interface)
+    profiles = _nm_disagreeing(root, zone, interface)
     if profiles:
         raise ZoneFileError(f"NetworkManager puts {interface} elsewhere: {', '.join(profiles)}; "
                             f"refusing to bind it to {zone}")

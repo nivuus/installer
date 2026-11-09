@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import traceback
 import unittest
 from unittest import mock
 
@@ -203,9 +204,72 @@ class BindInterface(unittest.TestCase):
         self._profile("guest.nmconnection", "[connection]\nid=guest\ntype=vpn\nzone=external\n\n"
                                             "[vpn]\ndev=nvguest0\n")
         self._profile("lan.nmconnection", "[connection]\nid=lan\ninterface-name=enp15s0\nzone=home\n")
-        self._profile("nozone.nmconnection", "[connection]\nid=x\ninterface-name=nvguest0\n")
         self._profile("notes.txt", "[connection]\ninterface-name=nvguest0\nzone=home\n")
         self.assertTrue(self.tree.bind())
+
+    def _default_zone(self, text):
+        (self.tree.root / "etc/firewalld/firewalld.conf").write_text(text)
+
+    def test_a_profile_without_zone_is_in_the_default_zone(self):
+        # No zone= in the profile means firewalld's DefaultZone.
+        self._profile("nozone.nmconnection", "[connection]\nid=x\ninterface-name=nvguest0\n")
+        for conf, refused in ((None, True),  # firewalld's own default: public
+                              ("# DefaultZone=external\nDefaultZone=internal\n", True),
+                              ("DefaultZone = external\n", False)):
+            self.ext.write_bytes(HOST_EXTERNAL)
+            if conf is not None:
+                self._default_zone(conf)
+            if refused:
+                with self.assertRaises(fz.ZoneFileError, msg=conf) as ctx:
+                    self.tree.bind()
+                self.assertIn("nozone.nmconnection", str(ctx.exception))
+                self.assertEqual(self.ext.read_bytes(), HOST_EXTERNAL)
+            else:
+                self.assertTrue(self.tree.bind(), conf)
+
+    def test_a_malformed_keyfile_never_leaks_its_content(self):
+        secret = "S3CRET-MARKER-psk"
+        bodies = (f"psk={secret}\n[connection]\ninterface-name=nvguest0\n",
+                  f"[connection]\ninterface-name=nvguest0\n[wifi-security]\n{secret}\n",
+                  f"[wifi-security]\npsk={secret}\n[connection\ninterface-name=nvguest0\n",
+                  f"[wifi-security]\npsk={secret}\n".encode() + b"\xff\xfe\n")
+        for body in bodies:
+            self.ext.write_bytes(HOST_EXTERNAL)
+            nm = self.tree.root / fz.NM_CONNECTIONS
+            nm.mkdir(parents=True, exist_ok=True)
+            path = nm / "wifi.nmconnection"
+            path.write_bytes(body if isinstance(body, bytes) else body.encode())
+            with self.assertRaises(fz.ZoneFileError, msg=body) as ctx:
+                self.tree.bind()
+            shown = "".join(traceback.format_exception(ctx.exception))
+            self.assertNotIn(secret, shown, body)
+            self.assertNotIn("psk", shown, body)
+            self.assertIn("wifi.nmconnection", str(ctx.exception))
+            env = {k: v for k, v in os.environ.items() if k != "PATH"}
+            env["PATH"] = ""
+            cli = subprocess.run([sys.executable, "-I", str(STEP), "--root", str(self.tree.root),
+                                  "external", "nvguest0"], env=env, capture_output=True, text=True)
+            self.assertEqual(cli.returncode, 1)
+            self.assertNotIn(secret, cli.stdout + cli.stderr, body)
+            self.assertIn("wifi.nmconnection", cli.stderr)
+            self.assertEqual(self.ext.read_bytes(), HOST_EXTERNAL)
+
+    def test_the_step_logs_nothing(self):
+        source = STEP.read_text()
+        self.assertNotIn("import logging", source)
+
+    def test_a_utf8_bom_is_accepted_and_kept(self):
+        bom = b"\xef\xbb\xbf"
+        self._profile("guest.nmconnection", "﻿[connection]\nid=guest\nzone=external\n\n"
+                                            "[vpn]\ndev=nvguest0\n")
+        (self.tree.etc / "work.xml").write_bytes(bom + b"<zone>\n  <short>w</short>\n</zone>\n")
+        self.ext.write_bytes(bom + HOST_EXTERNAL)
+        self.assertTrue(self.tree.bind())
+        self.assertEqual(self.ext.read_bytes(),
+                         bom + HOST_EXTERNAL.replace(b"</zone>\n", LINE + b"</zone>\n"))
+        self._profile("tun.nmconnection", "﻿[connection]\ninterface-name=nvguest0\nzone=home\n")
+        with self.assertRaises(fz.ZoneFileError):
+            self.tree.bind()
 
     def test_the_directory_is_synced_after_the_rename(self):
         self.ext.write_bytes(HOST_EXTERNAL)
