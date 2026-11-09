@@ -1,0 +1,14 @@
+# Guest port isolation, 2.4 GHz transmit power and 802.11k neighbor reports,
+# applied once hostapd reports every BSS as ENABLED and read back.
+# Bound to hostapd: stopped with it, started again by its Wants= on every
+# (re)start. A failure shows in `systemctl --failed` without touching hostapd.
+[Unit]
+Description=Nivuus Wi-Fi: per-port settings hostapd cannot carry
+After=hostapd.service
+BindsTo=hostapd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/nivuus-wifi-post /etc/hostapd/2.4Ghz.conf /etc/hostapd/5Ghz.conf
+TimeoutStartSec=120
