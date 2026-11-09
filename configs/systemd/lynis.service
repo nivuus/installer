@@ -1,0 +1,13 @@
+# From CISOfy/lynis 3.1.4 extras/systemd/lynis.service. Local changes: binary
+# path, Type=oneshot (a batch job, not a daemon) and no [Install] section, so it
+# only runs from lynis.timer and never at boot.
+[Unit]
+Description=Security audit and vulnerability scanner
+Documentation=https://cisofy.com/docs/
+
+[Service]
+Nice=19
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+Type=oneshot
+ExecStart=/usr/sbin/lynis audit system --cronjob

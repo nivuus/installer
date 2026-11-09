@@ -1,0 +1,11 @@
+# From CISOfy/lynis 3.1.4 extras/systemd/lynis.timer, unchanged.
+[Unit]
+Description=Daily timer for the Lynis security audit and vulnerability scanner
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1800
+Persistent=false
+
+[Install]
+WantedBy=timers.target
