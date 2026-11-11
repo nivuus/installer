@@ -63,12 +63,30 @@ for d in 10/4:0:0:0/sda/26000 11/6:0:0:0/sdb/33000; do
     echo "$temp" > "$TMP/sys/hwmon$idx/temp1_input"
     ln -s "$TMP/scsi/$scsi" "$TMP/sys/hwmon$idx/device"
 done
-for dev in 0000:01:00.0/0x10de/0x030000 0000:00:17.0/0x8086/0x010601; do
+for dev in 0000:01:00.0/0x10de/0x030000 0000:00:17.0/0x8086/0x010601 0000:00:02.0/0x8086/0x030000; do
     IFS=/ read -r addr vendor class <<<"$dev"
     mkdir -p "$TMP/pci/devices/$addr"
     echo "$vendor" > "$TMP/pci/devices/$addr/vendor"
     echo "$class" > "$TMP/pci/devices/$addr/class"
 done
+# PCIe link health: like the real /sys/bus/pci/devices, the GPU entry is a
+# link into the device tree, under its bridge port 00:01.0. Both carry AER
+# totals; the port carries the link status. The integrated GPU (00:02.0) sits
+# on the root complex and has no AER files, so it must get no column.
+aer() {  # dir cor nonfatal fatal
+    printf 'RxErr 0\nBadTLP %s\nTOTAL_ERR_COR %s\n' "$2" "$2" > "$1/aer_dev_correctable"
+    printf 'CmpltTO 0\nTOTAL_ERR_NONFATAL %s\n' "$3" > "$1/aer_dev_nonfatal"
+    printf 'DLP 0\nTOTAL_ERR_FATAL %s\n' "$4" > "$1/aer_dev_fatal"
+}
+PORT="$TMP/pcitree/pci0000:00/0000:00:01.0"
+mkdir -p "$PORT/0000:01:00.0"
+cp "$TMP/pci/devices/0000:01:00.0/"* "$PORT/0000:01:00.0/"
+rm -r "$TMP/pci/devices/0000:01:00.0"
+ln -s "$PORT/0000:01:00.0" "$TMP/pci/devices/0000:01:00.0"
+aer "$PORT" 4 0 0
+aer "$PORT/0000:01:00.0" 2 1 0
+echo "16.0 GT/s PCIe" > "$PORT/current_link_speed"
+echo 16 > "$PORT/current_link_width"
 printf '#!/bin/sh\n[ -n "${FAKE_SMI_HANG:-}" ] && exec sleep "$FAKE_SMI_HANG"\necho "00000000:01:00.0, 41"\n' > "$TMP/nvidia-smi"
 chmod +x "$TMP/nvidia-smi"
 touch "$TMP/persistenced.socket"
@@ -191,6 +209,31 @@ check "SATA disk named by block device"    "26.0" "$(col drive_sda_c)"
 check "second disk on its own column"      "33.0" "$(col drive_sdb_c)"
 check "GPU temperature via nvidia-smi"     "41.0" "$(col gpu_01:00.0_c)"
 check_absent "non-NVIDIA PCI device skipped" "gpu_00:17.0" "$hdr"
+
+echo "== PCIe link health of the graphics card =="
+check "port corrected AER total"          "4"    "$(col aer_cor_00:01.0)"
+check "GPU corrected AER total"           "2"    "$(col aer_cor_01:00.0)"
+check "GPU non-fatal AER total"           "1"    "$(col aer_nonfatal_01:00.0)"
+check "GPU fatal AER total"               "0"    "$(col aer_fatal_01:00.0)"
+check "port link speed in GT/s"           "16.0" "$(col link_gts_00:01.0)"
+check "port link width"                   "16"   "$(col link_width_00:01.0)"
+check_absent "no link columns on the GPU itself" "link_gts_01:00.0" "$hdr"
+check_absent "device without AER gets no column" "aer_cor_00:02.0" "$hdr"
+check_absent "non-display device not watched"    "aer_cor_00:17.0" "$hdr"
+warned=$(python3 -c '
+import os, sys
+sys.path.insert(0, os.path.dirname(os.environ["BB_PATH"]))
+import hw_blackbox_pcie as p
+msgs = []
+s = p.PcieSensors(sys.argv[1], msgs.append)
+s.values()
+open(sys.argv[2] + "/aer_dev_correctable", "w").write("TOTAL_ERR_COR 9\n")
+s.values(); s.values()
+print("|".join(msgs))' "$PCI" "$PORT")
+check "a rising AER total is journaled"   "AER cor errors on 0000:00:01.0" "$warned"
+check "with before and after values"      "4 -> 9" "$warned"
+case "$warned" in *"|"*) bad "logged once, not at every sample" "$warned";; *) ok "logged once, not at every sample";; esac
+aer "$PORT" 4 0 0
 
 echo "== nvidia-smi only runs while persistenced holds the card =="
 mv "$TMP/persistenced.socket" "$TMP/persistenced.away"

@@ -5,6 +5,10 @@ Historique des versions et modifications de Nivuus.
 ## [Non publié]
 
 ### Ajouté
+- Boîte noire : santé du lien PCIe de la carte graphique, montée sur une
+  rallonge (riser). Pour la carte et son port, les totaux d'erreurs AER
+  (corrigées, non fatales, fatales), et pour le port la vitesse et la largeur
+  négociées. Toute hausse d'un total est écrite dans le journal.
 - Boîte noire : état de l'onduleur (statut, tension secteur, charge, batterie)
   relevé toutes les 2 s par NUT, et chaque changement de statut écrit dans le
   journal, pour savoir au prochain gel si le secteur a bougé.
