@@ -22,6 +22,15 @@ before the package under test runs. Prerequisites are never part of the
 idempotence comparison: the first snapshot is taken only after the package
 under test has completed its own first pass.
 
+That first pass must CHANGE the tree, measured against a snapshot taken just
+before it: two identical snapshots of a tree the hook never touched would
+otherwise read as a pass, so a hook that ignores `--root` (or regressed into
+writing nothing) would be certified idempotent with "0 identical entries".
+Every install hook in the suite writes under its root (checked 2026-11-14:
+console, desk, home-desk, home-manager, home-stock, media-manager); a package
+that needs no files at all declares no install hook, which still passes as
+"nothing to prove".
+
 A failure keeps the scratch root and names it, because "the second run differs"
 is not actionable on its own: the reader needs the two trees to compare. A
 successful run removes its scratch root - this harness runs on every pull
@@ -154,6 +163,7 @@ def check_package(package_dir: str, answers=None, hw=None, ignore=(), prereqs=()
                     f"{manifest.name}: prerequisite '{prereq.name}' failed to install: {exc}"
                 )
 
+        before = snapshot(root, ignore)
         run_install(manifest, hw, answers, root)
         first = snapshot(root, ignore)
         run_install(manifest, hw, answers, root)
@@ -161,6 +171,14 @@ def check_package(package_dir: str, answers=None, hw=None, ignore=(), prereqs=()
     except HookError as exc:
         return 1, f"{manifest.name}: the install hook failed: {exc}"
 
+    if first == before:
+        # Two identical snapshots prove nothing when the pass under test
+        # wrote nothing: a hook ignoring --root would read as idempotent.
+        return 1, (
+            f"{manifest.name}: the install hook changed nothing under the scratch "
+            f"root (does it honour --root?), so there is no idempotence to prove"
+            f"\n\nScratch root kept at: {root}"
+        )
     if first == second:
         shutil.rmtree(root, ignore_errors=True)
         return 0, (f"{manifest.name}: install is idempotent ({len(first)} identical entries)")

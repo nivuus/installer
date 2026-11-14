@@ -74,6 +74,42 @@ check("the report names the grandchild package", "grandchild" in report, True)
 import os  # noqa: E402
 import tempfile  # noqa: E402
 
+# --- a hook that writes nothing under --root proves nothing --------------- #
+# Two empty snapshots are identical, so without a "did the first pass change
+# the tree" check a hook that ignores --root passed as "idempotent (0
+# identical entries)". This one writes only into its own package directory.
+OUTSIDER_HOOK = '''import argparse, json, sys
+parser = argparse.ArgumentParser()
+parser.add_argument("--phase", required=True)
+parser.add_argument("--root", default="/")
+parser.parse_args()
+json.load(sys.stdin)
+with open("written-outside-the-root.conf", "w") as handle:
+    handle.write("state=ready\\n")
+'''
+
+with tempfile.TemporaryDirectory() as tmp:
+    pkg = pathlib.Path(tmp) / "outsider"
+    (pkg / "hooks").mkdir(parents=True)
+    (pkg / "nivuus-package.yaml").write_text(
+        "apiVersion: nivuus.dev/v1\nname: outsider\nversion: 1.0.0\n"
+        'label: "outsider"\ntier: userspace\nhooks:\n  install: hooks/install.py\n')
+    (pkg / "hooks" / "install.py").write_text(OUTSIDER_HOOK)
+    status, report = check_package(str(pkg))
+    check("a hook that writes nothing under --root is refused", status, 1)
+    check("the refusal says the install left the root untouched",
+          "changed nothing under the scratch root" in report, True)
+
+    # With a prerequisite installed first, the root is no longer empty: the
+    # package's own pass still has to change it.
+    status, report = check_package(str(pkg), prereqs=(str(FIXTURES / "idempotent"),))
+    check("a hook adding nothing to its prerequisite's tree is refused", status, 1)
+
+# The fixtures that do write keep passing: the check measures the package's
+# own pass, not the size of the tree.
+status, report = check_package(str(FIXTURES / "dependent"), prereqs=(str(FIXTURES / "idempotent"),))
+check("a package whose own pass adds a file still passes", status, 0)
+
 with tempfile.TemporaryDirectory() as tmp:
     path = os.path.join(tmp, "f")
     with open(path, "w") as handle:
