@@ -138,6 +138,12 @@ WINGET_DEPS_REQUIRED = ("Microsoft.VCLibs.140.00.UWPDesktop",
 # VM that happened to be running it, which left a fresh machine with nothing
 # to extract at all).
 PACKAGED_AGENT_EXE = Path(__file__).resolve().parent / "payload" / "agent" / "agent.exe"
+# The one build of it this package accepts: the tracked file as measured on
+# 2026-11-14. The source revision of this build is NOT recorded (see
+# payload/agent/README.md); the pin only guarantees that the binary that ships
+# is that file, and that replacing it is a deliberate change of this constant
+# rather than a silent blob swap.
+PACKAGED_AGENT_SHA256 = "63491776adc9879009470435c4fd97ba17a2a7e9bdd2d8ede2734883f9e21eea"
 
 # Retrogaming (OPTIONAL, --retro). Three artefacts the guest cannot obtain on
 # its own, ~30 MB in total: a payload built WITHOUT retrogaming carries none
@@ -366,8 +372,9 @@ def install_packaged_agent(drivers_dir: Path) -> str:
 
     Unlike fetch(), there is no network and no manifest here: the source of
     truth is the file tracked in this repository's git history
-    (PACKAGED_AGENT_EXE), not a URL that can rot. What still matters is
-    verifying the COPY, not just making it - an 11 MB file that gets
+    (PACKAGED_AGENT_EXE), pinned by PACKAGED_AGENT_SHA256 and refused when
+    it does not match, not a URL that can rot. What still matters is
+    verifying the COPY, not just making it - a 20 MB file that gets
     silently truncated by a full disk or an interrupted process would
     otherwise surface only deep inside provisioning, on a screenless guest,
     as an agent.exe that will not run. Comparing sha256 at both ends catches
@@ -380,10 +387,18 @@ def install_packaged_agent(drivers_dir: Path) -> str:
             "binary must be committed there before this console can be "
             "built at all."
         )
+    src_digest = _sha256(PACKAGED_AGENT_EXE)
+    if src_digest != PACKAGED_AGENT_SHA256:
+        raise FetchError(
+            f"the package's agent.exe ({PACKAGED_AGENT_EXE}) has sha256 "
+            f"{src_digest}, but this package pins PACKAGED_AGENT_SHA256 = "
+            f"{PACKAGED_AGENT_SHA256}: it is not the pinned build. Restore "
+            "the tracked file, or bump the pin on purpose (see "
+            "console/guest/payload/agent/README.md)."
+        )
     dest = drivers_dir / "agent" / "agent.exe"
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(PACKAGED_AGENT_EXE, dest)
-    src_digest = _sha256(PACKAGED_AGENT_EXE)
     dest_digest = _sha256(dest)
     if src_digest != dest_digest:
         raise FetchError(

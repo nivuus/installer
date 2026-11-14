@@ -229,8 +229,9 @@ what it took to actually build and boot the guest:
 `console/guest/payload/agent/agent.exe` is a **compiled** artefact — the
 Guacamole agent from `nivuus/desk` — vendored directly into this repository
 instead of being fetched or built. `fetch_payload.py` copies it into the
-offline payload tree at build time and verifies the copy's sha256 against
-the committed file; it is no longer "extracted from the current Windows VM
+offline payload tree at build time, after refusing any file whose sha256 is
+not `PACKAGED_AGENT_SHA256`, and verifies the copy's sha256 against the
+committed file; it is no longer "extracted from the current Windows VM
 before it is wiped", which used to mean a fresh machine — one that never ran
 that VM — had nothing to extract and could not install this console at all.
 
@@ -241,10 +242,11 @@ build it from source and instead carries the binary directly. Two costs come
 with that: this repository now duplicates ownership of an artefact that is
 not its own, and the vendored copy **will drift** on every new agent
 version, since nothing here rebuilds or re-syncs it automatically — bumping
-it is a manual step, easy to forget. It also freezes ~11 MB into this
-repository's git history, permanently. See
+it is a manual step (bump the pin with the file). It also freezes ~31 MB
+(two builds so far) into this repository's git history, permanently. See
 `console/guest/payload/agent/README.md` for the measured size/sha256 of the
-version currently vendored.
+version currently vendored, and for the fact that its source revision is
+not recorded.
 
 ## Limites connues
 
