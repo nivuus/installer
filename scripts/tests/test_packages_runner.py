@@ -425,6 +425,40 @@ with tempfile.TemporaryDirectory() as tmp:
           pid is not None and _gone_within(pid, 3), True)
     _cleanup(pid)
 
+# --- hook stdout that is not valid UTF-8 ------------------------------------ #
+# One stray byte (a child tool printing in a legacy encoding) must not abort
+# the whole lay with a UnicodeDecodeError: it is decoded with replacement and
+# the protocol events around it still count.
+with tempfile.TemporaryDirectory() as tmp:
+    binary = _resolve_only_pkg(
+        tmp, "binary-noise",
+        RESOLVE_BOOTSTRAP +
+        "sys.stdout.flush()\n"
+        "sys.stdout.buffer.write(b'\\xff\\n')\n"
+        "sys.stdout.buffer.flush()\n"
+        "print(json.dumps({'event': 'facts', 'facts': {'after_noise': 1}}))\n")
+    try:
+        noisy = run_resolve(binary, HW, {})
+        check("a non-UTF-8 byte on stdout does not stop the hook's events",
+              noisy.facts.get("after_noise"), 1)
+    except UnicodeDecodeError as exc:
+        failures.append(f"a non-UTF-8 byte on hook stdout raised {exc!r}")
+
+# The same byte on stderr of a failing hook must still surface as HookError.
+with tempfile.TemporaryDirectory() as tmp:
+    binary_fail = _resolve_only_pkg(
+        tmp, "binary-stderr",
+        RESOLVE_BOOTSTRAP +
+        "sys.stderr.buffer.write(b'bad \\xff byte\\n')\nsys.exit(4)\n")
+    try:
+        run_resolve(binary_fail, HW, {})
+        failures.append("a failing hook with binary stderr did not raise")
+    except HookError as exc:
+        check("a failing hook with binary stderr reports its exit code",
+              "exited 4" in str(exc), True)
+    except UnicodeDecodeError as exc:
+        failures.append(f"a non-UTF-8 byte on hook stderr raised {exc!r}")
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

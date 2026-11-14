@@ -202,11 +202,15 @@ def _run_hook(manifest: Manifest, phase: str, hw: dict, answers: dict,
 
     # stderr to a real file, never a second pipe (see module docstring for
     # why): it is only ever read back as a short tail on failure.
-    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file:
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8",
+                                errors="replace") as stderr_file:
+        # The protocol is UTF-8 JSON, but a hook's children print whatever
+        # their locale gives them: one stray byte must not abort the lay
+        # with a UnicodeDecodeError, so undecodable bytes become U+FFFD.
         proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=stderr_file, text=True, cwd=manifest.root,
-            start_new_session=True)
+            stderr=stderr_file, encoding="utf-8", errors="replace",
+            cwd=manifest.root, start_new_session=True)
 
         # The context is a few KB - well under a pipe buffer (64 KiB on
         # Linux) - so a plain write-then-close is safe; no feeder thread.
