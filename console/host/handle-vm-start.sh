@@ -5,9 +5,9 @@
 # nivuus-vm-wake.service (the desk platform's `wake` through vm-control.sh).
 #
 # The forward-ports have ONE owner: the libvirt hook started/begin/rules.sh,
-# which libvirt runs on every start and which installs every port (TCP
-# 3389/47984/47989/48010, UDP 47998-48000) towards the VM's fixed address in
-# every active zone. This script never adds a rule of its own and never needs
+# which libvirt runs on every start and which installs the ports listed in
+# qemu.d/Windows/forward-ports.sh towards the VM's fixed address, in the zones
+# that file allow-lists. This script never adds a rule of its own and never needs
 # the VM's address: it starts the domain, then checks that the hook's rules are
 # there, re-running that same hook if they went missing (a firewalld reload
 # drops runtime rules while the VM keeps running).

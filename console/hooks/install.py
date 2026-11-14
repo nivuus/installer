@@ -60,6 +60,10 @@ HOOK_FILES = [
      f"{HOOK_BASE}/prepare/begin/bind-vfio-gpu.sh"),
     (f"host/libvirt/hooks/qemu.d/{VM_NAME}/release/end/rebind-host-gpu.sh",
      f"{HOOK_BASE}/release/end/rebind-host-gpu.sh"),
+    # Sourced by both rules.sh hooks: the single allow-list of zones and
+    # ports. Outside every phase directory, so the dispatcher never runs it.
+    (f"host/libvirt/hooks/qemu.d/{VM_NAME}/forward-ports.sh",
+     f"{HOOK_BASE}/forward-ports.sh"),
     (f"host/libvirt/hooks/qemu.d/{VM_NAME}/started/begin/rules.sh",
      f"{HOOK_BASE}/started/begin/rules.sh"),
     (f"host/libvirt/hooks/qemu.d/{VM_NAME}/stopped/end/rules.sh",
