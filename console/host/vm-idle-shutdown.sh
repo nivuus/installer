@@ -91,19 +91,36 @@ fi
 # same query. State layout: "<guest_time> <guest_idle> <strikes>".
 #
 # Unknown is NOT idle: if the guest cannot be measured (WinRM down, VM still
-# booting, password file broken) the pass counts as active and says so in the
+# booting, password file missing) the pass counts as active and says so in the
 # journal. Hibernating a guest we cannot see could cut a session.
+#
+# One exception: the guest REFUSED the password. That is a configuration
+# defect that no later pass will cure, so counting it as active would keep the
+# VM up forever. The CPU signal is then left out, the decision rests on the
+# flows and the app activity alone, and the journal names the defect. The
+# prefix is winrm_exec.py's AUTH_PREFIX (test_vm_idle_shutdown.sh reads it
+# from there). Note that the hibernation request below goes through WinRM too
+# and will fail the same way, so such a pass ends in the ACPI shutdown fallback.
+WINRM_AUTH_PREFIX="error: guest rejected the credentials"
 GUEST_CPU_QUERY='$o = Get-CimInstance Win32_PerfRawData_PerfOS_Processor | Where-Object { $_.Name -eq "_Total" }; "$($o.Timestamp_Sys100NS) $($o.PercentProcessorTime)"'
 read PREV_T PREV_IDLE STRIKES < "$STATE_FILE" 2>/dev/null || { PREV_T=0; PREV_IDLE=0; STRIKES=0; }
 
 CPU_PCT=0
 CPU_KNOWN=1
-if ! read -r GUEST_T GUEST_IDLE _ < <(timeout 30 "$WINVM" --ps "$GUEST_CPU_QUERY" 2>/dev/null | tr -d "\r") \
+CPU_REFUSED=0
+WINVM_ERR="$STATE_DIR/winvm.stderr"
+GUEST_SAMPLE_LINE=$(timeout 30 "$WINVM" --ps "$GUEST_CPU_QUERY" 2>"$WINVM_ERR" | tr -d "\r")
+if ! read -r GUEST_T GUEST_IDLE _ <<< "$GUEST_SAMPLE_LINE" \
    || ! [[ "$GUEST_T" =~ ^[0-9]+$ && "$GUEST_IDLE" =~ ^[0-9]+$ ]]; then
     CPU_KNOWN=0
     GUEST_T=0
     GUEST_IDLE=0
-    logger -t "$LOG_TAG" "guest CPU unavailable (winvm failed): counting this pass as active"
+    if [[ "$(head -n1 "$WINVM_ERR" 2>/dev/null)" == "$WINRM_AUTH_PREFIX"* ]]; then
+        CPU_REFUSED=1
+        logger -t "$LOG_TAG" "guest CPU unavailable: WinRM authentication refused by the guest (check the admin password file) - deciding on flows and app activity only"
+    else
+        logger -t "$LOG_TAG" "guest CPU unavailable (winvm failed): counting this pass as active"
+    fi
 elif [ "$PREV_T" -gt 0 ]; then
     if [ "$GUEST_T" -gt "$PREV_T" ] && [ "$GUEST_IDLE" -ge "$PREV_IDLE" ]; then
         CPU_PCT=$(( 100 - (GUEST_IDLE - PREV_IDLE) * 100 / (GUEST_T - PREV_T) ))
@@ -114,8 +131,12 @@ elif [ "$PREV_T" -gt 0 ]; then
 fi
 
 # --- Decide ---
-if [ "$FLOWS" -gt 0 ] || [ "$APP_ACTIVE" -eq 1 ] || [ "$CPU_KNOWN" -eq 0 ] \
-   || [ "$CPU_PCT" -ge "$CPU_ACTIVE_THRESHOLD" ] || [ "$CPU_PCT" -lt 0 ] || [ "$PREV_T" -eq 0 ]; then
+if [ "$FLOWS" -gt 0 ] || [ "$APP_ACTIVE" -eq 1 ]; then
+    STRIKES=0
+elif [ "$CPU_REFUSED" -eq 1 ]; then
+    STRIKES=$((STRIKES + 1))
+elif [ "$CPU_KNOWN" -eq 0 ] || [ "$CPU_PCT" -ge "$CPU_ACTIVE_THRESHOLD" ] \
+   || [ "$CPU_PCT" -lt 0 ] || [ "$PREV_T" -eq 0 ]; then
     STRIKES=0
 else
     STRIKES=$((STRIKES + 1))

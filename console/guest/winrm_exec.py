@@ -36,6 +36,19 @@ This is not cosmetic: this repository writes its guest-side comments in
 French, so a measurement that reads them back sees garbage, and may "fix" a
 file that was never broken.
 
+FAILURES OF THE CLIENT ITSELF are told apart, by a fixed English stderr
+prefix and an exit code, so a consumer never reads a wrong password as a
+network problem:
+
+  error: cannot reach guest ...         exit 69  connection refused / timeout
+  error: guest rejected the credentials exit 77  authentication (HTTP 401)
+  error: WinRM protocol error ...       exit 76  any other WinRM/WS-Man error
+  error: password file not found ...    exit 1   nothing was attempted
+
+The remote command's own exit status is returned unchanged and may take any
+value, so the stderr PREFIX is what identifies a client failure; the remote
+command's stderr is always printed behind "[stderr]".
+
 Usage: winrm_exec.py {cmd|ps} <command...>
 Env:   GUEST_IP (default 192.168.3.2), GUEST_USER (default Administrator),
        GUEST_PASS_FILE (default: the file activate's `secrets` step writes,
@@ -44,7 +57,14 @@ Env:   GUEST_IP (default 192.168.3.2), GUEST_USER (default Administrator),
 import os
 import sys
 
+import requests
 import winrm
+from winrm.exceptions import (
+    AuthenticationError,
+    WinRMError,
+    WinRMOperationTimeoutError,
+    WinRMTransportError,
+)
 
 # console/, for guest_secrets - the single source of the password path.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -53,6 +73,15 @@ from guest_secrets import ADMIN_PASSWORD_FILE  # noqa: E402
 IP = os.environ.get("GUEST_IP", "192.168.3.2")
 USER = os.environ.get("GUEST_USER", "Administrator")
 PASS_FILE = os.environ.get("GUEST_PASS_FILE", ADMIN_PASSWORD_FILE)
+
+# See the docstring. sysexits(3) values: none of them is a code this tool
+# used before, and EX_UNAVAILABLE / EX_PROTOCOL / EX_NOPERM say what they mean.
+UNREACHABLE_PREFIX = "error: cannot reach guest"
+AUTH_PREFIX = "error: guest rejected the credentials"
+PROTOCOL_PREFIX = "error: WinRM protocol error"
+EXIT_UNREACHABLE = 69
+EXIT_PROTOCOL = 76
+EXIT_AUTH = 77
 
 
 def main() -> int:
@@ -81,9 +110,21 @@ def main() -> int:
             result = session.run_ps(
                 "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " + command
             )
-    except Exception as e:
-        print(f"error: cannot reach guest at {IP}:5985: {e}", file=sys.stderr)
-        return 1
+    # Order matters: AuthenticationError is a WinRMError, and requests'
+    # ConnectTimeout is both a ConnectionError and a Timeout. Anything else is
+    # a bug of this tool and is left to raise, with its traceback.
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        print(f"{UNREACHABLE_PREFIX} at {IP}:5985: {e}", file=sys.stderr)
+        return EXIT_UNREACHABLE
+    except AuthenticationError as e:
+        print(f"{AUTH_PREFIX} at {IP}:5985 for user {USER} "
+              f"(password file {PASS_FILE}): {e}", file=sys.stderr)
+        return EXIT_AUTH
+    except (WinRMTransportError, WinRMOperationTimeoutError, WinRMError,
+            requests.exceptions.RequestException) as e:
+        print(f"{PROTOCOL_PREFIX} from guest at {IP}:5985: "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+        return EXIT_PROTOCOL
     out = result.std_out.decode("utf-8", "replace").strip()
     err = result.std_err.decode("utf-8", "replace").strip()
     if out:

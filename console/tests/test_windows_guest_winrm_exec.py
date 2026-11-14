@@ -144,6 +144,75 @@ with tempfile.TemporaryDirectory() as d:
     doc = winrm_exec.__doc__ or ""
     check_in("le docstring avertit du piege Get-Content", "-Encoding UTF8", doc)
 
+
+# --- Client-side failures are classified, never all "cannot reach" -------- #
+# A wrong password (HTTP 401) used to print "cannot reach guest", which the
+# consumers read as a network problem. The exception classes are pywinrm's
+# and requests' own (winrm.exceptions, requests.exceptions in pywinrm 0.5).
+import contextlib  # noqa: E402
+import io  # noqa: E402
+
+import requests  # noqa: E402
+from winrm import exceptions as winrm_errors  # noqa: E402
+
+
+def lancer_echec(exc, tmp_pass):
+    """Runs main() with a session whose call raises `exc`; (rc, stderr)."""
+
+    class RaisingSession(FakeSession):
+        def run_ps(self, command):
+            raise exc
+
+    class RaisingWinrm:
+        Session = RaisingSession
+
+    vrai, vrai_argv, vrai_pass = winrm_exec.winrm, sys.argv, winrm_exec.PASS_FILE
+    winrm_exec.winrm = RaisingWinrm
+    winrm_exec.PASS_FILE = str(tmp_pass)
+    sys.argv = ["winrm_exec.py", "ps", "hostname"]
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            rc = winrm_exec.main()
+    finally:
+        winrm_exec.winrm, sys.argv, winrm_exec.PASS_FILE = vrai, vrai_argv, vrai_pass
+    return rc, err.getvalue()
+
+
+CASES = [
+    ("connection refused", requests.exceptions.ConnectionError("refused"),
+     winrm_exec.UNREACHABLE_PREFIX, winrm_exec.EXIT_UNREACHABLE),
+    ("connect timeout", requests.exceptions.ConnectTimeout("timed out"),
+     winrm_exec.UNREACHABLE_PREFIX, winrm_exec.EXIT_UNREACHABLE),
+    ("read timeout", requests.exceptions.ReadTimeout("timed out"),
+     winrm_exec.UNREACHABLE_PREFIX, winrm_exec.EXIT_UNREACHABLE),
+    ("credentials rejected (401)",
+     winrm_errors.InvalidCredentialsError("the specified credentials were rejected"),
+     winrm_exec.AUTH_PREFIX, winrm_exec.EXIT_AUTH),
+    ("HTTP 500 from the WinRM service",
+     winrm_errors.WinRMTransportError("http", 500, "boom"),
+     winrm_exec.PROTOCOL_PREFIX, winrm_exec.EXIT_PROTOCOL),
+    ("WS-Management fault",
+     winrm_errors.WSManFaultError(500, "m", "r", "fault reason"),
+     winrm_exec.PROTOCOL_PREFIX, winrm_exec.EXIT_PROTOCOL),
+]
+with tempfile.TemporaryDirectory() as d:
+    tmp_pass = pathlib.Path(d) / "windows-admin.pass"
+    tmp_pass.write_text("motdepasse\n")
+    for label, exc, prefix, code in CASES:
+        rc, err = lancer_echec(exc, tmp_pass)
+        check(f"{label}: exit code", rc, code)
+        check(f"{label}: stderr prefix", err.startswith(prefix), True)
+        check(f"{label}: the password never appears", "motdepasse" in err, False)
+
+prefixes = [winrm_exec.UNREACHABLE_PREFIX, winrm_exec.AUTH_PREFIX,
+            winrm_exec.PROTOCOL_PREFIX]
+codes = [winrm_exec.EXIT_UNREACHABLE, winrm_exec.EXIT_AUTH, winrm_exec.EXIT_PROTOCOL]
+check("the three prefixes are distinct", len(set(prefixes)), 3)
+check("no prefix is a prefix of another",
+      any(a != b and a.startswith(b) for a in prefixes for b in prefixes), False)
+check("the three exit codes are distinct", len(set(codes)), 3)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:

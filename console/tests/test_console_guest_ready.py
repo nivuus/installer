@@ -186,6 +186,40 @@ check("temoin absent cote invite (WinRM a repondu) rend une chaine vide, "
       "PAS None : ce n est pas la meme cause qu un WinRM injoignable",
       watch.read_marker("192.168.3.2", run=run), "")
 
+# The client reached the guest but could not run the command: wrong password
+# (HTTP 401) or another WinRM error. Neither is "unreachable" (None) nor "the
+# guest answered" (a string): read_marker() names the cause.
+import winrm_exec  # noqa: E402  (GUEST_DIR is already on sys.path)
+
+check("guest-ready-watch matches winrm_exec.py's own unreachable prefix",
+      winrm_exec.UNREACHABLE_PREFIX in watch._WINRM_UNREACHABLE_PREFIXES, True)
+check("guest-ready-watch's client-failure prefixes are winrm_exec.py's own",
+      watch._WINRM_CLIENT_FAILURE_PREFIXES,
+      {winrm_exec.AUTH_PREFIX: watch.AUTH_REFUSED,
+       winrm_exec.PROTOCOL_PREFIX: watch.PROTOCOL_ERROR})
+run, _ = recording_winrm({
+    "192.168.3.2": FakeWinrmCall(
+        winrm_exec.EXIT_AUTH, "",
+        f"{winrm_exec.AUTH_PREFIX} at 192.168.3.2:5985 for user Administrator "
+        "(password file /x): the specified credentials were rejected"),
+})
+auth = watch.read_marker("192.168.3.2", run=run)
+check("credentials rejected: a client failure, not a marker string",
+      isinstance(auth, watch.WinrmClientFailure), True)
+check("credentials rejected: the cause is named",
+      getattr(auth, "cause", None), watch.AUTH_REFUSED)
+run, _ = recording_winrm({
+    "192.168.3.2": FakeWinrmCall(
+        winrm_exec.EXIT_PROTOCOL, "",
+        f"{winrm_exec.PROTOCOL_PREFIX} from guest at 192.168.3.2:5985: "
+        "WinRMTransportError: Bad HTTP response returned from server. Code 500"),
+})
+proto = watch.read_marker("192.168.3.2", run=run)
+check("WinRM protocol error: a client failure, not a marker string",
+      isinstance(proto, watch.WinrmClientFailure), True)
+check("WinRM protocol error: the cause is named",
+      getattr(proto, "cause", None), watch.PROTOCOL_ERROR)
+
 # WinRM DID answer and the marker exists: its raw content comes back.
 run, _ = recording_winrm({
     "192.168.3.2": FakeWinrmCall(0, "provision_version=B3\ncompleted=x\n", ""),
@@ -563,6 +597,16 @@ check("les deux causes produisent des messages DIFFERENTS - c est le "
       out_unreachable != out_absent, True)
 check("le message 'absent' ne dit pas aussi injoignable",
       "injoignable" in out_absent, False)
+
+# A rejected password is reported by name, never as "WinRM injoignable".
+out_auth, stopped, redefined = run_main(
+    "running", watch.WinrmClientFailure(watch.AUTH_REFUSED, "401"), 60)
+check("INSTALLING (credentials rejected): the timer keeps polling",
+      stopped, False)
+check("credentials rejected: the journal does not say unreachable",
+      "injoignable" in out_auth, False)
+check("credentials rejected: the journal names the authentication failure",
+      "authentication" in out_auth.lower(), True)
 
 out_stale, stopped, redefined = run_main(
     "running", "provision_version=B2\n", 60, expected="B3")

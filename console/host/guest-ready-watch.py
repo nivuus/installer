@@ -140,6 +140,26 @@ _WINRM_UNREACHABLE_PREFIXES = (
     "error: password file not found",
 )
 
+# The client DID reach the guest but could not run the command. Copies of
+# winrm_exec.py's AUTH_PREFIX / PROTOCOL_PREFIX (this script runs standalone,
+# see DOMAIN_PY), pinned against them by test_console_guest_ready.py.
+AUTH_REFUSED = "authentication"
+PROTOCOL_ERROR = "protocol"
+_WINRM_CLIENT_FAILURE_PREFIXES = {
+    "error: guest rejected the credentials": AUTH_REFUSED,
+    "error: WinRM protocol error": PROTOCOL_ERROR,
+}
+
+
+class WinrmClientFailure:
+    """read_marker()'s answer when WinRM was reached but refused the command
+    (wrong password, protocol error): neither "unreachable" (None) nor "the
+    guest answered" (a string), and named in the journal as what it is."""
+
+    def __init__(self, cause: str, detail: str):
+        self.cause = cause
+        self.detail = detail
+
 # "a reasonable delay" per the task this script implements: long enough
 # that a normal unattended LTSC install (including the reboots driver
 # installs cause) is never mistaken for a failure, short enough that a
@@ -325,12 +345,13 @@ def marker_says_ready(marker_text: str, expected: str) -> bool:
     return pattern.search(marker_text) is not None
 
 
-def read_marker(ip: str, run=subprocess.run) -> str | None:
+def read_marker(ip: str, run=subprocess.run) -> str | WinrmClientFailure | None:
     """The provisioning marker's raw content, read over WinRM - or None
     when WinRM itself could not be reached (connection failure, or a
     missing GUEST_PASS_FILE), as opposed to "" (or any text without the
     expected line) when WinRM DID answer but the marker is not there yet,
-    or not at the expected version. These are deliberately told apart:
+    or not at the expected version - or a WinrmClientFailure when WinRM was
+    reached but refused the command. These are deliberately told apart:
     "the guest has not spoken at all" and "it has spoken but is not done"
     call for different journal lines - see main().
 
@@ -346,6 +367,9 @@ def read_marker(ip: str, run=subprocess.run) -> str | None:
     stderr = getattr(proc, "stderr", "") or ""
     if stderr.startswith(_WINRM_UNREACHABLE_PREFIXES):
         return None
+    for prefix, cause in _WINRM_CLIENT_FAILURE_PREFIXES.items():
+        if stderr.startswith(prefix):
+            return WinrmClientFailure(cause, stderr.strip().splitlines()[0])
     return getattr(proc, "stdout", "") or ""
 
 
@@ -434,7 +458,8 @@ def stop_self(run=subprocess.run) -> None:
        capture_output=True, text=True)
 
 
-def _marker_detail(marker_text: str | None, expected: str) -> str:
+def _marker_detail(marker_text: str | WinrmClientFailure | None,
+                   expected: str) -> str:
     """A short French phrase explaining WHY the guest is not ready yet -
     WinRM unreachable, marker absent, or marker present but stale - the
     three causes classify() collapses into a single INSTALLING/FAILED
@@ -442,6 +467,11 @@ def _marker_detail(marker_text: str | None, expected: str) -> str:
     """
     if marker_text is None:
         return f"WinRM injoignable sur le port {WINRM_PORT}"
+    if isinstance(marker_text, WinrmClientFailure):
+        if marker_text.cause == AUTH_REFUSED:
+            return ("WinRM authentication refused by the guest - check the "
+                    f"admin password file ({marker_text.detail})")
+        return f"WinRM protocol error ({marker_text.detail})"
     if not marker_text.strip():
         return f"temoin absent ({MARKER_PATH})"
     return f"temoin present mais pas a la version {expected}"
@@ -502,7 +532,8 @@ def main(*, domstate_fn=None, ip_fn=None, probe_fn=None, marker_fn=None,
     # a real WinRM session, worth skipping when the port is not even open.
     marker_text = marker_fn(ip) if ip and probe_fn(ip) else None
     expected = version_fn()
-    ready = marker_text is not None and marker_says_ready(marker_text, expected)
+    ready = (isinstance(marker_text, str)
+             and marker_says_ready(marker_text, expected))
     result = classify(domstate=domstate, ready=ready, elapsed_s=elapsed)
     save_state(state_path, {"first_running_at": first_running_at,
                             "classification": result})
