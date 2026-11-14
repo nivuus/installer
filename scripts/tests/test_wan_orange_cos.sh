@@ -11,7 +11,9 @@
 # (hardware tagging) with a UDP socket, passed, and the real DISCOVER left with
 # priority 0: Orange parked the client.
 set -uo pipefail
-[ "$(id -u)" = 0 ] && command -v tcpdump >/dev/null || { echo "SKIP: needs root and tcpdump"; exit 0; }
+# A missing prerequisite exits 77, the conventional "skipped" status, never 0:
+# `make test-netns` reports it and fails under CI.
+[ "$(id -u)" = 0 ] && command -v tcpdump >/dev/null || { echo "SKIP: needs root and tcpdump"; exit 77; }
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/wan-orange.sh"
 NS=nvcos$$; TMP=$(mktemp -d)
 trap 'ip netns del $NS 2>/dev/null; rm -rf "$TMP"' EXIT

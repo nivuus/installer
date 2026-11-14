@@ -4,6 +4,7 @@
 # test-engine   Run the install engine against a loopback disk image (root).
 # test-portal   Launch the web portal locally on :8080 for wizard testing.
 # test-vm       Boot the built ISO in QEMU (UEFI) with the portal on :8080.
+# test-netns    WAN wire proofs in network namespaces (root, tcpdump, dhclient).
 # windows-unattend  Build the secondary ISO that unattends the Windows guest install.
 # clean         Remove build artefacts.
 
@@ -14,7 +15,7 @@ TARGET_IMG    ?= /tmp/nivuus-target.img
 TARGET_SIZE   ?= 16G
 OVMF          ?= /usr/share/OVMF/OVMF_CODE.fd
 
-.PHONY: build-iso test-engine test-portal test-vm windows-unattend test-packages test-scripts clean help
+.PHONY: build-iso test-engine test-portal test-vm windows-unattend test-packages test-scripts test-netns clean help
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*' $(MAKEFILE_LIST) | sed 's/:.*//' | sort
@@ -103,7 +104,7 @@ test-packages: test-scripts
 	          test_common_hardware \
 	          test_install_engine_features \
 	          test_install_engine_base test_orange_dhcp_options test_wan_orange_lan6 test_nivuus_bios test_hw_blackbox_ups \
-	          test_firewalld_zone; do \
+	          test_firewalld_zone test_nivuus_wifi_post; do \
 	    echo "--- $$t"; \
 	    $(PYTHON) $(dir $(INSTALLER_DIR))scripts/tests/$$t.py || exit 1; \
 	done
@@ -112,6 +113,7 @@ test-packages: test-scripts
 	else \
 	    echo "--- console suites skipped (CONSOLE_SUITES=0): hardware-bound"; \
 	fi
+	@echo "--- network-namespace suites not run here: make test-netns (root, tcpdump, dhclient)"
 
 # Run the host-maintenance script suites (no root, no hardware, no Python).
 #
@@ -138,10 +140,38 @@ test-packages: test-scripts
 # cannot mask them. They need nothing, so they run first and always.
 # Shell, so their own loop, as console/Makefile does for test_handle_vm_start.
 test-scripts:
-	@for t in test_hw_blackbox test_net_rps_ecores test_pcie_wifi_link_guard test_orange_dhclient_hooks test_wan_cutover test_wan_orange_check; do \
+	@for t in test_hw_blackbox test_net_rps_ecores test_pcie_wifi_link_guard test_orange_dhclient_hooks test_wan_cutover test_wan_orange_check test_ha_cli test_disk_maintenance test_optimize_cpu_thermal; do \
 	    echo "--- $$t"; \
 	    bash $(dir $(INSTALLER_DIR))scripts/tests/$$t.sh || exit 1; \
 	done
+
+# Run the suites that prove what really leaves the WAN interface (root,
+# tcpdump and dhclient; they create network namespaces and write a scratch
+# configuration under /etc/dhcp, so they are not part of test-packages and
+# must not be run on a production router).
+#
+# A suite missing a prerequisite exits 77 ("skipped"), never 0: until
+# 2026-11-14 both printed SKIP and exited 0, and no target ran them, so a
+# skipped proof read exactly like a passed one. Skips are reported, and they
+# fail the target under CI (CI=1 or CI=true), where a skip means the job is
+# not provisioned to run the proof it claims to run.
+NETNS_SUITES := test_wan_orange_cos test_orange_dhclient_wire
+
+test-netns:
+	@skipped=0; \
+	for t in $(NETNS_SUITES); do \
+	    echo "--- $$t"; \
+	    bash $(dir $(INSTALLER_DIR))scripts/tests/$$t.sh; rc=$$?; \
+	    if [ $$rc -eq 77 ]; then \
+	        echo "--- $$t SKIPPED (missing prerequisite)"; skipped=$$((skipped + 1)); \
+	    elif [ $$rc -ne 0 ]; then \
+	        exit 1; \
+	    fi; \
+	done; \
+	if [ $$skipped -gt 0 ]; then \
+	    echo "--- $$skipped network-namespace suite(s) skipped"; \
+	    case "$(CI)" in 1|true) echo "--- a skip is a failure under CI"; exit 1 ;; esac; \
+	fi
 
 # Build the secondary ISO that unattends the Windows guest install (root:
 # inspecting the LTSC medium needs a loop mount).
