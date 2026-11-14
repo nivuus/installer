@@ -126,7 +126,11 @@ things about it are easy to break:
   opens 5985 at the FIRST provisioning stage, deliberately, so a reachable
   port only ever proves the guest is alive enough to accept a command, never
   that provisioning finished. The timer logs
-  `not_started`/`installing`/`failed` (2h timeout)/`ready`. On `ready` it
+  `not_started`/`installing`/`failed`/`ready`; `failed` is immediate when the
+  guest wrote a current `C:\nivuus\state\PROVISION.failed` (stage and error
+  logged) and otherwise follows the 2h timeout, and since 2026-11 it no longer
+  stops the timer: it re-checks every 30 min so a late `PROVISION.done` is
+  still followed by the redefinition. On `ready` it
   redefines the domain **without** either install medium
   (`domain.py define --replace --keyed-varstore`), stopping the timer only
   once that redefinition itself has actually succeeded, so a transient

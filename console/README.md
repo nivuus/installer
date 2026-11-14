@@ -122,8 +122,11 @@ opens that port at the very first provisioning stage, deliberately, so a
 later stage throwing still leaves a remote door open into the guest — the
 port only ever proves the guest is alive enough to accept a command, never
 that provisioning finished. The timer logs one of four states to the
-journal: `not_started`, `installing`, `failed` (past a 2h timeout with the
-marker still absent or stale), or `ready`. On `ready` it also redefines the
+journal: `not_started`, `installing`, `failed` (at once when the guest wrote
+a current `C:\nivuus\state\PROVISION.failed`, named with its stage and
+error; otherwise past a 2h timeout with the marker still absent or stale;
+the watch then re-checks every 30 min instead of stopping), or `ready`. On
+`ready` it also redefines the
 domain **without** either install medium (`domain.py define --replace
 --keyed-varstore`), so the next boot does not risk re-running Setup; the
 timer only stops itself once that redefinition has actually succeeded, not
