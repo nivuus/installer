@@ -12,7 +12,8 @@
 #
 # The password is the file console/guest_steps.py's `secrets` step writes from
 # the wizard's admin_password answer - never argv, so it cannot leak into the
-# process table - and the same file guest-ready-watch.py reads.
+# process table. winrm_exec.py defaults to that file (console/guest_secrets.py);
+# GUEST_PASS_FILE, when set, names another one and is checked here first.
 #
 # vm-idle-shutdown.sh depends on this script to measure the guest's CPU and to
 # hibernate it: if it breaks, power saving dies and the VM stays on. So it
@@ -21,20 +22,21 @@ set -euo pipefail
 
 PACKAGE_DIR="${NIVUUS_CONSOLE_DIR:-/opt/nivuus-packages/console}"
 EXEC="${NIVUUS_WINRM_EXEC:-$PACKAGE_DIR/guest/winrm_exec.py}"
-PASS_FILE="${GUEST_PASS_FILE:-/var/lib/nivuus/guest/secrets/windows-admin.pass}"
 
 if [ $# -eq 0 ]; then
     echo "usage: winvm <command>            # cmd.exe" >&2
     echo "       winvm --ps <command>       # powershell" >&2
     exit 2
 fi
-[ -r "$PASS_FILE" ] || { echo "winvm: guest password unreadable: $PASS_FILE" >&2; exit 1; }
+if [ -n "${GUEST_PASS_FILE:-}" ]; then
+    [ -r "$GUEST_PASS_FILE" ] || { echo "winvm: guest password unreadable: $GUEST_PASS_FILE" >&2; exit 1; }
+    export GUEST_PASS_FILE
+fi
 [ -r "$EXEC" ] || { echo "winvm: winrm_exec.py not found: $EXEC" >&2; exit 1; }
 
 MODE="cmd"
 if [ "$1" = "--ps" ]; then MODE="ps"; shift; fi
 
-# The names winrm_exec.py actually reads. GUEST_IP and GUEST_USER keep its
-# own defaults (192.168.3.2, Administrator) unless the caller sets them.
-export GUEST_PASS_FILE="$PASS_FILE"
+# GUEST_IP and GUEST_USER keep winrm_exec.py's own defaults (192.168.3.2,
+# Administrator) unless the caller sets them.
 exec python3 "$EXEC" "$MODE" "$@"

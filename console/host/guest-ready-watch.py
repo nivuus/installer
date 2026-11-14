@@ -124,15 +124,9 @@ MARKER_PATH = r"C:\nivuus\state\PROVISION.done"
 WINRM_EXEC = "/opt/nivuus-packages/console/guest/winrm_exec.py"
 
 # The password winrm_exec.py needs is the one console/guest_steps.py's
-# 'secrets' step ALREADY wrote - never re-derived here. That step writes
-# it under activate.py's DEFAULT_GUEST_WORKDIR (/var/lib/nivuus/guest),
-# not winrm_exec.py's OWN default (/root/.config/nivuus/windows-admin.pass,
-# which is build.py's manual-test default, unused by the real activate
-# pipeline): the two just happen to differ, so this must be passed
-# explicitly, never left to winrm_exec.py's default matching by luck.
-# Copied, not imported, same reason as DOMAIN_PY above - this script runs
-# standalone under /usr/local/sbin/.
-GUEST_PASS_FILE = "/var/lib/nivuus/guest/secrets/windows-admin.pass"
+# 'secrets' step ALREADY wrote. winrm_exec.py's own default IS that file
+# (console/guest_secrets.py, the single source of the path), so this script
+# names no password file at all: a copy here could only drift from it.
 
 # Hardcoded, English, literal strings winrm_exec.py itself prints on stderr
 # when it could not even reach the guest to run the command - as opposed to
@@ -342,13 +336,13 @@ def read_marker(ip: str, run=subprocess.run) -> str | None:
 
     Same tool testdomain.py's _marker_present() already uses for the same
     check: console/guest/winrm_exec.py, which reads its password from a
-    FILE (GUEST_PASS_FILE), never from argv - so GUEST_IP is passed through
+    FILE (its own default, the one activate writes), never from argv - so
+    GUEST_IP is passed through
     the environment here too, never on the command line.
     """
     proc = run([sys.executable, WINRM_EXEC, "cmd", f"type {MARKER_PATH}"],
               capture_output=True, text=True,
-              env=dict(os.environ, GUEST_IP=ip, GUEST_PASS_FILE=GUEST_PASS_FILE,
-                       LC_ALL="C"))
+              env=dict(os.environ, GUEST_IP=ip, LC_ALL="C"))
     stderr = getattr(proc, "stderr", "") or ""
     if stderr.startswith(_WINRM_UNREACHABLE_PREFIXES):
         return None

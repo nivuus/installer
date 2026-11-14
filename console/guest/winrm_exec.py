@@ -38,18 +38,21 @@ file that was never broken.
 
 Usage: winrm_exec.py {cmd|ps} <command...>
 Env:   GUEST_IP (default 192.168.3.2), GUEST_USER (default Administrator),
-       GUEST_PASS_FILE (default /root/.config/nivuus/windows-admin.pass)
+       GUEST_PASS_FILE (default: the file activate's `secrets` step writes,
+       console/guest_secrets.py's ADMIN_PASSWORD_FILE)
 """
 import os
 import sys
 
 import winrm
 
+# console/, for guest_secrets - the single source of the password path.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from guest_secrets import ADMIN_PASSWORD_FILE  # noqa: E402
+
 IP = os.environ.get("GUEST_IP", "192.168.3.2")
 USER = os.environ.get("GUEST_USER", "Administrator")
-PASS_FILE = os.environ.get(
-    "GUEST_PASS_FILE", "/root/.config/nivuus/windows-admin.pass"
-)
+PASS_FILE = os.environ.get("GUEST_PASS_FILE", ADMIN_PASSWORD_FILE)
 
 
 def main() -> int:

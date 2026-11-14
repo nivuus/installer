@@ -205,9 +205,10 @@ check("l IP du client passe par l environnement, jamais sur argv",
       "192.168.3.2" in argv, False)
 check("GUEST_IP est bien positionne dans l environnement",
       env.get("GUEST_IP"), "192.168.3.2")
-check("GUEST_PASS_FILE est bien positionne dans l environnement - c est "
-      "le chemin que l etape secrets a deja ecrit, jamais relu ici",
-      env.get("GUEST_PASS_FILE"), watch.GUEST_PASS_FILE)
+# The password file is winrm_exec.py's own default, the file activate writes
+# (console/guest_secrets.py); no second copy of the path is passed here.
+check("guest-ready-watch does not override winrm_exec.py's password file",
+      env.get("GUEST_PASS_FILE"), os.environ.get("GUEST_PASS_FILE"))
 check("la commande lit bien le temoin de provisionnement",
       watch.MARKER_PATH in " ".join(argv), True)
 

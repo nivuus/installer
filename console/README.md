@@ -200,13 +200,14 @@ Known gaps in this chain, named rather than hidden:
   fails the whole `payload` step. Wiring `packages/retro`'s own checkout
   onto the target (or overriding `--retro-src`) is unfinished work, not a
   hidden default that happens to work.
-- **The WinRM password-file path `guest-ready-watch.py` passes to
-  `winrm_exec.py` is deduced from the pipeline, never measured against a
-  real guest.** `GUEST_PASS_FILE` is hardcoded to
-  `/var/lib/nivuus/guest/secrets/windows-admin.pass` because that is where
-  `guest_steps.py`'s own `secrets` step writes it — reasoned from reading
-  both files side by side, not observed on a running install, since running
-  one is exactly what this whole chain is forbidden from doing (see above).
+- **The WinRM password-file path is deduced from the pipeline, never
+  measured against a real guest.** `console/guest_secrets.py` holds the one
+  path `guest_steps.py`'s `secrets` step writes the admin password to, and
+  `winrm_exec.py` (hence `guest-ready-watch.py`, `winvm` and
+  `retro_sync.py`) and `build.py` default to it — reasoned from the code, not
+  observed on a running install, since running one is exactly what this
+  whole chain is forbidden from doing (see above). A `guest_workdir` answer
+  other than the default is not followed: set `GUEST_PASS_FILE` then.
 
 ## The wizard's questions
 

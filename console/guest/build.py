@@ -37,11 +37,14 @@ import media  # noqa: E402
 import payload  # noqa: E402
 import unattend_iso  # noqa: E402
 from retro import retro_state_path  # noqa: E402
+from guest_secrets import secret_path  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_KEY_FILE = "/root/.config/nivuus/windows-ltsc.key"
-DEFAULT_PASSWORD_FILE = "/root/.config/nivuus/windows-admin.pass"
-DEFAULT_APOLLO_PASSWORD_FILE = "/root/.config/nivuus/apollo-ui.pass"
+# The files activate's `secrets` step writes (console/guest_secrets.py), so a
+# manual run reads the same secrets the pipeline does.
+DEFAULT_KEY_FILE = secret_path("ltsc_key")
+DEFAULT_PASSWORD_FILE = secret_path("admin_password")
+DEFAULT_APOLLO_PASSWORD_FILE = secret_path("apollo_password")
 # Same path console/hooks/install.py writes to, resolved against the live
 # host's "/" (that install target has become "/" by the time this runs).
 # Single source: console/retro.py, imported above.
