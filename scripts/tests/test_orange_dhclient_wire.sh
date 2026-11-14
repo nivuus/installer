@@ -8,12 +8,14 @@
 # the packet does. This runs the real client in a network namespace with no
 # server and reads the DISCOVER and the Solicit off the peer interface.
 #
-# Needs root, tcpdump and dhclient; prints SKIP and exits 0 otherwise.
+# Needs root, tcpdump and dhclient; prints SKIP and exits 77 otherwise (the
+# conventional "skipped" status, never 0: `make test-netns` reports it and
+# fails under CI).
 # NIVUUS_TEST_CONF_PARENT overrides where the configuration is rendered: point
 # it outside /etc/dhcp to watch the test fail the way production would have.
 set -uo pipefail
 [ "$(id -u)" = 0 ] && command -v tcpdump >/dev/null && command -v dhclient >/dev/null ||
-    { echo "SKIP: needs root, tcpdump and dhclient"; exit 0; }
+    { echo "SKIP: needs root, tcpdump and dhclient"; exit 77; }
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TAG=nvtest$$
