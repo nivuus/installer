@@ -122,8 +122,11 @@ opens that port at the very first provisioning stage, deliberately, so a
 later stage throwing still leaves a remote door open into the guest — the
 port only ever proves the guest is alive enough to accept a command, never
 that provisioning finished. The timer logs one of four states to the
-journal: `not_started`, `installing`, `failed` (past a 2h timeout with the
-marker still absent or stale), or `ready`. On `ready` it also redefines the
+journal: `not_started`, `installing`, `failed` (at once when the guest wrote
+a current `C:\nivuus\state\PROVISION.failed`, named with its stage and
+error; otherwise past a 2h timeout with the marker still absent or stale;
+the watch then re-checks every 30 min instead of stopping), or `ready`. On
+`ready` it also redefines the
 domain **without** either install medium (`domain.py define --replace
 --keyed-varstore`), so the next boot does not risk re-running Setup; the
 timer only stops itself once that redefinition has actually succeeded, not
@@ -200,13 +203,14 @@ Known gaps in this chain, named rather than hidden:
   fails the whole `payload` step. Wiring `packages/retro`'s own checkout
   onto the target (or overriding `--retro-src`) is unfinished work, not a
   hidden default that happens to work.
-- **The WinRM password-file path `guest-ready-watch.py` passes to
-  `winrm_exec.py` is deduced from the pipeline, never measured against a
-  real guest.** `GUEST_PASS_FILE` is hardcoded to
-  `/var/lib/nivuus/guest/secrets/windows-admin.pass` because that is where
-  `guest_steps.py`'s own `secrets` step writes it — reasoned from reading
-  both files side by side, not observed on a running install, since running
-  one is exactly what this whole chain is forbidden from doing (see above).
+- **The WinRM password-file path is deduced from the pipeline, never
+  measured against a real guest.** `console/guest_secrets.py` holds the one
+  path `guest_steps.py`'s `secrets` step writes the admin password to, and
+  `winrm_exec.py` (hence `guest-ready-watch.py`, `winvm` and
+  `retro_sync.py`) and `build.py` default to it — reasoned from the code, not
+  observed on a running install, since running one is exactly what this
+  whole chain is forbidden from doing (see above). A `guest_workdir` answer
+  other than the default is not followed: set `GUEST_PASS_FILE` then.
 
 ## The wizard's questions
 
@@ -228,8 +232,9 @@ what it took to actually build and boot the guest:
 `console/guest/payload/agent/agent.exe` is a **compiled** artefact — the
 Guacamole agent from `nivuus/desk` — vendored directly into this repository
 instead of being fetched or built. `fetch_payload.py` copies it into the
-offline payload tree at build time and verifies the copy's sha256 against
-the committed file; it is no longer "extracted from the current Windows VM
+offline payload tree at build time, after refusing any file whose sha256 is
+not `PACKAGED_AGENT_SHA256`, and verifies the copy's sha256 against the
+committed file; it is no longer "extracted from the current Windows VM
 before it is wiped", which used to mean a fresh machine — one that never ran
 that VM — had nothing to extract and could not install this console at all.
 
@@ -240,10 +245,11 @@ build it from source and instead carries the binary directly. Two costs come
 with that: this repository now duplicates ownership of an artefact that is
 not its own, and the vendored copy **will drift** on every new agent
 version, since nothing here rebuilds or re-syncs it automatically — bumping
-it is a manual step, easy to forget. It also freezes ~11 MB into this
-repository's git history, permanently. See
+it is a manual step (bump the pin with the file). It also freezes ~31 MB
+(two builds so far) into this repository's git history, permanently. See
 `console/guest/payload/agent/README.md` for the measured size/sha256 of the
-version currently vendored.
+version currently vendored, and for the fact that its source revision is
+not recorded.
 
 ## Limites connues
 

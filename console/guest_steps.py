@@ -161,15 +161,11 @@ def domain_definition_on_disk(config_dir: str | Path = LIBVIRT_QEMU_CONFIG_DIR,
 DEFAULT_APOLLO_USER = "nivuus"
 DEFAULT_HOSTNAME = "NIVUUS-WIN"
 
-# The three secrets, mapped to the file guest/build.py expects to read them
-# from. build.py takes them as FILES and never on argv, so that they cannot
-# leak into ps output or shell history; this module honours that by pointing
+# The three secrets (SECRET_FILES, imported from console/guest_secrets.py
+# above), mapped to the file guest/build.py expects to read them from.
+# build.py takes them as FILES and never on argv, so that they cannot leak
+# into ps output or shell history; this module honours that by pointing
 # --key-file & co. at files it wrote in mode 0600.
-SECRET_FILES = {
-    "ltsc_key": "windows-ltsc.key",
-    "admin_password": "windows-admin.pass",
-    "apollo_password": "apollo-ui.pass",
-}
 
 # Bumped whenever the meaning of the fingerprint changes, so that stamps
 # written by an older version read as "rebuild" rather than as a match.
@@ -398,13 +394,14 @@ def _file_digest(path: Path) -> str:
         return "missing"
 
 
-# console/wizard.yaml's own default for the 'guest_workdir' answer.
-# Copied here for the same reason console/hooks/activate.py copies its own
-# literal of it (see that file's DEFAULT_GUEST_WORKDIR): a plain string from
-# a YAML file the packages engine reads, not something either hook can
-# import. install.py needs this SAME default to know where to place the
-# copy this module then expects to find under it.
-DEFAULT_GUEST_WORKDIR = "/var/lib/nivuus/guest"
+# console/wizard.yaml's own default for the 'guest_workdir' answer (a plain
+# string from a YAML file the packages engine reads, which no hook can
+# import; console/hooks/activate.py keeps its own literal of it). install.py
+# needs this SAME default to know where to place the copy this module then
+# expects to find under it. The literal lives in console/guest_secrets.py,
+# shared with every reader of the secrets this module writes under it, and
+# is re-exported from here.
+from guest_secrets import DEFAULT_GUEST_WORKDIR, SECRET_FILES  # noqa: E402, F401
 
 # The on-target copy's name, fixed rather than derived from the wizard's
 # answer: one convention both install.py (which creates it) and plan_steps

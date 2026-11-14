@@ -12,6 +12,9 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="$SCRIPT_DIR/../host/vm-idle-shutdown.sh"
+# winrm_exec.py's own authentication-failure prefix, read from its source.
+AUTH_PREFIX=$(sed -n 's/^AUTH_PREFIX = "\(.*\)"$/\1/p' "$SCRIPT_DIR/../guest/winrm_exec.py")
+export AUTH_PREFIX
 
 PASS=0
 FAIL=0
@@ -31,6 +34,10 @@ EOF
 #!/bin/bash
 # 10 minutes = 6000000000 units of 100 ns. Idle counter moves as much as time.
 [ "${GUEST_SAMPLE:-}" = "fail" ] && exit 1
+if [ "${GUEST_SAMPLE:-}" = "auth" ]; then
+    echo "$AUTH_PREFIX at 192.168.3.2:5985 for user Administrator: rejected" >&2
+    exit 77
+fi
 echo "${GUEST_SAMPLE:-6000000001 6000000001}"
 EOF
     cat > "$SANDBOX/bin/logger" <<EOF
@@ -150,6 +157,32 @@ GUEST_SAMPLE=fail run_target
 [ "$(strikes)" = "0" ] && pass "strikes reset to 0" || fail "strikes=$(strikes)"
 grep -q "guest CPU unavailable" "$SANDBOX/log" && pass "logs why the pass counted as active" \
     || fail "no log line about the failed measurement"
+teardown_sandbox
+
+echo "[13b] WinRM refuses the password -> named in the journal, NOT counted as active"
+setup_sandbox
+if [ -z "$AUTH_PREFIX" ]; then
+    fail "AUTH_PREFIX not found in winrm_exec.py"
+fi
+GUEST_SAMPLE=auth run_target
+[ "$(strikes)" = "2" ] && pass "strikes 1 -> 2 (no flow, no app: idle)" || fail "strikes=$(strikes)"
+grep -q "authentication" "$SANDBOX/log" && pass "logs the authentication failure by name" \
+    || fail "log: $(cat "$SANDBOX/log")"
+# After a refused pass the state holds no CPU baseline (0 0 N); the next
+# refused pass must still count, not reset as "first pass after a wake".
+# Stays below IDLE_STRIKES_LIMIT: the hibernation branch is never reached.
+echo "0 0 1" > "$SANDBOX/state/state"
+GUEST_SAMPLE=auth run_target
+[ "$(strikes)" = "2" ] && pass "a refused pass without baseline still counts" \
+    || fail "strikes=$(strikes)"
+teardown_sandbox
+
+echo "[13c] WinRM refuses the password but a stream is up -> active"
+setup_sandbox
+echo "ipv4 2 tcp 6 431999 ESTABLISHED src=192.168.0.10 dst=192.168.3.2 sport=50000 dport=47984 src=192.168.3.2 dst=192.168.0.10 sport=47984 dport=50000 [ASSURED]" \
+    > "$SANDBOX/conntrack"
+GUEST_SAMPLE=auth run_target
+[ "$(strikes)" = "0" ] && pass "strikes reset to 0" || fail "strikes=$(strikes)"
 teardown_sandbox
 
 echo "[14] first pass after a wake (no baseline) -> strikes stay 0, baseline stored"

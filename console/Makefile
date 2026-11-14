@@ -43,6 +43,7 @@ test:
 	          test_console_host_files test_console_wake_units test_console_activate \
 	          test_console_vm_control_units \
 	          test_console_guest_steps test_console_guest_ready \
+	          test_console_guest_secret_path \
 	          test_console_nvme_identity \
 	          test_vm_wake_gate \
 	          test_retro_marker_bridge \
@@ -56,7 +57,8 @@ test:
 	    echo "--- $$t"; \
 	    $(PYTHON) $(CONSOLE_DIR)/tests/$$t.py || exit 1; \
 	done
-	@for t in test_handle_vm_start test_vm_control test_vm_idle_shutdown test_winvm; do \
+	@for t in test_handle_vm_start test_vm_control test_vm_idle_shutdown test_winvm \
+	          test_vm_forward_hooks; do \
 	    echo "--- $$t"; \
 	    bash $(CONSOLE_DIR)/tests/$$t.sh || exit 1; \
 	done

@@ -123,6 +123,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 WINRM_EXEC = HERE / "winrm_exec.py"
 
+# console/, for guest_secrets - the single source of the password path.
+sys.path.insert(0, str(HERE.parent))
+from guest_secrets import ADMIN_PASSWORD_FILE  # noqa: E402
+
 # --- Ce que l'invité porte. Ces valeurs sont écrites en PowerShell ailleurs
 # dans ce dépôt ; le test les épingle contre CES fichiers-là plutôt que de les
 # recopier, pour qu'un renommage d'un côté ne survive pas au silence de l'autre
@@ -252,6 +256,9 @@ def _winrm_run(kind: str, script: str, guest_ip: str | None = None):
     secret hors de la table des processus de cet hôte.
     """
     env = {**os.environ, "LC_ALL": "C"}
+    # The file activate's `secrets` step writes, unless the operator named
+    # another one.
+    env.setdefault("GUEST_PASS_FILE", ADMIN_PASSWORD_FILE)
     if guest_ip:
         env["GUEST_IP"] = guest_ip
     proc = subprocess.run([sys.executable, str(WINRM_EXEC), kind, script],

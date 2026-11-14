@@ -257,13 +257,33 @@ check("les deux modules nomment le meme dossier",
 # satisfaire des le depart.
 check("le paquet embarque bien console/guest/payload/agent/agent.exe",
       fetch_payload.PACKAGED_AGENT_EXE.is_file(), True)
-# Une taille plancher plutot que la valeur exacte du jour : ce fichier sera
-# remplace a chaque nouvelle version de l agent (voir la reserve dans
-# payload/agent/README.md), la valeur exacte n a donc pas vocation a rester
-# fixe - seule une troncature grossiere doit faire echouer ce controle.
+# The tracked agent.exe is pinned by digest: a size floor let a different
+# build replace it in silence (it did, in 639c3cd, under an unrelated commit).
+# Replacing the binary now means bumping PACKAGED_AGENT_SHA256 on purpose.
 if fetch_payload.PACKAGED_AGENT_EXE.is_file():
-    check("agent.exe embarque n est pas tronque (>5 Mo)",
-          fetch_payload.PACKAGED_AGENT_EXE.stat().st_size > 5_000_000, True)
+    check("the tracked agent.exe is the pinned build",
+          hashlib.sha256(fetch_payload.PACKAGED_AGENT_EXE.read_bytes()).hexdigest(),
+          getattr(fetch_payload, "PACKAGED_AGENT_SHA256", None))
+
+# A packaged agent.exe that is not the pinned build is refused, by name,
+# before anything is copied into the payload tree.
+_real_agent = fetch_payload.PACKAGED_AGENT_EXE
+with tempfile.TemporaryDirectory() as tmp:
+    tampered = pathlib.Path(tmp) / "agent.exe"
+    tampered.write_bytes(_real_agent.read_bytes() + b"\0")
+    fetch_payload.PACKAGED_AGENT_EXE = tampered
+    drivers = pathlib.Path(tmp) / "drivers"
+    try:
+        fetch_payload.install_packaged_agent(drivers)
+        failures.append("install_packaged_agent accepted an agent.exe that "
+                        "is not the pinned build")
+    except fetch_payload.FetchError as e:
+        check("the refusal names agent.exe and the pin",
+              "agent.exe" in str(e) and "PACKAGED_AGENT_SHA256" in str(e), True)
+    finally:
+        fetch_payload.PACKAGED_AGENT_EXE = _real_agent
+    check("nothing was copied into the payload tree",
+          (drivers / "agent" / "agent.exe").exists(), False)
 
 # install_packaged_agent() doit copier le binaire du paquet vers drivers/ ET
 # verifier la somme de controle a destination - une copie de 11 Mo tronquee

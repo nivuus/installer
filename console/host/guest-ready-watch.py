@@ -45,10 +45,12 @@ just wait) and nothing distinguished them before this script existed:
   INSTALLING  - the domain is running, the current-version marker is not
                 there yet (WinRM unreachable, marker absent, or a stale
                 version), and not for unreasonably long yet.
-  FAILED      - the domain is running, the current-version marker is still
-                missing past INSTALL_TIMEOUT_S. The guest cannot say why
-                on its own - so only the host's own journal (this line)
-                can make the failure legible.
+  FAILED      - the domain is running and either the guest recorded a
+                failure (a current PROVISION.failed, named with its stage
+                and error) or the current-version marker is still missing
+                past INSTALL_TIMEOUT_S. Logged once; the watch then keeps
+                looking every FAILED_RECHECK_S, so a late PROVISION.done
+                still leads to READY and the redefinition below.
   READY       - the marker carries the CURRENT provision_version. This
                 overrides everything else: a guest that has finished
                 provisioning IS ready, even if it took longer than
@@ -104,6 +106,7 @@ READY only once the media-less redefinition has succeeded - see main().
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
@@ -121,18 +124,20 @@ PORT_PROBE_TIMEOUT_S = 3
 # _marker_present() already uses for the same reason - see the module
 # docstring.
 MARKER_PATH = r"C:\nivuus\state\PROVISION.done"
+
+# What run-all.ps1 leaves next to it: provision.started, rewritten at every
+# launch of the sequence (first logon, then after each reboot), and
+# PROVISION.failed ("stage=", "failed=", "error=" lines), written when a stage
+# throws and never removed. See provisioning_failure().
+STATE_DIR_GUEST = r"C:\nivuus\state"
+STARTED_NAME = "provision.started"
+FAILURE_NAME = "PROVISION.failed"
 WINRM_EXEC = "/opt/nivuus-packages/console/guest/winrm_exec.py"
 
 # The password winrm_exec.py needs is the one console/guest_steps.py's
-# 'secrets' step ALREADY wrote - never re-derived here. That step writes
-# it under activate.py's DEFAULT_GUEST_WORKDIR (/var/lib/nivuus/guest),
-# not winrm_exec.py's OWN default (/root/.config/nivuus/windows-admin.pass,
-# which is build.py's manual-test default, unused by the real activate
-# pipeline): the two just happen to differ, so this must be passed
-# explicitly, never left to winrm_exec.py's default matching by luck.
-# Copied, not imported, same reason as DOMAIN_PY above - this script runs
-# standalone under /usr/local/sbin/.
-GUEST_PASS_FILE = "/var/lib/nivuus/guest/secrets/windows-admin.pass"
+# 'secrets' step ALREADY wrote. winrm_exec.py's own default IS that file
+# (console/guest_secrets.py, the single source of the path), so this script
+# names no password file at all: a copy here could only drift from it.
 
 # Hardcoded, English, literal strings winrm_exec.py itself prints on stderr
 # when it could not even reach the guest to run the command - as opposed to
@@ -146,12 +151,38 @@ _WINRM_UNREACHABLE_PREFIXES = (
     "error: password file not found",
 )
 
+# The client DID reach the guest but could not run the command. Copies of
+# winrm_exec.py's AUTH_PREFIX / PROTOCOL_PREFIX (this script runs standalone,
+# see DOMAIN_PY), pinned against them by test_console_guest_ready.py.
+AUTH_REFUSED = "authentication"
+PROTOCOL_ERROR = "protocol"
+_WINRM_CLIENT_FAILURE_PREFIXES = {
+    "error: guest rejected the credentials": AUTH_REFUSED,
+    "error: WinRM protocol error": PROTOCOL_ERROR,
+}
+
+
+class WinrmClientFailure:
+    """read_marker()'s answer when WinRM was reached but refused the command
+    (wrong password, protocol error): neither "unreachable" (None) nor "the
+    guest answered" (a string), and named in the journal as what it is."""
+
+    def __init__(self, cause: str, detail: str):
+        self.cause = cause
+        self.detail = detail
+
 # "a reasonable delay" per the task this script implements: long enough
 # that a normal unattended LTSC install (including the reboots driver
 # installs cause) is never mistaken for a failure, short enough that a
 # genuinely stuck install is reported well before an operator would
 # otherwise notice on their own.
 INSTALL_TIMEOUT_S = 2 * 3600
+
+# Once FAILED, the watch does not stop: a stage can still succeed after a
+# reboot resumes the sequence, and the steady-state redefinition must follow
+# a late PROVISION.done. It looks again at this slower pace instead of every
+# timer tick.
+FAILED_RECHECK_S = 30 * 60
 
 STATE_DIR = "/var/lib/nivuus"
 STATE_PATH = os.path.join(STATE_DIR, "guest-ready-state.json")
@@ -180,7 +211,8 @@ _MAC_RE = re.compile(r"mac address=['\"]([0-9a-fA-F:]+)['\"]")
 _BRIDGE_RE = re.compile(r"source bridge=['\"]([^'\"]+)['\"]")
 
 
-def classify(*, domstate: str, ready: bool, elapsed_s: float) -> str:
+def classify(*, domstate: str, ready: bool, elapsed_s: float,
+             failed: bool = False) -> str:
     """The four-way split. See the module docstring for what each means.
 
     ready wins over everything, INCLUDING elapsed_s past the timeout: a
@@ -188,12 +220,15 @@ def classify(*, domstate: str, ready: bool, elapsed_s: float) -> str:
     however long it took to get there - the clock only distinguishes
     "still waiting" from "give up waiting and say so", it never overrides
     a guest that has actually finished.
+
+    `failed` is the guest's own word (a current PROVISION.failed, see
+    provisioning_failure()): FAILED at once, without waiting for the clock.
     """
     if ready:
         return READY
     if domstate != "running":
         return NOT_STARTED
-    if elapsed_s >= INSTALL_TIMEOUT_S:
+    if failed or elapsed_s >= INSTALL_TIMEOUT_S:
         return FAILED
     return INSTALLING
 
@@ -331,28 +366,97 @@ def marker_says_ready(marker_text: str, expected: str) -> bool:
     return pattern.search(marker_text) is not None
 
 
-def read_marker(ip: str, run=subprocess.run) -> str | None:
+def read_marker(ip: str, run=subprocess.run) -> str | WinrmClientFailure | None:
     """The provisioning marker's raw content, read over WinRM - or None
     when WinRM itself could not be reached (connection failure, or a
     missing GUEST_PASS_FILE), as opposed to "" (or any text without the
     expected line) when WinRM DID answer but the marker is not there yet,
-    or not at the expected version. These are deliberately told apart:
+    or not at the expected version - or a WinrmClientFailure when WinRM was
+    reached but refused the command. These are deliberately told apart:
     "the guest has not spoken at all" and "it has spoken but is not done"
     call for different journal lines - see main().
 
     Same tool testdomain.py's _marker_present() already uses for the same
     check: console/guest/winrm_exec.py, which reads its password from a
-    FILE (GUEST_PASS_FILE), never from argv - so GUEST_IP is passed through
-    the environment here too, never on the command line.
+    FILE (its own default, the one activate writes), never from argv - so
+    GUEST_IP is passed through the environment here too, never on the
+    command line.
     """
-    proc = run([sys.executable, WINRM_EXEC, "cmd", f"type {MARKER_PATH}"],
+    return _winrm_read(ip, "cmd", f"type {MARKER_PATH}", run)
+
+
+def read_provisioning_state(ip: str, run=subprocess.run
+                            ) -> str | WinrmClientFailure | None:
+    """provision.started and PROVISION.failed, as one "==name==" section
+    each (a file that does not exist prints nothing); same None /
+    WinrmClientFailure contract as read_marker(). Parsed by
+    provisioning_failure()."""
+    names = ",".join(f"'{name}'" for name in (STARTED_NAME, FAILURE_NAME))
+    script = (f"foreach ($n in {names}) {{ "
+              f"$p = Join-Path '{STATE_DIR_GUEST}' $n; "
+              "if (Test-Path -LiteralPath $p) { \"==$n==\"; "
+              "Get-Content -LiteralPath $p } }")
+    return _winrm_read(ip, "ps", script, run)
+
+
+def _winrm_read(ip: str, kind: str, command: str, run
+                ) -> str | WinrmClientFailure | None:
+    proc = run([sys.executable, WINRM_EXEC, kind, command],
               capture_output=True, text=True,
-              env=dict(os.environ, GUEST_IP=ip, GUEST_PASS_FILE=GUEST_PASS_FILE,
-                       LC_ALL="C"))
+              env=dict(os.environ, GUEST_IP=ip, LC_ALL="C"))
     stderr = getattr(proc, "stderr", "") or ""
     if stderr.startswith(_WINRM_UNREACHABLE_PREFIXES):
         return None
+    for prefix, cause in _WINRM_CLIENT_FAILURE_PREFIXES.items():
+        if stderr.startswith(prefix):
+            return WinrmClientFailure(cause, stderr.strip().splitlines()[0])
     return getattr(proc, "stdout", "") or ""
+
+
+def _parse_guest_time(value: str | None) -> datetime.datetime | None:
+    # PowerShell's "o" format carries 7 fractional digits; fromisoformat
+    # (Python 3.11+) accepts them.
+    try:
+        return datetime.datetime.fromisoformat((value or "").strip())
+    except ValueError:
+        return None
+
+
+def provisioning_failure(state_text: str | None) -> dict | None:
+    """{"stage", "error", "failed"} from a CURRENT PROVISION.failed in
+    read_provisioning_state()'s output, or None.
+
+    A failure dated before the latest provision.started belongs to an
+    earlier launch of the sequence that has since been resumed (run-all.ps1
+    never removes the file), so it is not the current state. A timestamp
+    that cannot be read is not evidence of staleness: the failure counts.
+    """
+    if not isinstance(state_text, str):
+        return None
+    sections: dict[str, list[str]] = {}
+    current = None
+    for line in state_text.splitlines():
+        line = line.strip()
+        if line.startswith("==") and line.endswith("==") and len(line) > 4:
+            current = line[2:-2]
+            sections[current] = []
+        elif current is not None and line:
+            sections[current].append(line)
+    if FAILURE_NAME not in sections:
+        return None
+    fields = dict(item.split("=", 1) for item in sections[FAILURE_NAME]
+                  if "=" in item)
+    started = _parse_guest_time(next(iter(sections.get(STARTED_NAME, [])), None))
+    failed_at = _parse_guest_time(fields.get("failed"))
+    if started is not None and failed_at is not None:
+        try:
+            if failed_at < started:
+                return None
+        except TypeError:
+            pass  # one is offset-aware, the other not: cannot compare
+
+    return {"stage": fields.get("stage", "?"), "error": fields.get("error", "?"),
+            "failed": fields.get("failed", "?")}
 
 
 def expected_provision_version() -> str:
@@ -440,7 +544,8 @@ def stop_self(run=subprocess.run) -> None:
        capture_output=True, text=True)
 
 
-def _marker_detail(marker_text: str | None, expected: str) -> str:
+def _marker_detail(marker_text: str | WinrmClientFailure | None,
+                   expected: str) -> str:
     """A short French phrase explaining WHY the guest is not ready yet -
     WinRM unreachable, marker absent, or marker present but stale - the
     three causes classify() collapses into a single INSTALLING/FAILED
@@ -448,18 +553,24 @@ def _marker_detail(marker_text: str | None, expected: str) -> str:
     """
     if marker_text is None:
         return f"WinRM injoignable sur le port {WINRM_PORT}"
+    if isinstance(marker_text, WinrmClientFailure):
+        if marker_text.cause == AUTH_REFUSED:
+            return ("WinRM authentication refused by the guest - check the "
+                    f"admin password file ({marker_text.detail})")
+        return f"WinRM protocol error ({marker_text.detail})"
     if not marker_text.strip():
         return f"temoin absent ({MARKER_PATH})"
     return f"temoin present mais pas a la version {expected}"
 
 
 def main(*, domstate_fn=None, ip_fn=None, probe_fn=None, marker_fn=None,
-         version_fn=None, redefine_fn=None, stop_fn=None,
+         failure_fn=None, version_fn=None, redefine_fn=None, stop_fn=None,
          state_path: str | None = None, now_fn=None) -> int:
     domstate_fn = domstate_fn or query_domstate
     ip_fn = ip_fn or find_guest_ip
     probe_fn = probe_fn or probe_port
     marker_fn = marker_fn or read_marker
+    failure_fn = failure_fn or read_provisioning_state
     version_fn = version_fn or expected_provision_version
     redefine_fn = redefine_fn or redefine_steady_state
     stop_fn = stop_fn or stop_self
@@ -503,15 +614,28 @@ def main(*, domstate_fn=None, ip_fn=None, probe_fn=None, marker_fn=None,
         first_running_at = now
     elapsed = now - first_running_at
 
+    # Already FAILED: look again at the slower FAILED_RECHECK_S pace only.
+    previous = state.get("classification")
+    last_probe_at = state.get("last_probe_at")
+    if (previous == FAILED and isinstance(last_probe_at, (int, float))
+            and now - last_probe_at < FAILED_RECHECK_S):
+        return 0
+
     ip = ip_fn()
     # The TCP probe is a cheap pre-check: reading the marker means opening
     # a real WinRM session, worth skipping when the port is not even open.
     marker_text = marker_fn(ip) if ip and probe_fn(ip) else None
     expected = version_fn()
-    ready = marker_text is not None and marker_says_ready(marker_text, expected)
-    result = classify(domstate=domstate, ready=ready, elapsed_s=elapsed)
+    ready = (isinstance(marker_text, str)
+             and marker_says_ready(marker_text, expected))
+    # The guest answered but is not done: did it record a failure itself?
+    failure = (provisioning_failure(failure_fn(ip))
+               if isinstance(marker_text, str) and not ready else None)
+    result = classify(domstate=domstate, ready=ready, elapsed_s=elapsed,
+                      failed=failure is not None)
     save_state(state_path, {"first_running_at": first_running_at,
-                            "classification": result})
+                            "classification": result,
+                            "last_probe_at": now})
 
     if result == READY:
         print(f"guest-ready: temoin de provisionnement a jour (version "
@@ -533,12 +657,20 @@ def main(*, domstate_fn=None, ip_fn=None, probe_fn=None, marker_fn=None,
                  "tentative au prochain passage de ce minuteur",
                  file=sys.stderr)
     elif result == FAILED:
-        detail = _marker_detail(marker_text, expected)
-        print(f"guest-ready: domaine actif depuis {int(elapsed)}s, {detail} "
-             f"(seuil {INSTALL_TIMEOUT_S}s depasse) - cette ligne de "
-             "journal est la seule trace lisible de l echec",
-             file=sys.stderr)
-        stop_fn()
+        # Reported once, on the transition; the watch then goes on at the
+        # FAILED_RECHECK_S pace so a late PROVISION.done is still followed
+        # by the steady-state redefinition (the READY branch above).
+        if previous != FAILED:
+            if failure is not None:
+                cause = (f"provisioning stage {failure['stage']} failed at "
+                         f"{failure['failed']}: {failure['error']} "
+                         f"({STATE_DIR_GUEST}\\{FAILURE_NAME})")
+            else:
+                cause = (f"{_marker_detail(marker_text, expected)}, timeout "
+                         f"of {INSTALL_TIMEOUT_S}s exceeded")
+            print(f"guest-ready: FAILED - domain running for {int(elapsed)}s, "
+                  f"{cause}. Still checking every {FAILED_RECHECK_S}s for a "
+                  "late PROVISION.done.", file=sys.stderr)
     else:
         detail = _marker_detail(marker_text, expected)
         print(f"guest-ready: installation en cours depuis {int(elapsed)}s "

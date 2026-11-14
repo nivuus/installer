@@ -182,6 +182,8 @@ with tempfile.TemporaryDirectory() as tmp:
                        "etc/libvirt/hooks/qemu.d/Windows/started/begin/rules.sh"),
                       ("libvirt/hooks/qemu.d/Windows/stopped/end/rules.sh",
                        "etc/libvirt/hooks/qemu.d/Windows/stopped/end/rules.sh"),
+                      ("libvirt/hooks/qemu.d/Windows/forward-ports.sh",
+                       "etc/libvirt/hooks/qemu.d/Windows/forward-ports.sh"),
                       ("libvirt/hooks/qemu.d/Windows/prepare/begin/bind-vfio-gpu.sh",
                        "etc/libvirt/hooks/qemu.d/Windows/prepare/begin/bind-vfio-gpu.sh"),
                       ("libvirt/hooks/qemu.d/Windows/release/end/rebind-host-gpu.sh",

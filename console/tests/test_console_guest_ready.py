@@ -108,6 +108,38 @@ check("au seuil pile : echec",
                      elapsed_s=watch.INSTALL_TIMEOUT_S),
       watch.FAILED)
 
+# The guest's own failure marker (run-all.ps1 writes PROVISION.failed when a
+# stage throws) classifies FAILED at once, without waiting for the timeout;
+# a current-version PROVISION.done still wins over it.
+check("failure marker: FAILED immediately, long before the timeout",
+      watch.classify(domstate="running", ready=False, elapsed_s=60,
+                     failed=True), watch.FAILED)
+check("failure marker but ready: ready wins",
+      watch.classify(domstate="running", ready=True, elapsed_s=60,
+                     failed=True), watch.READY)
+
+# --- provisioning_failure(): what PROVISION.failed says, if it is current.
+FAILED_TEXT = ("==provision.started==\n2026-11-14T10:00:00.1234567+01:00\n"
+               "==PROVISION.failed==\nstage=30-steam.ps1\n"
+               "failed=2026-11-14T10:20:00.7654321+01:00\n"
+               "error=Steam installer exited with 1\n")
+fail_info = watch.provisioning_failure(FAILED_TEXT)
+check("the failure marker's stage is read", (fail_info or {}).get("stage"),
+      "30-steam.ps1")
+check("the failure marker's error is read", (fail_info or {}).get("error"),
+      "Steam installer exited with 1")
+check("no failure marker: no failure",
+      watch.provisioning_failure(
+          "==provision.started==\n2026-11-14T10:00:00+01:00\n"), None)
+check("WinRM answered nothing: no failure", watch.provisioning_failure(""), None)
+# run-all.ps1 rewrites provision.started at every launch and never removes
+# PROVISION.failed: a failure OLDER than the current run is a previous
+# attempt that has since been resumed, not the current state.
+check("a failure older than the current run is stale",
+      watch.provisioning_failure(
+          "==provision.started==\n2026-11-14T11:00:00.1+01:00\n"
+          "==PROVISION.failed==\nstage=30-steam.ps1\n"
+          "failed=2026-11-14T10:20:00.7+01:00\nerror=x\n"), None)
 
 # --- marker_says_ready(): pure, version-checked - the CORE of this task. -
 # Step 1 from the brief, verbatim, plus the third case it lists (absent). #
@@ -186,6 +218,57 @@ check("temoin absent cote invite (WinRM a repondu) rend une chaine vide, "
       "PAS None : ce n est pas la meme cause qu un WinRM injoignable",
       watch.read_marker("192.168.3.2", run=run), "")
 
+# The client reached the guest but could not run the command: wrong password
+# (HTTP 401) or another WinRM error. Neither is "unreachable" (None) nor "the
+# guest answered" (a string): read_marker() names the cause.
+import winrm_exec  # noqa: E402  (GUEST_DIR is already on sys.path)
+
+check("guest-ready-watch matches winrm_exec.py's own unreachable prefix",
+      winrm_exec.UNREACHABLE_PREFIX in watch._WINRM_UNREACHABLE_PREFIXES, True)
+check("guest-ready-watch's client-failure prefixes are winrm_exec.py's own",
+      watch._WINRM_CLIENT_FAILURE_PREFIXES,
+      {winrm_exec.AUTH_PREFIX: watch.AUTH_REFUSED,
+       winrm_exec.PROTOCOL_PREFIX: watch.PROTOCOL_ERROR})
+run, _ = recording_winrm({
+    "192.168.3.2": FakeWinrmCall(
+        winrm_exec.EXIT_AUTH, "",
+        f"{winrm_exec.AUTH_PREFIX} at 192.168.3.2:5985 for user Administrator "
+        "(password file /x): the specified credentials were rejected"),
+})
+auth = watch.read_marker("192.168.3.2", run=run)
+check("credentials rejected: a client failure, not a marker string",
+      isinstance(auth, watch.WinrmClientFailure), True)
+check("credentials rejected: the cause is named",
+      getattr(auth, "cause", None), watch.AUTH_REFUSED)
+run, _ = recording_winrm({
+    "192.168.3.2": FakeWinrmCall(
+        winrm_exec.EXIT_PROTOCOL, "",
+        f"{winrm_exec.PROTOCOL_PREFIX} from guest at 192.168.3.2:5985: "
+        "WinRMTransportError: Bad HTTP response returned from server. Code 500"),
+})
+proto = watch.read_marker("192.168.3.2", run=run)
+check("WinRM protocol error: a client failure, not a marker string",
+      isinstance(proto, watch.WinrmClientFailure), True)
+check("WinRM protocol error: the cause is named",
+      getattr(proto, "cause", None), watch.PROTOCOL_ERROR)
+
+# read_provisioning_state(): same client, same contract as read_marker().
+run, calls = recording_winrm({
+    "192.168.3.2": FakeWinrmCall(0, FAILED_TEXT, ""),
+})
+check("read_provisioning_state returns what the guest printed",
+      watch.read_provisioning_state("192.168.3.2", run=run), FAILED_TEXT)
+check("... and names both files it reads",
+      "PROVISION.failed" in " ".join(calls[0][0])
+      and "provision.started" in " ".join(calls[0][0]), True)
+run, _ = recording_winrm({
+    "192.168.3.2": FakeWinrmCall(
+        winrm_exec.EXIT_UNREACHABLE, "",
+        f"{winrm_exec.UNREACHABLE_PREFIX} at 192.168.3.2:5985: timed out"),
+})
+check("read_provisioning_state: unreachable is None",
+      watch.read_provisioning_state("192.168.3.2", run=run), None)
+
 # WinRM DID answer and the marker exists: its raw content comes back.
 run, _ = recording_winrm({
     "192.168.3.2": FakeWinrmCall(0, "provision_version=B3\ncompleted=x\n", ""),
@@ -205,9 +288,10 @@ check("l IP du client passe par l environnement, jamais sur argv",
       "192.168.3.2" in argv, False)
 check("GUEST_IP est bien positionne dans l environnement",
       env.get("GUEST_IP"), "192.168.3.2")
-check("GUEST_PASS_FILE est bien positionne dans l environnement - c est "
-      "le chemin que l etape secrets a deja ecrit, jamais relu ici",
-      env.get("GUEST_PASS_FILE"), watch.GUEST_PASS_FILE)
+# The password file is winrm_exec.py's own default, the file activate writes
+# (console/guest_secrets.py); no second copy of the path is passed here.
+check("guest-ready-watch does not override winrm_exec.py's password file",
+      env.get("GUEST_PASS_FILE"), os.environ.get("GUEST_PASS_FILE"))
 check("la commande lit bien le temoin de provisionnement",
       watch.MARKER_PATH in " ".join(argv), True)
 
@@ -415,8 +499,12 @@ check("a closed port is unreachable",
 # never a real virsh/systemctl/domain.py. Proves the timer stops itself
 # EXACTLY on a terminal state, and that READY (and only READY) redefines. #
 
+MARKER_CALLS = []
+
+
 def run_main(domstate, marker_text, elapsed_s, redefine_ok=True,
-            expected="B3", state_path=None, seed_first_running_at=True):
+            expected="B3", state_path=None, seed_first_running_at=True,
+            failure_text=""):
     """Drive main() with fully injected fakes and a throwaway state file.
 
     `marker_text` stands in for what marker_fn (read_marker) would have
@@ -462,7 +550,11 @@ def run_main(domstate, marker_text, elapsed_s, redefine_ok=True,
         return True
 
     def marker_fn(_ip):
+        MARKER_CALLS.append(True)
         return marker_text
+
+    def failure_fn(_ip):
+        return failure_text
 
     def version_fn():
         return expected
@@ -485,7 +577,8 @@ def run_main(domstate, marker_text, elapsed_s, redefine_ok=True,
         errbuf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(errbuf):
             watch.main(domstate_fn=domstate_fn, ip_fn=ip_fn, probe_fn=probe_fn,
-                      marker_fn=marker_fn, version_fn=version_fn,
+                      marker_fn=marker_fn, failure_fn=failure_fn,
+                      version_fn=version_fn,
                       redefine_fn=redefine_fn, stop_fn=stop_fn,
                       state_path=path, now_fn=now_fn)
         return buf.getvalue() + errbuf.getvalue()
@@ -563,6 +656,16 @@ check("les deux causes produisent des messages DIFFERENTS - c est le "
 check("le message 'absent' ne dit pas aussi injoignable",
       "injoignable" in out_absent, False)
 
+# A rejected password is reported by name, never as "WinRM injoignable".
+out_auth, stopped, redefined = run_main(
+    "running", watch.WinrmClientFailure(watch.AUTH_REFUSED, "401"), 60)
+check("INSTALLING (credentials rejected): the timer keeps polling",
+      stopped, False)
+check("credentials rejected: the journal does not say unreachable",
+      "injoignable" in out_auth, False)
+check("credentials rejected: the journal names the authentication failure",
+      "authentication" in out_auth.lower(), True)
+
 out_stale, stopped, redefined = run_main(
     "running", "provision_version=B2\n", 60, expected="B3")
 check("INSTALLING (temoin obsolete): the timer keeps polling", stopped, False)
@@ -574,11 +677,49 @@ check("INSTALLING (temoin obsolete): la version attendue apparait dans "
 out, stopped, redefined = run_main(
     "running", "provision_version=B2\n", watch.INSTALL_TIMEOUT_S,
     expected="B3")
-check("FAILED: the timer stops (terminal state)", stopped, True)
+check("FAILED (timeout): the timer keeps watching, a late PROVISION.done "
+      "must still trigger the steady-state redefinition", stopped, False)
 check("FAILED: no redefinition attempted (the marker never matched)",
       redefined, False)
 check("FAILED: the failure is explained in the journal text",
-      "echec" in out.lower() or "depasse" in out.lower(), True)
+      "failed" in out.lower() and "timeout" in out.lower(), True)
+
+# The guest's own failure marker: FAILED at once, with its stage and error.
+out, stopped, redefined = run_main("running", "", 600, failure_text=FAILED_TEXT)
+check("failure marker: FAILED ten minutes in, not after two hours",
+      "failed" in out.lower(), True)
+check("failure marker: the journal names the stage", "30-steam.ps1" in out, True)
+check("failure marker: the journal carries the error",
+      "Steam installer exited with 1" in out, True)
+check("failure marker: no 'installation in progress' line",
+      "installation en cours" in out, False)
+check("failure marker: no redefinition", redefined, False)
+
+# After FAILED the watch slows down instead of stopping: ticks inside the
+# recheck interval do not open WinRM and stay silent; once the interval has
+# passed, a late current-version PROVISION.done is READY and redefines.
+with tempfile.TemporaryDirectory() as tmp:
+    state_path = os.path.join(tmp, "state.json")
+    out1, stopped1, _ = run_main("running", "", watch.INSTALL_TIMEOUT_S,
+                                 state_path=state_path)
+    check("timeout without failure marker: FAILED is logged",
+          "failed" in out1.lower(), True)
+    check("timeout without failure marker: the timer is not stopped",
+          stopped1, False)
+    del MARKER_CALLS[:]
+    out2, stopped2, _ = run_main(
+        "running", "provision_version=B3\n", watch.INSTALL_TIMEOUT_S + 120,
+        state_path=state_path, seed_first_running_at=False)
+    check("inside the recheck interval: WinRM is not opened", MARKER_CALLS, [])
+    check("inside the recheck interval: silent", out2.strip(), "")
+    out3, stopped3, redefined3 = run_main(
+        "running", "provision_version=B3\n",
+        watch.INSTALL_TIMEOUT_S + watch.FAILED_RECHECK_S,
+        state_path=state_path, seed_first_running_at=False)
+    check("a late PROVISION.done after FAILED: the domain is redefined",
+          redefined3, True)
+    check("a late PROVISION.done after FAILED: the timer stops (READY)",
+          stopped3, True)
 
 # The core of this task: a STALE marker (previous run's version) must NOT
 # be read as ready, even once the port is open and WinRM answers.
