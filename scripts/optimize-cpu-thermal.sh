@@ -4,6 +4,8 @@
 # light-thread (gaming) loads boost to full turbo, sustained all-core loads
 # converge to the package power the case can dissipate. Calibrated 2026-07-17
 # on the compact case: 50 W package ≈ 85 °C, 75 W ≈ 100 °C (TjMax).
+# Superseded by the 2026-11-08 repaste: the limits applied now are the
+# RAPL_* values below, measured in docs/claude/host-infrastructure.md.
 #
 # VM-aware CPU power mode (2026-07-22, see
 # docs/superpowers/specs/2026-07-22-vm-aware-cpu-power-mode-design.md):
@@ -18,8 +20,59 @@
 #           C-state ceiling held at C6 by nivuus-cpu-latency.service
 #   idle    P-cores 3600 MHz / EPP power,       E-cores 2000 MHz / EPP power,
 #           deep C-states allowed (latency service stopped)
+#
+# Every sysfs write is read back. A REQUIRED knob that does not read back as
+# written makes the script exit 1 after applying everything else: the RAPL
+# limits (PL1, its window, PL2, enable) and the fan curve (temperature source,
+# the five points, SmartFan mode) are the thermal contract, and firmware that
+# locks them must not leave PL1 at the firmware default behind a success
+# message. The governor, frequency caps and EPP are OPTIONAL - they tune
+# performance and noise, while RAPL bounds the power whatever they say - so a
+# mismatch there is warned about, not fatal. The one exception: without RAPL
+# the P-core frequency cap is the only thermal bound left, and becomes
+# required.
 
 set -e
+
+# Test seams, empty in production: NIVUUS_TEST_PATH puts fake tools (virsh,
+# systemctl) ahead of the real ones, NIVUUS_SYSFS_ROOT prefixes /sys.
+PATH=${NIVUUS_TEST_PATH:+$NIVUUS_TEST_PATH:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+SYS="${NIVUUS_SYSFS_ROOT:-}/sys"
+
+FAILED_KNOBS=()
+
+# knob_matches MATCH WANT GOT: does GOT read back as WANT?
+#   exact        byte for byte
+#   rapl_window  RAPL stores a time window as 2^Y*(1+F/4) time units, rounded
+#                down by the kernel (rapl_default_compute_time_window), so a
+#                4 s request reads back as e.g. 3997696 us: accept anything in
+#                [4/5 of the request, the request].
+knob_matches() {
+    case "$1" in
+        exact) [ "$3" = "$2" ] ;;
+        rapl_window)
+            [[ "$3" =~ ^[0-9]+$ ]] && [ "$3" -le "$2" ] && [ $((5 * $3)) -ge $((4 * $2)) ] ;;
+        *) echo "knob_matches: unknown match '$1'" >&2; return 2 ;;
+    esac
+}
+
+# set_knob required|optional FILE VALUE [MATCH]: write VALUE, read it back.
+set_knob() {
+    local level="$1" file="$2" want="$3" match="${4:-exact}" got
+    if ! { echo "$want" > "$file"; } 2>/dev/null; then
+        got="(write refused)"
+    elif ! got="$(cat "$file" 2>/dev/null)"; then
+        got="(unreadable)"
+    elif knob_matches "$match" "$want" "$got"; then
+        return 0
+    fi
+    if [ "$level" = required ]; then
+        FAILED_KNOBS+=("$file: wrote $want, reads ${got:-(empty)}")
+        echo "  ✗ $file: wrote $want, reads ${got:-(empty)}" >&2
+    else
+        echo "  ⚠ optional $file: wrote $want, reads ${got:-(empty)}" >&2
+    fi
+}
 
 # --- Mode parsing -----------------------------------------------------------
 
@@ -71,19 +124,23 @@ RAPL_PL2_UW=90000000    # 90 W burst ceiling (4 s window). 100 W was tried on 20
 
 # --- RAPL package power limits (the actual thermal contract; full apply only) ---
 
-RAPL=/sys/class/powercap/intel-rapl/intel-rapl:0
+# The power limits are multiples of the RAPL power unit (1/8 W on this CPU
+# family), so they read back exactly.
+RAPL="$SYS/class/powercap/intel-rapl/intel-rapl:0"
+PCORE_FREQ_LEVEL=optional
 if [ "$FULL_APPLY" = 1 ]; then
     if [ -d "$RAPL" ]; then
         echo "Applying RAPL package power limits..."
         echo "  PL1 (sustained): $((RAPL_PL1_UW/1000000)) W, window $((RAPL_PL1_TAU_US/1000000)) s"
         echo "  PL2 (burst):     $((RAPL_PL2_UW/1000000)) W"
-        echo "$RAPL_PL1_UW"     > "$RAPL/constraint_0_power_limit_uw"  2>/dev/null || true
-        echo "$RAPL_PL1_TAU_US" > "$RAPL/constraint_0_time_window_us"  2>/dev/null || true
-        echo "$RAPL_PL2_UW"     > "$RAPL/constraint_1_power_limit_uw"  2>/dev/null || true
-        echo 1                  > "$RAPL/enabled"                      2>/dev/null || true
+        set_knob required "$RAPL/constraint_0_power_limit_uw" "$RAPL_PL1_UW"
+        set_knob required "$RAPL/constraint_0_time_window_us" "$RAPL_PL1_TAU_US" rapl_window
+        set_knob required "$RAPL/constraint_1_power_limit_uw" "$RAPL_PL2_UW"
+        set_knob required "$RAPL/enabled" 1
     else
         echo "⚠ RAPL powercap not found — falling back to 3.6 GHz P-core cap"
         PCORE_MAX_FREQ=3600000
+        PCORE_FREQ_LEVEL=required
     fi
 fi
 
@@ -96,10 +153,11 @@ echo "  Governor: powersave (intel_pstate scales dynamically)"
 echo "  EPP: $PCORE_EPP"
 
 for cpu in $PCORES; do
-    if [ -d "/sys/devices/system/cpu/cpu$cpu" ]; then
-        echo "powersave" > /sys/devices/system/cpu/cpu$cpu/cpufreq/scaling_governor 2>/dev/null || true
-        echo "$PCORE_MAX_FREQ" > /sys/devices/system/cpu/cpu$cpu/cpufreq/scaling_max_freq 2>/dev/null || true
-        echo "$PCORE_EPP" > /sys/devices/system/cpu/cpu$cpu/cpufreq/energy_performance_preference 2>/dev/null || true
+    dir="$SYS/devices/system/cpu/cpu$cpu"
+    if [ -d "$dir" ]; then
+        set_knob optional "$dir/cpufreq/scaling_governor" powersave
+        set_knob "$PCORE_FREQ_LEVEL" "$dir/cpufreq/scaling_max_freq" "$PCORE_MAX_FREQ"
+        set_knob optional "$dir/cpufreq/energy_performance_preference" "$PCORE_EPP"
     fi
 done
 
@@ -110,10 +168,11 @@ echo "  Governor: powersave"
 echo "  EPP: $ECORE_EPP"
 
 for cpu in $ECORES; do
-    if [ -d "/sys/devices/system/cpu/cpu$cpu" ]; then
-        echo "powersave" > /sys/devices/system/cpu/cpu$cpu/cpufreq/scaling_governor 2>/dev/null || true
-        echo "$ECORE_MAX_FREQ" > /sys/devices/system/cpu/cpu$cpu/cpufreq/scaling_max_freq 2>/dev/null || true
-        echo "$ECORE_EPP" > /sys/devices/system/cpu/cpu$cpu/cpufreq/energy_performance_preference 2>/dev/null || true
+    dir="$SYS/devices/system/cpu/cpu$cpu"
+    if [ -d "$dir" ]; then
+        set_knob optional "$dir/cpufreq/scaling_governor" powersave
+        set_knob optional "$dir/cpufreq/scaling_max_freq" "$ECORE_MAX_FREQ"
+        set_knob optional "$dir/cpufreq/energy_performance_preference" "$ECORE_EPP"
     fi
 done
 
@@ -130,15 +189,18 @@ if [ "$MODE" = "gaming" ]; then
         echo "  ⚠ nivuus-cpu-latency.service failed to start — guest may reach deeper C-states"
     fi
 else
-    systemctl stop nivuus-cpu-latency.service 2>/dev/null || true
-    echo "  C-state ceiling: released (deep states allowed)"
+    if systemctl stop nivuus-cpu-latency.service 2>/dev/null; then
+        echo "  C-state ceiling: released (deep states allowed)"
+    else
+        echo "  ⚠ nivuus-cpu-latency.service failed to stop — the C6 ceiling may still hold"
+    fi
 fi
 
 # --- Fan Curve Optimization (nct6798; full apply only, temperature-driven) ---
 
 if [ "$FULL_APPLY" = 1 ]; then
     NCT_HWMON=""
-    for hwmon in /sys/class/hwmon/hwmon*; do
+    for hwmon in "$SYS"/class/hwmon/hwmon*; do
         if [ "$(cat "$hwmon/name" 2>/dev/null)" = "nct6798" ]; then
             NCT_HWMON="$hwmon"
             break
@@ -155,40 +217,40 @@ if [ "$FULL_APPLY" = 1 ]; then
         # Calibration" (temp source 9), a bogus +20 °C-offset reading that idles
         # at ~63 °C and makes both fans over-spin at ~1500 RPM for no thermal
         # reason. SYSTIN/PCH are useless here (they barely move even under 250 W).
-        echo 8 > "$NCT_HWMON/pwm1_temp_sel" 2>/dev/null || true
-        echo 8 > "$NCT_HWMON/pwm2_temp_sel" 2>/dev/null || true
+        set_knob required "$NCT_HWMON/pwm1_temp_sel" 8
+        set_knob required "$NCT_HWMON/pwm2_temp_sel" 8
 
         # fan1 = CPU header. Idle floor is BIOS-locked to ~33 % (~800 RPM); the
         # low point1 just keeps it there below 52 °C. Ramps to 100 % by 88 °C.
-        echo 52000 > "$NCT_HWMON/pwm1_auto_point1_temp" 2>/dev/null || true
-        echo 1     > "$NCT_HWMON/pwm1_auto_point1_pwm"  2>/dev/null || true
-        echo 64000 > "$NCT_HWMON/pwm1_auto_point2_temp" 2>/dev/null || true
-        echo 70    > "$NCT_HWMON/pwm1_auto_point2_pwm"  2>/dev/null || true
-        echo 74000 > "$NCT_HWMON/pwm1_auto_point3_temp" 2>/dev/null || true
-        echo 140   > "$NCT_HWMON/pwm1_auto_point3_pwm"  2>/dev/null || true
-        echo 82000 > "$NCT_HWMON/pwm1_auto_point4_temp" 2>/dev/null || true
-        echo 210   > "$NCT_HWMON/pwm1_auto_point4_pwm"  2>/dev/null || true
-        echo 88000 > "$NCT_HWMON/pwm1_auto_point5_temp" 2>/dev/null || true
-        echo 255   > "$NCT_HWMON/pwm1_auto_point5_pwm"  2>/dev/null || true
+        set_knob required "$NCT_HWMON/pwm1_auto_point1_temp" 52000
+        set_knob required "$NCT_HWMON/pwm1_auto_point1_pwm" 1
+        set_knob required "$NCT_HWMON/pwm1_auto_point2_temp" 64000
+        set_knob required "$NCT_HWMON/pwm1_auto_point2_pwm" 70
+        set_knob required "$NCT_HWMON/pwm1_auto_point3_temp" 74000
+        set_knob required "$NCT_HWMON/pwm1_auto_point3_pwm" 140
+        set_knob required "$NCT_HWMON/pwm1_auto_point4_temp" 82000
+        set_knob required "$NCT_HWMON/pwm1_auto_point4_pwm" 210
+        set_knob required "$NCT_HWMON/pwm1_auto_point5_temp" 88000
+        set_knob required "$NCT_HWMON/pwm1_auto_point5_pwm" 255
 
         # fan2 = chassis header. NEVER stops (point1 pwm=58 ≈ 950 RPM): the
         # chassis fan cools the UNMONITORED VRM/M.2/GPU-intake air — fully
         # stopping it is the prime suspect of the 2026-07-23 hard crash. Ramps
         # to 100 % by 88 °C.
-        echo 46000 > "$NCT_HWMON/pwm2_auto_point1_temp" 2>/dev/null || true
-        echo 58    > "$NCT_HWMON/pwm2_auto_point1_pwm"  2>/dev/null || true
-        echo 64000 > "$NCT_HWMON/pwm2_auto_point2_temp" 2>/dev/null || true
-        echo 95    > "$NCT_HWMON/pwm2_auto_point2_pwm"  2>/dev/null || true
-        echo 74000 > "$NCT_HWMON/pwm2_auto_point3_temp" 2>/dev/null || true
-        echo 150   > "$NCT_HWMON/pwm2_auto_point3_pwm"  2>/dev/null || true
-        echo 82000 > "$NCT_HWMON/pwm2_auto_point4_temp" 2>/dev/null || true
-        echo 230   > "$NCT_HWMON/pwm2_auto_point4_pwm"  2>/dev/null || true
-        echo 88000 > "$NCT_HWMON/pwm2_auto_point5_temp" 2>/dev/null || true
-        echo 255   > "$NCT_HWMON/pwm2_auto_point5_pwm"  2>/dev/null || true
+        set_knob required "$NCT_HWMON/pwm2_auto_point1_temp" 46000
+        set_knob required "$NCT_HWMON/pwm2_auto_point1_pwm" 58
+        set_knob required "$NCT_HWMON/pwm2_auto_point2_temp" 64000
+        set_knob required "$NCT_HWMON/pwm2_auto_point2_pwm" 95
+        set_knob required "$NCT_HWMON/pwm2_auto_point3_temp" 74000
+        set_knob required "$NCT_HWMON/pwm2_auto_point3_pwm" 150
+        set_knob required "$NCT_HWMON/pwm2_auto_point4_temp" 82000
+        set_knob required "$NCT_HWMON/pwm2_auto_point4_pwm" 230
+        set_knob required "$NCT_HWMON/pwm2_auto_point5_temp" 88000
+        set_knob required "$NCT_HWMON/pwm2_auto_point5_pwm" 255
 
         # Ensure SmartFan IV auto mode (survives prior runtime manual tinkering)
-        echo 5 > "$NCT_HWMON/pwm1_enable" 2>/dev/null || true
-        echo 5 > "$NCT_HWMON/pwm2_enable" 2>/dev/null || true
+        set_knob required "$NCT_HWMON/pwm1_enable" 5
+        set_knob required "$NCT_HWMON/pwm2_enable" 5
 
         echo "  fan1 CPU     (PECI): floor→64°C/70 → 74°C/140 → 82°C/210 → 88°C/255"
         echo "  fan2 chassis (PECI): 950RPM→64°C/95 → 74°C/150 → 82°C/230 → 88°C/255"
@@ -199,31 +261,41 @@ if [ "$FULL_APPLY" = 1 ]; then
 fi
 
 echo ""
-echo "✅ CPU thermal optimization applied successfully (mode: $MODE)"
+if [ "${#FAILED_KNOBS[@]}" -eq 0 ]; then
+    echo "✅ CPU thermal optimization applied successfully (mode: $MODE)"
+else
+    echo "✗ ${#FAILED_KNOBS[@]} required setting(s) did not read back as written (mode: $MODE):" >&2
+    printf '    %s\n' "${FAILED_KNOBS[@]}" >&2
+fi
 echo ""
 echo "Current configuration:"
 echo "  CPU | Current  | Max      | Governor   | EPP"
 echo "  ----|----------|----------|------------|----------------"
 
 for cpu in 0 8 15 16 23; do
-    if [ -d "/sys/devices/system/cpu/cpu$cpu" ]; then
-        freq=$(cat /sys/devices/system/cpu/cpu$cpu/cpufreq/scaling_cur_freq 2>/dev/null || echo "0")
-        max_freq=$(cat /sys/devices/system/cpu/cpu$cpu/cpufreq/scaling_max_freq 2>/dev/null || echo "0")
-        gov=$(cat /sys/devices/system/cpu/cpu$cpu/cpufreq/scaling_governor 2>/dev/null || echo "unknown")
-        epp=$(cat /sys/devices/system/cpu/cpu$cpu/cpufreq/energy_performance_preference 2>/dev/null || echo "n/a")
-        printf "  %-3s | %-8s | %-8s | %-10s | %s\n" "$cpu" "$((freq/1000))MHz" "$((max_freq/1000))MHz" "$gov" "$epp"
+    dir="$SYS/devices/system/cpu/cpu$cpu"
+    if [ -d "$dir" ]; then
+        freq=$(cat "$dir/cpufreq/scaling_cur_freq" 2>/dev/null || echo "0")
+        max_freq=$(cat "$dir/cpufreq/scaling_max_freq" 2>/dev/null || echo "0")
+        gov=$(cat "$dir/cpufreq/scaling_governor" 2>/dev/null || echo "unknown")
+        epp=$(cat "$dir/cpufreq/energy_performance_preference" 2>/dev/null || echo "n/a")
+        printf "  %-3s | %-8s | %-8s | %-10s | %s\n" "$cpu" "$((${freq:-0}/1000))MHz" "$((${max_freq:-0}/1000))MHz" "$gov" "$epp"
     fi
 done
 
+# Raw values: this summary must not be able to abort the script (set -e) on a
+# knob that reads back empty, which the check above has already reported.
 if [ "$FULL_APPLY" = 1 ] && [ -d "$RAPL" ]; then
     echo ""
-    echo "RAPL package limits:"
-    echo "  PL1: $(($(cat "$RAPL/constraint_0_power_limit_uw")/1000000)) W / $(($(cat "$RAPL/constraint_0_time_window_us")/1000000)) s"
-    echo "  PL2: $(($(cat "$RAPL/constraint_1_power_limit_uw")/1000000)) W"
+    echo "RAPL package limits (read back):"
+    echo "  PL1: $(cat "$RAPL/constraint_0_power_limit_uw" 2>/dev/null) uW / $(cat "$RAPL/constraint_0_time_window_us" 2>/dev/null) us"
+    echo "  PL2: $(cat "$RAPL/constraint_1_power_limit_uw" 2>/dev/null) uW"
 fi
 
 echo ""
-echo "Expected behavior (calibrated 2026-07-17):"
-echo "  Idle: ≤45°C"
-echo "  Gaming (light-thread): boosts to 4.1-5.1 GHz, package ≤50 W sustained, ≤88°C"
-echo "  All-core sustained: RAPL converges to 50 W (~3 GHz all-core), no thermal runaway"
+echo "Expected behavior:"
+echo "  Sustained load: package power converges to PL1 = $((RAPL_PL1_UW/1000000)) W"
+echo "  Bursts: up to PL2 = $((RAPL_PL2_UW/1000000)) W, averaged over $((RAPL_PL1_TAU_US/1000000)) s"
+echo "  Measured temperatures for these limits: docs/claude/host-infrastructure.md"
+
+[ "${#FAILED_KNOBS[@]}" -eq 0 ] || exit 1
