@@ -7,9 +7,9 @@ set -euo pipefail
 # Configuration file
 CONFIG_FILE="${HOME}/.config/nivuus/ha.conf"
 
-# Default configuration (localhost with embedded token)
+# Default configuration: localhost, and no token until one is configured
 HA_URL="${HA_URL:-http://localhost:8123}"
-HA_TOKEN="${HA_TOKEN:-<HA_LONG_LIVED_TOKEN>}"
+HA_TOKEN="${HA_TOKEN:-}"
 
 # Load configuration if exists
 if [[ -f "$CONFIG_FILE" ]]; then
@@ -55,7 +55,6 @@ api_call() {
     local args=(
         -s
         -X "$method"
-        -H "Authorization: Bearer ${HA_TOKEN}"
         -H "Content-Type: application/json"
     )
 
@@ -65,7 +64,13 @@ api_call() {
 
     # Make the call and capture response
     local response
-    response=$(curl "${args[@]}" "$url" 2>&1)
+    # The token reaches curl as a header file (`-H @file`, curl >= 7.55),
+    # never in its argv, which any local user can read in /proc/<pid>/cmdline.
+    # printf is a builtin, so it does not expose the token either. The process
+    # substitution must sit on this line: its descriptor only lives for the
+    # duration of the command it appears in.
+    response=$(curl -H @<(printf 'Authorization: Bearer %s\n' "$HA_TOKEN") \
+        "${args[@]}" "$url" 2>&1)
     local exit_code=$?
 
     if [[ $exit_code -ne 0 ]]; then
