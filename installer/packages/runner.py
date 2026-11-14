@@ -78,14 +78,27 @@ the pipe (never accumulating) so the child cannot block on a full pipe, and
 emits exactly one warning naming the package and phase. stderr is redirected
 to a temporary file rather than a second pipe: reading two pipes off one
 child from a single thread is the textbook deadlock (one fills while the
-other is being read), and a file has no such limit. The timeout is enforced
-by a background timer that kills the child - once killed, the pipe's write
-end closes and the blocking read loop unblocks with EOF on its own.
+other is being read), and a file has no such limit.
+
+THE HOOK IS A PROCESS GROUP, NOT A PROCESS. Killing the hook alone does not
+close its stdout: any child it spawned with inherited stdout (a hook that
+runs a long step through `subprocess.run`, say) still holds the pipe's write
+end, so the read loop never sees EOF and the caller - `nivuus update`, with
+the updater lock held - waits forever. So the hook starts in its own session
+(`start_new_session=True`, hence its own process group), and the group is
+what gets killed: by the background timer on timeout, by a watcher thread as
+soon as the hook itself has exited (whatever it left behind in its group is
+not part of a finished hook, and would otherwise keep the pipe open), and on
+any exception that leaves the read loop. A descendant that deliberately
+leaves the group (`setsid`, a double fork into a new session) escapes this;
+starting long-lived services is the job of systemd, not of a hook's
+children.
 """
 from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -131,6 +144,43 @@ def _context(manifest: Manifest, hw: dict, answers: dict) -> str:
     })
 
 
+def _kill_group(proc: subprocess.Popen) -> bool:
+    """SIGKILL the hook's whole process group; True if anything was signalled.
+
+    The hook is its session leader (start_new_session=True), so the group id
+    is its pid. Callers only signal while the hook is not yet reaped (it may
+    be a zombie), and the kernel never reuses the id of an unreaped process,
+    so this cannot reach an unrelated group.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _other_group_members(pgid: int) -> list[int]:
+    """Pids in process group `pgid` other than its leader, read from /proc.
+
+    Only used to word a warning: killpg() reports success as long as the
+    leader exists, even as a zombie, so it cannot tell whether anything was
+    left behind.
+    """
+    members = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or int(entry) == pgid:
+            continue
+        try:
+            with open(f"/proc/{entry}/stat") as fh:
+                # Fields after the parenthesised comm: state ppid pgrp ...
+                fields = fh.read().rsplit(")", 1)[1].split()
+        except OSError:
+            continue  # exited while we were looking
+        if int(fields[2]) == pgid:
+            members.append(int(entry))
+    return members
+
+
 def _run_hook(manifest: Manifest, phase: str, hw: dict, answers: dict,
               root: str = "", emit=None) -> list[dict]:
     """Run one hook and return the events it emitted. [] when none is declared.
@@ -155,7 +205,8 @@ def _run_hook(manifest: Manifest, phase: str, hw: dict, answers: dict,
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=stderr_file, text=True, cwd=manifest.root)
+            stderr=stderr_file, text=True, cwd=manifest.root,
+            start_new_session=True)
 
         # The context is a few KB - well under a pipe buffer (64 KiB on
         # Linux) - so a plain write-then-close is safe; no feeder thread.
@@ -167,21 +218,32 @@ def _run_hook(manifest: Manifest, phase: str, hw: dict, answers: dict,
             proc.stdin.close()
 
         timed_out = threading.Event()
+        reading_done = threading.Event()
 
         def _enforce_timeout() -> None:
-            # poll() first: a race where the child already exited is
-            # harmless (kill() on a Popen with a known returncode is a
-            # no-op), this just avoids signalling a reused pid needlessly.
-            if proc.poll() is None:
+            # The timer is cancelled once the read loop is over, so firing
+            # means something in the hook's group still holds its stdout.
+            if not reading_done.is_set() and _kill_group(proc):
                 timed_out.set()
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
+
+        def _reap_leftovers() -> None:
+            # The hook itself has exited: whatever is left in its group must
+            # not keep the pipe (and the caller) open until the timeout.
+            # WNOWAIT leaves the hook a zombie, so its group id stays
+            # reserved until the kill below; only the main thread reaps it.
+            os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+            leftovers = _other_group_members(proc.pid)
+            _kill_group(proc)
+            if leftovers and emit:
+                emit.warn("packages", 0,
+                          f"[{manifest.name}] hook '{phase}' exited and left "
+                          "processes behind; they were killed")
 
         timer = threading.Timer(HOOK_TIMEOUT[phase], _enforce_timeout)
         timer.daemon = True
         timer.start()
+        reaper = threading.Thread(target=_reap_leftovers, daemon=True)
+        reaper.start()
 
         events: list[dict] = []
         consumed = 0
@@ -221,10 +283,20 @@ def _run_hook(manifest: Manifest, phase: str, hw: dict, answers: dict,
                 if emit and event.get("event") == "progress":
                     emit.info("packages", int(event.get("pct") or 0),
                               f"[{manifest.name}] {str(event.get('msg', ''))[:120]}")
+        except BaseException:
+            # Leaving the loop early (an interrupt, an emitter that raised)
+            # must not leave the caller waiting on a hook nobody reads.
+            _kill_group(proc)
+            raise
         finally:
-            proc.stdout.close()
-            proc.wait()
+            reading_done.set()
             timer.cancel()
+            proc.stdout.close()
+            # Both signalling threads finish before the hook is reaped, so
+            # no killpg can ever run against a recycled group id.
+            timer.join()
+            reaper.join()
+            proc.wait()
 
         if timed_out.is_set():
             raise HookError(

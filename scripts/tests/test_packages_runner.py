@@ -333,6 +333,98 @@ try:
 finally:
     runner_mod.HOOK_TIMEOUT["resolve"] = _ORIGINAL_RESOLVE_TIMEOUT
 
+# --- descendants of a hook must not outlive it ------------------------------ #
+# A child that inherits the hook's stdout keeps the pipe's write end open, so
+# killing the hook alone never brings EOF to the read loop. Each call runs in
+# a thread with a deadline so that a regression fails here instead of hanging
+# the suite; the recorded child pid is killed afterwards in every case.
+import os  # noqa: E402
+import signal  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+SPAWNING_RESOLVE = (
+    RESOLVE_BOOTSTRAP +
+    "import subprocess, time\n"
+    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+    "open('child.pid', 'w').write(str(child.pid))\n"
+    "print(json.dumps({'event': 'progress', 'pct': 1, 'msg': 'spawned'}), flush=True)\n"
+)
+
+
+def _alive(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        return False
+
+
+def _run_with_deadline(manifest, deadline):
+    outcome = {}
+
+    def target():
+        try:
+            outcome["result"] = run_resolve(manifest, HW, {})
+        except HookError as exc:
+            outcome["error"] = exc
+
+    started = time.monotonic()
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(deadline)
+    return outcome, thread.is_alive(), time.monotonic() - started
+
+
+def _child_pid(pkg_root):
+    path = pathlib.Path(pkg_root) / "child.pid"
+    return int(path.read_text()) if path.is_file() else None
+
+
+def _gone_within(pid, seconds):
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if not _alive(pid):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _cleanup(pid):
+    if pid is not None and _alive(pid):
+        os.kill(pid, signal.SIGKILL)
+
+
+runner_mod.HOOK_TIMEOUT["resolve"] = 1
+try:
+    # The hook spawns a child and then outlives its own deadline.
+    with tempfile.TemporaryDirectory() as tmp:
+        stuck = _resolve_only_pkg(tmp, "stuck", SPAWNING_RESOLVE + "time.sleep(30)\n")
+        outcome, hung, _ = _run_with_deadline(stuck, 6)
+        pid = _child_pid(stuck.root)
+        check("a hook whose child holds its stdout does not hang past the "
+              "timeout", hung, False)
+        check("that timeout raises HookError naming the package",
+              "stuck" in str(outcome.get("error", "")), True)
+        check("the hook's child does not survive the timeout",
+              pid is not None and _gone_within(pid, 3), True)
+        _cleanup(pid)
+finally:
+    runner_mod.HOOK_TIMEOUT["resolve"] = _ORIGINAL_RESOLVE_TIMEOUT
+
+# The hook exits at once and leaves its child behind: the call must return as
+# soon as the hook is done, long before the (default, 120 s) timeout.
+with tempfile.TemporaryDirectory() as tmp:
+    orphaning = _resolve_only_pkg(tmp, "orphaning", SPAWNING_RESOLVE)
+    outcome, hung, elapsed = _run_with_deadline(orphaning, 6)
+    pid = _child_pid(orphaning.root)
+    check("a hook that exits leaving a child behind returns promptly",
+          (hung, elapsed < 6), (False, True))
+    check("that hook still succeeds", getattr(outcome.get("result"), "ok", None), True)
+    check("the child it left behind is reaped",
+          pid is not None and _gone_within(pid, 3), True)
+    _cleanup(pid)
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
