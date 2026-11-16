@@ -55,6 +55,14 @@ tether_ok() {
 # A cutover without its units would cut PPPoE, wait, and roll back: minutes of
 # outage for nothing.
 units_ok() { for u in $STOP_UNITS; do [ -f "$UNIT_DIR/$u" ] || return 1; done; }
+# The liveness check (nivuus-wan-orange.sh check) reads Thomas Habets' arping,
+# Debian package `arping`; without it every check fails and the WAN runs
+# unwatched. Nothing else installs it: the DHCP stack is laid by hand.
+tools_ok() {
+    case "$(dpkg-query -W -f='${db:Status-Abbrev}' arping 2>/dev/null)" in ii*) return 0 ;; esac
+    echo "refusing: the Debian package 'arping' is not installed (apt install arping); the WAN liveness check needs it" >&2
+    return 1
+}
 pppoe_active() { [ "$(nmcli -g GENERAL.STATE con show "$PROFILE" 2>/dev/null)" = activated ]; }
 start_units() { for u in $START_UNITS; do run $SD StartUnit ss "$u" replace; done; }
 stop_units()  { for u in $STOP_UNITS; do run $SD StopUnit ss "$u" replace; done; }
@@ -85,6 +93,7 @@ rollback() {
 
 to_dhcp() {
     units_ok || { echo "refusing: the nivuus-wan-orange units are not installed" >&2; return 1; }
+    tools_ok || return 1
     tether_ok || { echo "refusing: no working phone tether (plug it in, enable USB tethering)" >&2; return 1; }
     pppoe_active || { echo "refusing: PPPoE is not the active uplink, there is nothing to cut over from" >&2; return 1; }
     run nmcli con down "$PROFILE" || { log "PPPoE could not be taken down: nothing else was changed"; return 1; }
@@ -126,6 +135,7 @@ if [ "$DRY" = 1 ]; then $fn; exit $?; fi
 if [ "$DETACHED" = 0 ]; then
     if [ "$MODE" = to-dhcp ]; then
         units_ok || { echo "refusing: the nivuus-wan-orange units are not installed" >&2; exit 1; }
+        tools_ok || exit 1
         tether_ok || { echo "refusing: no working phone tether" >&2; exit 1; }
     fi
     umask 077
