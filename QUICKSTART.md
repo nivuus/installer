@@ -56,11 +56,19 @@ ligne de commande — voir `installer/README.md`.
 # Voie normale : construire l'ISO puis suivre l'assistant web au boot
 cd installer && sudo make build-iso
 
-# Essai sans toucher au disque : moteur en ligne de commande, arrêté avant
-# les étapes destructives (partition/format/mount)
-sudo python3 installer/install-engine/run.py --stop-after partition \
+# Essai sans toucher au disque : détection du matériel et planification des
+# packages, puis arrêt AVANT la première écriture sur le disque cible
+sudo python3 installer/install-engine/run.py --stop-after plan \
   --config /path/to/config.json
 ```
+
+`--stop-after plan` est la **seule** valeur non destructive. Toutes les autres
+(`partition`, `debootstrap`, `base`, `bootloader`, `features`, `packages`)
+exécutent d'abord l'étape `partition`, qui lance `wipefs -a` et
+`sgdisk --zap-all` sur `disk.path` de la configuration : ne les lancer que
+contre un disque jetable (image loopback, voir `installer/README.md`). Sans
+`--config`, le moteur lit la vraie configuration d'installation
+(`/run/nivuus-install/config.json`).
 
 Le paramétrage manuel de GRUB décrit à l'étape 3 (`isolcpus`, IOMMU,
 `vfio-pci.ids`) est désormais calculé par l'assistant/le moteur à partir du

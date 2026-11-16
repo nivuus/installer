@@ -98,7 +98,7 @@ test-packages: test-scripts
 	          test_packages_units \
 	          test_idempotence_harness \
 	          test_install_engine_bootloader test_install_engine_packages \
-	          test_packages_plan_order \
+	          test_packages_plan_order test_install_engine_stop_points \
 	          test_webapp_models \
 	          test_common_hardware \
 	          test_install_engine_features \

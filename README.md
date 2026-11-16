@@ -98,9 +98,16 @@ Hack on the installer without rebuilding the ISO every time:
 ```bash
 make test-portal             # run the web wizard locally on :8080
 make test-vm                 # boot the built ISO in QEMU (UEFI)
-# drive the install engine against a throwaway loopback disk:
+# dry run: hardware detection + package planning, target disk untouched
+sudo python3 install-engine/run.py --config cfg.json --stop-after plan
+# deeper stages WIPE cfg.json's disk.path — point it at a throwaway loopback disk:
 sudo python3 install-engine/run.py --config cfg.json --target /mnt/t --stop-after partition
 ```
+
+`--stop-after plan` is the only value that leaves the disk alone; every other
+value runs the `partition` step (`wipefs -a`, `sgdisk --zap-all`) first. See
+[`installer/README.md`](installer/README.md#test-without-rebuilding-the-iso)
+for what each value runs.
 
 ---
 

@@ -9,8 +9,11 @@ make test-portal                        # wizard on :8080, no install
 make test-vm                            # QEMU UEFI boot; portal via Ethernet fallback
                                         # (WiFi AP is not emulable in QEMU)
 
-# install engine, staged — stops before the destructive steps
-sudo python3 installer/install-engine/run.py --stop-after partition
+# install engine dry run — detection + package planning, disk untouched.
+# `plan` is the ONLY non-destructive --stop-after value: every other one runs
+# `partition` first (wipefs + sgdisk --zap-all on config disk.path), so use
+# those only against a loopback image (installer/README.md).
+sudo python3 installer/install-engine/run.py --stop-after plan --config cfg.json
 
 # ── Windows guest (console/guest/, moved out of installer/windows-guest/) ──
 python3 console/guest/build.py    # unattended LTSC ISO
