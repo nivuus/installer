@@ -20,6 +20,7 @@ unit's ExecStart names.
 
 Run: python3 scripts/tests/test_install_engine_packages.py
 """
+import dataclasses
 import json
 import os
 import pathlib
@@ -266,7 +267,7 @@ def seed_payload(target: pathlib.Path) -> str:
 
 
 with tempfile.TemporaryDirectory() as tmp:
-    steps_packages.chroot_run = fake_chroot_run
+    steps_packages.chroot_run = steps_packages.apt.chroot_run = fake_chroot_run
     target = pathlib.Path(tmp)
     nivuus_dir = seed_payload(target)
     plan, _ = steps_packages.plan_packages(config, HW, FakeEmit())
@@ -386,7 +387,7 @@ with tempfile.TemporaryDirectory() as tmp:
 # lequel, sinon celui qui ajoutera un quatrieme maillon dans six mois lira
 # "le fait a disparu" sans savoir ou.
 with tempfile.TemporaryDirectory() as tmp:
-    steps_packages.chroot_run = fake_chroot_run
+    steps_packages.chroot_run = steps_packages.apt.chroot_run = fake_chroot_run
     target = pathlib.Path(tmp)
     nivuus_dir = seed_payload(target)
     mesure_config = {"disk": {"path": "/dev/nvme0n1"}, "features": [],
@@ -469,7 +470,7 @@ with tempfile.TemporaryDirectory() as tmp:
 # rather than report success over a broken chain. This is the residual
 # finding this fix closes.
 with tempfile.TemporaryDirectory() as tmp:
-    steps_packages.chroot_run = make_failing_chroot_run("python3")
+    steps_packages.chroot_run = steps_packages.apt.chroot_run = make_failing_chroot_run("python3")
     target = pathlib.Path(tmp)
     nivuus_dir = seed_payload(target)
     plan, _ = steps_packages.plan_packages(config, HW, FakeEmit())
@@ -482,30 +483,63 @@ with tempfile.TemporaryDirectory() as tmp:
     check("the failed apt-get call did name python3 explicitly",
           any("python3" in c for c in calls[-1:]), True)
 
-# A failing PACKAGES' apt call, by contrast, must remain a warning: a
-# package may still be usable without an optional dependency, and this
-# leniency is deliberate. Regression guard on that deliberate choice.
+# A package's declared apt is what its hooks need: a failure is fatal, and it
+# is attributed to that package alone. One apt-get call per package, because
+# apt refuses a whole transaction over one unknown name - merged, a single
+# package's bad name took every other package's dependencies down with it.
 with tempfile.TemporaryDirectory() as tmp:
-    steps_packages.chroot_run = make_failing_chroot_run("cowsay")
+    calls.clear()
+
+    def unknown_cowsay(target, cmd, **kwargs):
+        """apt as it really fails: exit 100 and the culprit on its output."""
+        calls.append(cmd)
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        if "install" in cmd and "cowsay" in cmd:
+            R.returncode = 100
+            R.stderr = "E: Unable to locate package cowsay"
+        return R()
+
+    steps_packages.chroot_run = steps_packages.apt.chroot_run = unknown_cowsay
     target = pathlib.Path(tmp)
     nivuus_dir = seed_payload(target)
     plan, _ = steps_packages.plan_packages(config, HW, FakeEmit())
-    emit = FakeEmit()
-    # Must not raise: apply_packages() completing normally IS the assertion.
-    steps_packages.apply_packages(plan, tmp, nivuus_dir, HW, emit)
-    warnings = [msg for level, msg in emit.lines if level == "warn"]
-    check("a failing packages' apt call only warns, it does not raise",
-          any("cowsay" in w for w in warnings), True)
-    check("the activation unit still reached the target despite the "
-          "packages' apt failure",
-          (target / "etc/systemd/system"
-           / "nivuus-package-activate@.service").is_file(), True)
+    demo, answers, resolution = plan[0]
+    neighbour = dataclasses.replace(demo, name="voisin", label="Neighbour",
+                                    apt=("figlet",))
+    two = [(neighbour, answers, resolution), (demo, answers, resolution)]
+    hooks_run = []
+    real_run_install = steps_packages.run_install
+    steps_packages.run_install = lambda m, *a, **k: hooks_run.append(m.name)
+    try:
+        try:
+            steps_packages.apply_packages(two, tmp, nivuus_dir, HW, FakeEmit())
+            failures.append("a package's failing apt did not fail the step")
+            message = ""
+        except steps_packages.StepError as exc:
+            message = str(exc)
+    finally:
+        steps_packages.run_install = real_run_install
+    check("the failure names the package whose apt failed",
+          f"« {demo.label} »" in message, True)
+    check("and carries apt's own diagnosis",
+          "Unable to locate package cowsay" in message, True)
+    check("the other package is not blamed", "Neighbour" in message, False)
+    check("the other package's apt was still installed, in its own call",
+          [c for c in calls if "install" in c and "figlet" in c],
+          [["apt-get", "install", "-y", "figlet"]])
+    check("no install hook runs against a system missing its dependencies",
+          hooks_run, [])
+    steps_packages.chroot_run = steps_packages.apt.chroot_run = fake_chroot_run
 
 # A payload with no activation unit must fail the install, not report success:
 # an install that cannot activate anything at first boot has not done what it
 # said it did.
 with tempfile.TemporaryDirectory() as tmp:
-    steps_packages.chroot_run = fake_chroot_run
+    steps_packages.chroot_run = steps_packages.apt.chroot_run = fake_chroot_run
     target = pathlib.Path(tmp)
     (target / "opt/nivuus/installer/packages").mkdir(parents=True)
     shutil.copyfile(REPO / "installer/packages/activate_cli.py",
@@ -518,7 +552,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
 # Same for the CLI the unit's ExecStart names.
 with tempfile.TemporaryDirectory() as tmp:
-    steps_packages.chroot_run = fake_chroot_run
+    steps_packages.chroot_run = steps_packages.apt.chroot_run = fake_chroot_run
     target = pathlib.Path(tmp)
     (target / "opt/nivuus/configs/systemd").mkdir(parents=True)
     shutil.copyfile(REPO / "configs/systemd/nivuus-package-activate@.service",
@@ -534,7 +568,7 @@ with tempfile.TemporaryDirectory() as tmp:
 # install hook succeeded, then one that raised, must still leave the first one
 # recorded - it is on the target and armed for first boot either way.
 with tempfile.TemporaryDirectory() as tmp:
-    steps_packages.chroot_run = fake_chroot_run
+    steps_packages.chroot_run = steps_packages.apt.chroot_run = fake_chroot_run
     target = pathlib.Path(tmp)
     nivuus_dir = seed_payload(target)
     plan, _ = steps_packages.plan_packages(config, HW, FakeEmit())

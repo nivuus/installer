@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Bind an interface to a firewalld zone in the permanent configuration only.
+"""Edit a firewalld zone in the permanent configuration only.
+
+bind_interface() binds an interface to a zone; remove_service() takes a
+service out of one (the install engine closes `ssh` on the WAN zones with it).
 
 Inserts one `<interface name="..."/>` line into `<root>/etc/firewalld/zones/
 <zone>.xml` and leaves every other byte of the file as it was. When /etc holds
@@ -101,7 +104,7 @@ def _claimed_elsewhere(etc_dir: pathlib.Path, zone_file: pathlib.Path, interface
     return claimed
 
 
-def _default_zone(root: str) -> str:
+def default_zone(root: str) -> str:
     """firewalld's DefaultZone, read from firewalld.conf; `public` when unset."""
     conf = pathlib.Path(root, FIREWALLD_CONF)
     zone = FALLBACK_ZONE
@@ -148,7 +151,7 @@ def _nm_disagreeing(root: str, zone: str, interface: str) -> list[str]:
                  keyfile.get("vpn", "dev", fallback="")}
         if interface not in names:
             continue
-        other = keyfile.get("connection", "zone", fallback="").strip() or _default_zone(root)
+        other = keyfile.get("connection", "zone", fallback="").strip() or default_zone(root)
         if other != zone:
             found.append(f"{path.name} (zone={other})")
     return found
@@ -222,6 +225,44 @@ def bind_interface(root: str, zone: str, interface: str) -> bool:
     new = _insert(data, interface, source)
     if _lists(_parse_zone(new, target), interface) != 1:
         raise ZoneFileError(f"{target}: the edited file does not list {interface} exactly once")
+    etc_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
+    _write_like(target, new, source.stat())
+    return True
+
+
+def _service_line(service: str) -> re.Pattern:
+    """A whole line holding nothing but <service name="service"/>."""
+    name = re.escape(service).encode("ascii")
+    return re.compile(rb"^[ \t]*<service[ \t]+name=([\"'])" + name
+                      + rb"\1[ \t]*/>[ \t]*(?:\r?\n|\Z)", re.MULTILINE)
+
+
+def remove_service(root: str, zone: str, service: str) -> bool:
+    """Make the permanent `zone` not list `service`. Returns True if a file changed.
+
+    Same rules as bind_interface: the vendor file is the base when /etc has
+    no copy, every other byte is kept, and a file this cannot edit by whole
+    lines is refused rather than rewritten.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_+-]+", zone):
+        raise ValueError(f"invalid zone name: {zone!r}")
+    if not re.fullmatch(r"[A-Za-z0-9_.+-]+", service):
+        raise ValueError(f"invalid service name: {service!r}")
+    etc_dir = pathlib.Path(root, ETC_ZONES)
+    target = etc_dir / f"{zone}.xml"
+    source = target if target.is_file() else pathlib.Path(root, VENDOR_ZONES, f"{zone}.xml")
+    if not source.is_file():
+        raise ZoneFileError(f"zone {zone!r} has no file: neither {target} nor {source} exists")
+    data = source.read_bytes()
+    listed = sum(1 for el in _parse_zone(data, source).findall("service")
+                 if el.get("name") == service)
+    if not listed:
+        return False
+    new, removed = _service_line(service).subn(b"", data)
+    if removed != listed or any(el.get("name") == service for el
+                                in _parse_zone(new, target).findall("service")):
+        raise ZoneFileError(f"{source}: <service name={service!r}/> is not alone on its "
+                            "line; refusing to guess")
     etc_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
     _write_like(target, new, source.stat())
     return True

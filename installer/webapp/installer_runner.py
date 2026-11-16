@@ -14,6 +14,9 @@ import sys
 
 from common.progress import PROGRESS_DIR, PROGRESS_FILE, CONFIG_FILE, read_backlog
 
+# What the engine is told to read its config from: the pipe start() writes.
+ENGINE_CONFIG_PATH = "/dev/stdin"
+
 ENGINE_RUN = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "install-engine", "run.py",
@@ -36,19 +39,28 @@ class InstallRunner:
             raise RuntimeError("an installation is already in progress")
 
         os.makedirs(PROGRESS_DIR, exist_ok=True)
-        with open(CONFIG_FILE, "w") as fh:
-            json.dump(config, fh, indent=2)
+        # A config.json left by an older portal holds every wizard password
+        # in clear: nothing reads it any more.
+        if os.path.exists(CONFIG_FILE):
+            os.remove(CONFIG_FILE)
         # Fresh progress log for this run.
         if os.path.exists(PROGRESS_FILE):
             os.remove(PROGRESS_FILE)
 
+        # The config goes through a pipe, never a file: it carries the
+        # account, PPPoE and Wi-Fi passwords in clear, and a file under /run
+        # outlives the install for anyone on the live system to read.
+        # run.py opens --config as a path; /dev/stdin is that pipe.
         self._proc = subprocess.Popen(
             [sys.executable, ENGINE_RUN,
-             "--config", CONFIG_FILE,
+             "--config", ENGINE_CONFIG_PATH,
              "--target", target,
              "--nivuus-src", nivuus_src],
+            stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+        with self._proc.stdin as pipe:
+            pipe.write(json.dumps(config).encode("utf-8"))
 
     def status(self) -> dict:
         """Coarse run state for HTTP polling / page reloads."""

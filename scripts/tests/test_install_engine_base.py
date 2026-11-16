@@ -98,6 +98,43 @@ with tempfile.TemporaryDirectory() as tmp:
     lenient = [cmd for cmd, kw in calls if kw.get("check") is False]
     check("enable is not lenient", lenient, [])
 
+# --- the account password never travels on argv ---------------------------- #
+# argv is world-readable in /proc, and a failing command's argv lands in the
+# StepError the portal streams to the unauthenticated /ws/progress.
+calls.clear()
+with tempfile.TemporaryDirectory() as tmp:
+    pw_hash = "$6$salt$" + "h" * 86
+    chroot_base._user({"user": {"username": "alice", "password_hash": pw_hash}},
+                      tmp, FakeEmit())
+    on_argv = [cmd for cmd, kw in calls if any(pw_hash in part for part in cmd)]
+    check("no command carries the password hash on argv", on_argv, [])
+    fed = [kw.get("input_text") for cmd, kw in calls if cmd[0] == "chpasswd"]
+    check("chpasswd receives user:hash on stdin", fed, [f"alice:{pw_hash}\n"])
+    chpasswd = [cmd for cmd, kw in calls if cmd[0] == "chpasswd"]
+    check("chpasswd is told the password is already hashed",
+          chpasswd, [["chpasswd", "--encrypted"]])
+
+
+# --- sshd and NetworkManager must really be enabled --------------------------- #
+def enable_fails(unit):
+    """util.chroot_run's contract: a failure raises unless check=False."""
+    def fake(target, cmd, **kwargs):
+        if cmd == ["systemctl", "enable", unit] and kwargs.get("check", True):
+            raise chroot_base.StepError(f"command failed (1): {' '.join(cmd)}")
+        return type("R", (), {"returncode": 1 if cmd[-1] == unit else 0})()
+    return fake
+
+
+for unit in ("ssh", "NetworkManager"):
+    chroot_base.chroot_run = enable_fails(unit)
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            chroot_base._sshd({"user": {"username": "alice"}}, tmp, FakeEmit())
+            failures.append(f"systemctl enable {unit} failing: no StepError")
+        except chroot_base.StepError as exc:
+            check(f"the failure names {unit}", f"enable {unit}" in str(exc), True)
+chroot_base.chroot_run = fake_chroot_run
+
 if failures:
     print("FAIL")
     for f in failures:

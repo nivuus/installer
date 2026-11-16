@@ -102,6 +102,7 @@ test-packages: test-scripts
 	          test_webapp_models \
 	          test_common_hardware \
 	          test_install_engine_features \
+	          test_webapp_runner \
 	          test_install_engine_base test_orange_dhcp_options test_wan_orange_lan6 test_nivuus_bios test_hw_blackbox_ups \
 	          test_firewalld_zone; do \
 	    echo "--- $$t"; \

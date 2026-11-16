@@ -118,7 +118,11 @@ def _user(config: dict, target: str, emit) -> None:
     if not pw_hash and user.get("password"):
         pw_hash = crypt.crypt(user["password"], crypt.mksalt(crypt.METHOD_SHA512))
     if pw_hash:
-        chroot_run(target, ["usermod", "-p", pw_hash, username])
+        # On stdin, never on argv: argv is world-readable in /proc while the
+        # command runs, and a failing command's argv is copied into the
+        # StepError that the portal streams to /ws/progress unauthenticated.
+        chroot_run(target, ["chpasswd", "--encrypted"],
+                   input_text=f"{username}:{pw_hash}\n")
     # Lock root login by default (sudo via the user instead).
     chroot_run(target, ["passwd", "-l", "root"], check=False)
 
@@ -149,8 +153,10 @@ def _sshd(config: dict, target: str, emit) -> None:
         "X11Forwarding no\n"
     )
     write_file(os.path.join(target, "etc/ssh/sshd_config.d/10-nivuus.conf"), conf)
-    chroot_run(target, ["systemctl", "enable", "ssh"], check=False)
-    chroot_run(target, ["systemctl", "enable", "NetworkManager"], check=False)
+    # Fatal on failure: a host installed without a running sshd or network
+    # has no screen to be reached from.
+    chroot_run(target, ["systemctl", "enable", "ssh"])
+    chroot_run(target, ["systemctl", "enable", "NetworkManager"])
 
 
 def _memory_guard(target: str, emit) -> None:

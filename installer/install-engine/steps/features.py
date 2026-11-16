@@ -15,7 +15,9 @@ import uuid
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from .firewalld_zone import ZoneFileError, bind_interface
+from . import apt
+from .firewalld_zone import (ZoneFileError, bind_interface, default_zone,
+                             remove_service)
 from .util import StepError, chroot_run, write_file
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates")
@@ -33,6 +35,17 @@ NM_DIR = "etc/NetworkManager/system-connections"
 # external, but NM does not re-bind a VPN interface after a firewalld reload
 # or restart: the permanent zone must list it too, or guests are blackholed.
 GUEST_VPN_TUN = "nvguest0"
+
+# The zone the PPPoE WAN profile names (templates/pppoe-wan.nmconnection.j2).
+WAN_PROFILE_ZONE = "external"
+
+# Debian names, not Docker Inc.'s repository: docker.io is the engine (its
+# Recommends pull docker-cli on trixie), docker-compose provides the
+# `docker compose` CLI plugin from trixie on
+# (/usr/libexec/docker/cli-plugins/docker-compose, 2.26). docker-compose-v2 is
+# an Ubuntu name that Debian never had; on bookworm docker-compose is the
+# Python v1 with no plugin, which the check in _docker() refuses by name.
+DOCKER_APT = ["docker.io", "docker-compose"]
 
 
 def _env() -> Environment:
@@ -104,7 +117,7 @@ def _thermal(target, nivuus_dir, emit) -> None:
         "[Install]\n"
         "WantedBy=multi-user.target\n")
     chroot_run(target, ["systemctl", "enable",
-                        "cpu-thermal-optimization.service"], check=False)
+                        "cpu-thermal-optimization.service"])
 
 
 # --------------------------------------------------------------------------- #
@@ -146,8 +159,8 @@ def _wifi_ap(config, target, env, emit) -> None:
     if not wifi.get("enabled"):
         return
     emit.info("features", 88, "Configuring hostapd WiFi access point…")
-    chroot_run(target, ["apt-get", "install", "-y", "hostapd"], check=False)
-    chroot_run(target, ["systemctl", "unmask", "hostapd"], check=False)
+    apt.install(target, "feature wifi-ap", ["hostapd"])
+    chroot_run(target, ["systemctl", "unmask", "hostapd"])
 
     hostapd_dir = os.path.join(target, "etc/hostapd")
     os.makedirs(hostapd_dir, exist_ok=True)
@@ -181,10 +194,9 @@ def _wifi_ap(config, target, env, emit) -> None:
 # --------------------------------------------------------------------------- #
 def _firewall(config, target, emit) -> None:
     emit.info("features", 90, "Installing firewall (firewalld + fail2ban)…")
-    chroot_run(target, ["apt-get", "install", "-y", "firewalld", "fail2ban",
-                        "nftables"], check=False)
-    chroot_run(target, ["systemctl", "enable", "firewalld"], check=False)
-    chroot_run(target, ["systemctl", "enable", "fail2ban"], check=False)
+    apt.install(target, "feature firewall", ["firewalld", "fail2ban", "nftables"])
+    chroot_run(target, ["systemctl", "enable", "firewalld"])
+    chroot_run(target, ["systemctl", "enable", "fail2ban"])
     # Permanent configuration only: firewalld picks it up when it starts.
     if not os.path.isdir(os.path.join(target, "usr/lib/firewalld/zones")):
         raise StepError("firewalld did not install (no usr/lib/firewalld/zones in the target); "
@@ -193,18 +205,59 @@ def _firewall(config, target, emit) -> None:
         bind_interface(target, "external", GUEST_VPN_TUN)
     except ZoneFileError as exc:
         raise StepError(f"cannot bind {GUEST_VPN_TUN} to the external zone: {exc}") from exc
+    _close_ssh_on_wan(target, emit)
     # Persist IP forwarding for routing between WAN and bridges.
     write_file(os.path.join(target, "etc/sysctl.d/99-nivuus-forward.conf"),
                "net.ipv4.ip_forward = 1\n")
 
 
 # --------------------------------------------------------------------------- #
+def _wan_zones(target) -> list[str]:
+    """Every zone a WAN interface can land in on a fresh install.
+
+    PPPoE: the profile says WAN_PROFILE_ZONE. DHCP: the engine writes no WAN
+    profile, so the NIC sits in firewalld's DefaultZone - read from the
+    target, never assumed. Bridges in that same zone (publicBridge, the guest
+    Wi-Fi, in `public`) lose SSH with it, which is the intent: guests have no
+    business on the host's sshd either.
+    """
+    zones = [WAN_PROFILE_ZONE]
+    fallback = default_zone(target)
+    if fallback not in zones:
+        zones.append(fallback)
+    return zones
+
+
+def _close_ssh_on_wan(target, emit) -> None:
+    """firewalld's shipped external/public zones allow `ssh`: take it out.
+
+    The LAN zones (home, internal) keep it. Without this a fresh install
+    answered SSH - with password authentication on by default - from the
+    whole internet, fail2ban being the only barrier.
+    """
+    for zone in _wan_zones(target):
+        try:
+            changed = remove_service(target, zone, "ssh")
+        except ZoneFileError as exc:
+            raise StepError(f"cannot close SSH in the {zone} zone: {exc}") from exc
+        if changed:
+            emit.info("features", 90, f"SSH closed in the {zone} zone (WAN)")
+
+
+# --------------------------------------------------------------------------- #
 def _docker(target, emit) -> None:
     emit.info("features", 92, "Installing Docker engine…")
-    # docker.io from Debian repos avoids needing an external apt key at install.
-    chroot_run(target, ["apt-get", "install", "-y", "docker.io",
-                        "docker-compose-v2"], check=False)
-    chroot_run(target, ["systemctl", "enable", "docker"], check=False)
+    apt.install(target, "feature docker", DOCKER_APT)
+    # Checked, not assumed: every package's activate hook runs `docker compose`,
+    # and a suite whose archive has no Compose v2 plugin (bookworm) installs
+    # the names above without error and still leaves no `docker compose`.
+    proc = chroot_run(target, ["docker", "compose", "version"], check=False)
+    if proc.returncode != 0:
+        raise StepError(
+            "feature docker: `docker compose version` fails in the target "
+            f"after installing {' '.join(DOCKER_APT)}: this Debian suite does "
+            "not ship the Compose v2 plugin (it does from trixie on)")
+    chroot_run(target, ["systemctl", "enable", "docker"])
 
 
 # --------------------------------------------------------------------------- #
@@ -218,8 +271,8 @@ def _home_assistant_mqtt(target, nivuus_dir, features, emit) -> None:
         for fname in os.listdir(deb_dir):
             if fname.endswith(".deb"):
                 emit.info("features", 96, f"Installing MQTT agent {fname}…")
-                chroot_run(target, ["apt-get", "install", "-y",
-                                    f"{nivuus_dir}/mqtt/{fname}"], check=False)
+                apt.install(target, "feature home-assistant/mqtt (MQTT agent)",
+                            [f"{nivuus_dir}/mqtt/{fname}"])
                 break
     # HA + Mosquitto run as containers; deployment compose lives in the payload.
     # The actual `docker compose up` happens on first boot once networking is up.
