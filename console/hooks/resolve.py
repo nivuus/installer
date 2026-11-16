@@ -28,6 +28,7 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
 import hardware  # noqa: E402
+import idle_cap  # noqa: E402
 import nvme_identity  # noqa: E402
 
 # Guest memory budget. NOT "half the host" - this project already made and
@@ -240,6 +241,8 @@ def main() -> int:
     cmdline = [f"vfio-pci.ids={','.join(ids)}"]
     if plan["nohz_full"]:
         cmdline.append(f"nohz_full={plan['nohz_full']}")
+    # Derived from the detected CPU identity, never unconditional: see idle_cap.
+    cmdline.extend(idle_cap.cstate_cap_params(hw.get("cpu") or {}))
 
     emit({"event": "progress", "pct": 80, "msg": "Plan materiel resolu"})
     emit({"event": "platform",
