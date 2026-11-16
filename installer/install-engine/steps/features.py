@@ -15,6 +15,7 @@ import uuid
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from .docker_config import install_daemon_config
 from .firewalld_zone import ZoneFileError, bind_interface
 from .util import StepError, chroot_run, write_file
 
@@ -204,6 +205,7 @@ def _docker(target, emit) -> None:
     # docker.io from Debian repos avoids needing an external apt key at install.
     chroot_run(target, ["apt-get", "install", "-y", "docker.io",
                         "docker-compose-v2"], check=False)
+    install_daemon_config(target, emit)
     chroot_run(target, ["systemctl", "enable", "docker"], check=False)
 
 
