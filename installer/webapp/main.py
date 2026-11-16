@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-# policy: allow-fr-file - ruled 2026-09-05, reason below.
-# This marker is the escape hatch the socle PROVIDES, and it requires a
-# written reason: it is a named, dated exception, not the control being
-# lowered. The real translation is tracked in docs/console-dettes.md
-# under CI-3.
-# 2 lines: what the portal shows of prerequisites, and what it does not
-# tick on the operator's behalf.
-
 """Nivuus installer web portal (FastAPI).
 
 Served on the setup hotspot (10.42.0.1:80) or, in the Ethernet fallback, on
@@ -30,7 +22,7 @@ INSTALLER_ROOT = os.path.dirname(WEBAPP_DIR)
 if INSTALLER_ROOT not in sys.path:
     sys.path.insert(0, INSTALLER_ROOT)
 
-from common import hardware  # noqa: E402
+from common import hardware, regional  # noqa: E402
 from models import InstallConfig  # noqa: E402
 from installer_runner import InstallRunner, events_since  # noqa: E402
 from packages.capabilities import detect_capabilities  # noqa: E402
@@ -68,6 +60,16 @@ async def api_hardware() -> JSONResponse:
     return JSONResponse(data)
 
 
+@app.get("/api/regional")
+async def api_regional() -> JSONResponse:
+    """Locales and keyboard layouts the live medium ships (common/regional.py).
+
+    `missing` names a list the medium lacks; the wizard then lets the
+    operator type the value rather than offering an invented short list.
+    """
+    return JSONResponse(await asyncio.to_thread(regional.choices, "/"))
+
+
 @app.get("/api/packages")
 async def api_packages(target_disk: str = "", features: str = "") -> JSONResponse:
     """Packages available on this medium, with the reason for each exclusion.
@@ -87,8 +89,8 @@ async def api_packages(target_disk: str = "", features: str = "") -> JSONRespons
             "name": manifest.name, "label": manifest.label,
             "version": manifest.version, "tier": manifest.tier,
             "claims": [r for r, _ in manifest.claims],
-            # Les packages à cocher AVANT celui-ci. Le portail les affiche ;
-            # il ne les coche pas à la place de l'opérateur.
+            # Packages to tick BEFORE this one. The portal shows them; it
+            # does not tick them on the operator's behalf.
             "requires_packages": list(manifest.packages),
             "questions": [],
         }
@@ -120,12 +122,15 @@ async def api_install_start(config: InstallConfig) -> JSONResponse:
     # (destructive) install. Enabled via NIVUUS_PORTAL_DEMO=1.
     if os.environ.get("NIVUUS_PORTAL_DEMO") == "1":
         return JSONResponse(
-            {"ok": False, "error": "Mode démo : installation désactivée "
-             "(portail en lecture seule)."},
+            # `code` is what the wizard translates; `error` is the English
+            # reference text, shown as is when the wizard has no entry.
+            {"ok": False, "code": "demo_mode",
+             "error": "demo mode: installation is disabled (read-only portal)"},
             status_code=403,
         )
     if runner.is_running():
-        return JSONResponse({"ok": False, "error": "install already running"},
+        return JSONResponse({"ok": False, "code": "already_running",
+                             "error": "install already running"},
                             status_code=409)
     try:
         runner.start(config.model_dump())

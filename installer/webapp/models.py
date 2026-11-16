@@ -8,8 +8,9 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from common import regional
 from common.debian import DEFAULT_SUITE
 
 # Feature keys the wizard offers; the engine gates each step on these.
@@ -77,7 +78,10 @@ class WanConfig(BaseModel):
 
 class WifiApConfig(BaseModel):
     enabled: bool = False
-    country: str = "FR"
+    # ISO 3166-1 alpha-2 country the access point runs in. No default: it
+    # sets the legal channels and power, the wizard proposes it from the
+    # browser's region and the operator confirms it.
+    country: str = ""
     private_ssid: str = "Nivuus"
     private_passphrase: str = ""
     public_ssid: str = ""
@@ -85,6 +89,20 @@ class WifiApConfig(BaseModel):
     dual_band: bool = True
     interfaces_24: list[str] = Field(default_factory=list)
     interfaces_5: list[str] = Field(default_factory=list)
+
+    @field_validator("country")
+    @classmethod
+    def _country(cls, v: str) -> str:
+        v = v.strip().upper()
+        if v and not (len(v) == 2 and v.isascii() and v.isalpha()):
+            raise ValueError("country must be an ISO 3166-1 alpha-2 code")
+        return v
+
+    @model_validator(mode="after")
+    def _country_when_enabled(self) -> "WifiApConfig":
+        if self.enabled and not self.country:
+            raise ValueError("wifi_ap.country is required when the access point is enabled")
+        return self
 
     @field_validator("private_passphrase", "public_passphrase")
     @classmethod
@@ -94,13 +112,27 @@ class WifiApConfig(BaseModel):
         return v
 
 
+class KeyboardConfig(BaseModel):
+    """An XKB layout and optional variant, as keyboard(5) names them."""
+    layout: str = "us"
+    variant: str = ""
+
+    @field_validator("layout", "variant")
+    @classmethod
+    def _xkb_name(cls, v: str) -> str:
+        if not regional.XKB_NAME.fullmatch(v):
+            raise ValueError("not an XKB layout or variant name")
+        return v
+
+
 class InstallConfig(BaseModel):
     disk: DiskConfig
     hostname: str = "nivuus"
     domain: str = ""
     user: UserConfig
     locale: str = "en_US.UTF-8"
-    timezone: str = "Europe/Paris"
+    timezone: str = "Etc/UTC"
+    keyboard: KeyboardConfig = Field(default_factory=KeyboardConfig)
     wan: WanConfig = Field(default_factory=WanConfig)
     wifi_ap: WifiApConfig = Field(default_factory=WifiApConfig)
     features: list[str] = Field(default_factory=lambda: ["os-base"])
@@ -111,6 +143,20 @@ class InstallConfig(BaseModel):
     packages: dict[str, dict] = Field(default_factory=dict)
     suite: str = DEFAULT_SUITE
     mirror: str = "http://deb.debian.org/debian"
+
+    @field_validator("locale")
+    @classmethod
+    def _locale(cls, v: str) -> str:
+        if not regional.LOCALE_NAME.fullmatch(v):
+            raise ValueError("not a locale name")
+        return v
+
+    @field_validator("timezone")
+    @classmethod
+    def _timezone(cls, v: str) -> str:
+        if not regional.TIMEZONE_NAME.fullmatch(v):
+            raise ValueError("not a time zone name")
+        return v
 
     @field_validator("hostname")
     @classmethod

@@ -153,8 +153,23 @@ def install_fails(label, config, fake, needle, target_setup=None):
 
 # The docker feature has its own suite: scripts/tests/test_docker_repo.py.
 install_fails("hostapd that does not install fails the install",
+              {"features": ["os-base", "wifi-ap"],
+               "wifi_ap": {"enabled": True, "country": "DE"}},
+              failing_on("hostapd"), "apt-get install failed")
+install_fails("an access point without a country fails before installing anything",
               {"features": ["os-base", "wifi-ap"], "wifi_ap": {"enabled": True}},
-              failing_on("hostapd"), "feature wifi-ap")
+              failing_on("never-matches"), "ISO 3166-1")
+
+# The access point's regulatory domain is the configured country, any country.
+with tempfile.TemporaryDirectory() as tmp:
+    features.apply_features({"features": ["os-base", "wifi-ap"],
+                             "wifi_ap": {"enabled": True, "country": "jp",
+                                         "private_passphrase": "x" * 12,
+                                         "interfaces_24": ["wlan0"]}},
+                            tmp, "/opt/nivuus", {}, FakeEmit())
+    conf = (pathlib.Path(tmp) / "etc/hostapd/2.4Ghz.conf").read_text()
+    check("hostapd country_code is the configured one",
+          "country_code=JP" in conf.splitlines(), True)
 install_fails("fail2ban that does not install fails the install",
               {"features": ["os-base", "firewall"]}, failing_on("fail2ban"),
               "feature firewall")

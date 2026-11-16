@@ -14,7 +14,7 @@ TARGET_IMG    ?= /tmp/nivuus-target.img
 TARGET_SIZE   ?= 16G
 OVMF          ?= /usr/share/OVMF/OVMF_CODE.fd
 
-.PHONY: build-iso test-engine test-portal test-vm windows-unattend test-packages test-scripts clean help
+.PHONY: build-iso test-engine test-portal test-wizard-js test-vm windows-unattend test-packages test-scripts clean help
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*' $(MAKEFILE_LIST) | sed 's/:.*//' | sort
@@ -40,6 +40,12 @@ test-portal:
 	NIVUUS_PORTAL_HOST=0.0.0.0 NIVUUS_PORTAL_PORT=8080 \
 	NIVUUS_PROGRESS_DIR=/tmp/nivuus-progress \
 	  python3 $(INSTALLER_DIR)/webapp/main.py
+
+# The wizard's i18n.js/regional.js driven under node (negotiation, fallback,
+# regional proposals). Needs node >= 18; the catalog contract itself is
+# checked by test_webapp_i18n.py in test-packages.
+test-wizard-js:
+	node $(dir $(INSTALLER_DIR))scripts/tests/test_webapp_i18n.mjs
 
 test-vm:
 	@test -n "$(ISO)" || { echo "No ISO found; run 'make build-iso' first"; exit 1; }
@@ -104,7 +110,8 @@ test-packages: test-scripts
 	          test_install_engine_features \
 	          test_webapp_runner \
 	          test_install_engine_base test_orange_dhcp_options test_wan_orange_lan6 test_nivuus_bios test_hw_blackbox_ups \
-	          test_firewalld_zone test_docker_repo test_docker_daemon_config; do \
+	          test_firewalld_zone test_docker_repo test_docker_daemon_config \
+	          test_common_regional test_webapp_i18n; do \
 	    echo "--- $$t"; \
 	    $(PYTHON) $(dir $(INSTALLER_DIR))scripts/tests/$$t.py || exit 1; \
 	done

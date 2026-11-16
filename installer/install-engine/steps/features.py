@@ -154,13 +154,18 @@ def _wifi_ap(config, target, env, emit) -> None:
     wifi = config.get("wifi_ap", {})
     if not wifi.get("enabled"):
         return
+    # The regulatory domain decides the legal channels and power: it is the
+    # owner's country, asked by the wizard, never a default.
+    country = (wifi.get("country") or "").upper()
+    if not (len(country) == 2 and country.isascii() and country.isalpha()):
+        raise StepError("feature wifi-ap: wifi_ap.country must be the ISO 3166-1 "
+                        f"alpha-2 code of the country the access point runs in, got {country!r}")
     emit.info("features", 88, "Configuring hostapd WiFi access point…")
     apt.install(target, "feature wifi-ap", ["hostapd"])
     chroot_run(target, ["systemctl", "unmask", "hostapd"])
 
     hostapd_dir = os.path.join(target, "etc/hostapd")
     os.makedirs(hostapd_dir, exist_ok=True)
-    country = wifi.get("country", "FR")
     common = dict(
         country=country,
         private_ssid=wifi.get("private_ssid", "Nivuus"),

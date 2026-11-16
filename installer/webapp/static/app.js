@@ -2,22 +2,20 @@
 
 // Wizard step order. "wifi" is conditional but always present in the nav.
 const STEPS = ["disk", "system", "account", "wan", "wifi", "features", "review"];
-const STEP_LABELS = {
-  disk: "Disque", system: "Système", account: "Compte", wan: "WAN",
-  wifi: "WiFi", features: "Options", review: "Récap",
-};
+// Step labels are the catalog's "steps.<name>" entries (static/i18n.js).
 
-// Feature catalogue: key -> {label, desc, default}. The VM (kvm-vfio,
-// gpu-passthrough, retro) is gone from this list: it is the console package
-// now, and the wizard does not render packages yet (see /api/packages) -
-// deliberately deferred, not forgotten.
+// Feature catalogue: key -> default; label and description are the catalog's
+// "features.<key>.label/.desc". The VM (kvm-vfio, gpu-passthrough, retro) is
+// gone from this list: it is the console package now, and the wizard does not
+// render packages yet (see /api/packages) - deliberately deferred, not
+// forgotten.
 const FEATURES = [
-  { key: "thermal", label: "Optimisation thermique", desc: "Gestion fréquences P/E-cores + ventilateurs", def: true },
-  { key: "networking", label: "Réseau (bridges + WAN)", desc: "Bridges NetworkManager + PPPoE/DHCP", def: true },
-  { key: "wifi-ap", label: "Point d'accès WiFi", desc: "hostapd dual-band (lié à l'étape WiFi)", def: false },
-  { key: "firewall", label: "Pare-feu", desc: "firewalld + fail2ban + nftables", def: true },
-  { key: "docker", label: "Docker", desc: "Moteur Docker + docker compose", def: false },
-  { key: "home-assistant", label: "Home Assistant + MQTT", desc: "Domotique + agent système MQTT", def: false },
+  { key: "thermal", def: true },
+  { key: "networking", def: true },
+  { key: "wifi-ap", def: false },
+  { key: "firewall", def: true },
+  { key: "docker", def: false },
+  { key: "home-assistant", def: false },
 ];
 
 let hw = null;          // detected hardware snapshot
@@ -30,26 +28,27 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 document.addEventListener("DOMContentLoaded", init);
 
 async function init() {
+  await loadI18n();
   buildStepNav();
   buildFeatureList();
   wireNav();
   wireConditionalFields();
-  await loadHardware();
+  await Promise.all([loadHardware(), loadRegional()]);
   showStep(0);
 }
 
 function buildStepNav() {
   const nav = $("#stepnav");
   nav.innerHTML = STEPS.map((s, i) =>
-    `<span data-i="${i}">${i + 1}. ${STEP_LABELS[s]}</span>`).join("");
+    `<span data-i="${i}">${i + 1}. ${t(`steps.${s}`)}</span>`).join("");
 }
 
 function buildFeatureList() {
   $("#features").innerHTML = FEATURES.map(f => `
     <label class="feature">
       <input type="checkbox" data-feature="${f.key}" ${f.def ? "checked" : ""}>
-      <span class="fmeta"><span class="fname">${f.label}</span>
-      <span class="fdesc">${f.desc}</span></span>
+      <span class="fmeta"><span class="fname">${t(`features.${f.key}.label`)}</span>
+      <span class="fdesc">${t(`features.${f.key}.desc`)}</span></span>
     </label>`).join("");
 }
 
@@ -67,13 +66,13 @@ async function loadHardware() {
 
 function renderDisks() {
   const box = $("#disks");
-  if (!hw.disks.length) { box.textContent = "Aucun disque détecté."; return; }
+  if (!hw.disks.length) { box.textContent = t("disk.none"); return; }
   box.innerHTML = hw.disks.map(d => `
     <div class="card" data-disk="${d.path}">
       <input type="radio" name="disk" value="${d.path}">
       <span class="meta">
         <span class="name">${d.path} — ${d.size}</span>
-        <span class="detail">${d.model}${d.removable ? " · amovible" : ""}${d.rotational ? " · HDD" : " · SSD"}</span>
+        <span class="detail">${d.model}${d.removable ? ` · ${t("disk.removable")}` : ""} · ${d.rotational ? t("disk.hdd") : t("disk.ssd")}</span>
       </span>
     </div>`).join("");
   $$("#disks .card").forEach(card => card.addEventListener("click", () => {
@@ -87,16 +86,16 @@ function renderDisks() {
 function renderWan() {
   const sel = $("#wan_interface");
   sel.innerHTML = (hw.ethernet || []).map(e =>
-    `<option value="${e.name}">${e.name} (${e.mac}${e.carrier ? ", câble détecté" : ""})</option>`).join("");
+    `<option value="${e.name}">${e.name} (${e.mac}${e.carrier ? `, ${t("wan.cable_detected")}` : ""})</option>`).join("");
 }
 
 function renderWifi() {
   const apCapable = (hw.wifi || []).filter(w => w.ap_capable);
   const box = $("#wifi_ifaces");
   if (!apCapable.length) {
-    box.innerHTML = "<em>Aucune interface WiFi compatible AP détectée.</em>";
+    box.innerHTML = `<em>${t("wifi.no_ap")}</em>`;
   } else {
-    box.innerHTML = "Interfaces WiFi AP détectées : " +
+    box.innerHTML = `${t("wifi.ap_found")} ` +
       apCapable.map(w => `<code>${w.name}</code>`).join(", ");
   }
 }
@@ -144,13 +143,17 @@ function showStep(i) {
 }
 
 function validateStep(step) {
-  if (step === "disk" && !selectedDisk) { alert("Sélectionnez un disque cible."); return false; }
+  if (step === "disk" && !selectedDisk) { alert(t("validate.disk")); return false; }
   if (step === "account") {
     const u = $('[name="username"]').value.trim();
-    if (!u) { alert("Le nom d'utilisateur est requis."); return false; }
+    if (!u) { alert(t("validate.username")); return false; }
     const pw = $('[name="password"]').value;
     const key = $('[name="ssh_key"]').value.trim();
-    if (!pw && !key) { alert("Définissez un mot de passe ou une clé SSH."); return false; }
+    if (!pw && !key) { alert(t("validate.credentials")); return false; }
+  }
+  if (step === "wifi" && $("#wifi_enabled").checked &&
+      !/^[A-Za-z]{2}$/.test(val("wifi_country"))) {
+    alert(t("validate.wifi_country")); return false;
   }
   return true;
 }
@@ -168,7 +171,8 @@ function buildConfig() {
     hostname: val("hostname") || "nivuus",
     domain: val("domain"),
     locale: val("locale"),
-    timezone: val("timezone") || "Europe/Paris",
+    timezone: val("timezone") || "Etc/UTC",
+    keyboard: { layout: val("keyboard_layout") || "us", variant: val("keyboard_variant") },
     user: {
       username: val("username"),
       password: val("password") || null,
@@ -194,7 +198,7 @@ function buildWifi() {
   const ap = (hw && hw.wifi || []).filter(w => w.ap_capable).map(w => w.name);
   return {
     enabled,
-    country: val("wifi_country") || "FR",
+    country: val("wifi_country").toUpperCase(),
     private_ssid: val("private_ssid") || "Nivuus",
     private_passphrase: val("private_passphrase"),
     public_ssid: val("public_ssid"),
@@ -217,11 +221,13 @@ async function startInstall() {
       body: JSON.stringify(cfg),
     });
   } catch (e) {
-    alert("Impossible de joindre le serveur d'installation."); $("#installBtn").disabled = false; return;
+    alert(t("error.unreachable")); $("#installBtn").disabled = false; return;
   }
   const data = await res.json();
   if (!res.ok || !data.ok) {
-    alert("Erreur : " + (data.error || res.status));
+    const known = data.code && t(`error.code.${data.code}`);
+    const message = known && known !== `error.code.${data.code}` ? known : (data.error || res.status);
+    alert(t("error.prefix", { message }));
     $("#installBtn").disabled = false;
     return;
   }
@@ -258,5 +264,5 @@ function finish(ok, msg) {
   const box = $("#finished");
   box.hidden = false;
   box.innerHTML = `<div class="banner ${ok ? "ok" : "err"}">${
-    ok ? "✅ " : "❌ "}${msg}${ok ? " — vous pouvez redémarrer la machine." : ""}</div>`;
+    ok ? "✅ " : "❌ "}${msg}${ok ? ` — ${t("progress.reboot")}` : ""}</div>`;
 }

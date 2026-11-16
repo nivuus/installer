@@ -7,7 +7,10 @@ driver=nl80211
 ssid=@SSID@
 hw_mode=g
 channel=6
-country_code=FR
+# No country_code: the medium does not know which country it boots in, so
+# the kernel's world regulatory domain applies (the most restrictive one).
+# Channel 6 is legal in every domain. The production access point gets the
+# owner's country from the wizard (install-engine/templates/hostapd.conf.j2).
 ieee80211n=1
 wmm_enabled=1
 

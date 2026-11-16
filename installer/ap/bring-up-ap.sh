@@ -52,7 +52,8 @@ gen_pass() {
 
 show_console() {
     local msg="$1"
-    # Banner on every TTY so the operator sees how to connect.
+    # Banner on every TTY so the operator sees how to connect. English: the
+    # operator's language is not known before the wizard asks for it.
     for tty in /dev/tty1 /dev/console; do
         [ -w "$tty" ] && printf '\n%s\n' "$msg" > "$tty" 2>/dev/null
     done
@@ -117,10 +118,10 @@ start_wifi_ap() {
     hostapd -B "$HOSTAPD_CONF"
 
     echo "wifi ${iface} ${ssid} ${passphrase}" > "$STATE_FILE"
-    show_console "==== Nivuus — connexion à l'installation ====
-  WiFi : ${ssid}
-  Mot de passe : ${passphrase}
-  Puis ouvrez http://${AP_IP}/ (ou la page s'ouvre automatiquement)
+    show_console "==== Nivuus — connect to the installer ====
+  Wi-Fi:    ${ssid}
+  Password: ${passphrase}
+  Then open http://${AP_IP}/ (or wait for the page to open by itself)
 =============================================="
 }
 
@@ -132,9 +133,9 @@ start_ethernet_fallback() {
     setup_captive_nft "$iface"
     echo "ethernet ${iface}" >> "$STATE_FILE"
     local shown; shown=$(ip -4 addr show "$iface" | awk '/inet /{print $2}' | head -1)
-    show_console "==== Nivuus — connexion à l'installation (Ethernet) ====
-  Branchez un câble sur ${iface}, puis ouvrez :
-    http://${AP_IP}/   (ou http://${shown%/*}/)
+    show_console "==== Nivuus — connect to the installer (Ethernet) ====
+  Plug a cable into ${iface}, then open:
+    http://${AP_IP}/   (or http://${shown%/*}/)
 =========================================================="
 }
 
@@ -155,8 +156,8 @@ if [ -z "$WIFI_IFACE" ] && [ -n "$WIRED" ]; then
     start_ethernet_fallback "$WIRED"
 elif [ -z "$WIFI_IFACE" ] && [ -z "$WIRED" ]; then
     show_console "==== Nivuus ====
-  Aucune interface WiFi (AP) ni Ethernet détectée.
-  Le portail écoute sur toutes les interfaces, port 80."
+  No access-point-capable Wi-Fi and no Ethernet interface found.
+  The portal listens on every interface, port 80."
 fi
 
 exit 0
