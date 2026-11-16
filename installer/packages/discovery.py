@@ -22,7 +22,12 @@ from .manifest import MANIFEST_NAME, Manifest, ManifestError, load_manifest
 PACKAGES_DIR = os.environ.get("NIVUUS_PACKAGES_DIR", "/opt/nivuus-packages")
 
 
-def discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, str]]]:
+class DiscoveryError(RuntimeError):
+    """Raised, in strict mode, when the packages directory cannot be listed."""
+
+
+def discover(root: str = PACKAGES_DIR, *, strict: bool = False
+             ) -> tuple[list[Manifest], list[tuple[str, str]]]:
     """Load every manifest under `root`.
 
     Returns (valid manifests sorted by name, [(source, error message)]).
@@ -46,13 +51,26 @@ def discover(root: str = PACKAGES_DIR) -> tuple[list[Manifest], list[tuple[str, 
     losers of some directory-sort order: silently installing whichever one
     happened to sort first would be worse than installing none. The operator
     gets one error naming the collision and every colliding path.
+
+    A `root` that does not exist holds no package: an ISO built without any is
+    legitimate. A `root` that exists and cannot be listed (a failed mount,
+    wrong permissions) is a different thing and is never answered with "no
+    packages": it is reported as an error whose source is `root` itself, or
+    raised as DiscoveryError when `strict` - the updater's mode, because it
+    then knows packages ARE installed and must not go on to call each of them
+    "not followed".
     """
     manifests: list[Manifest] = []
     errors: list[tuple[str, str]] = []
     try:
         entries = sorted(os.listdir(root))
-    except OSError:
+    except FileNotFoundError:
         return [], []
+    except OSError as exc:
+        message = f"the packages directory cannot be listed ({exc})"
+        if strict:
+            raise DiscoveryError(f"{root}: {message}") from exc
+        return [], [(root, message)]
 
     for entry in entries:
         source = os.path.join(root, entry, MANIFEST_NAME)

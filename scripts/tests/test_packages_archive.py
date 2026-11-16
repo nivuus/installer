@@ -40,13 +40,34 @@ def entry(name, kind=tarfile.REGTYPE, data=b"x", linkname="", mode=0o644):
     return info, None
 
 
+class RecordingTar(tarfile.TarFile):
+    """A TarFile that records the ownership extraction asks for.
+
+    `TarFile.chown` is where tarfile hands ownership to the kernel, and it
+    does nothing unless the process is root - so on an ordinary runner the
+    files on disk belong to the runner whatever the archive said, and looking
+    at them proves nothing. The updater runs as root, where that call is
+    real. Recording it here measures what a root extraction would be asked
+    to do, without needing root.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.chowned = {}
+
+    def chown(self, tarinfo, targetpath, numeric_owner):
+        self.chowned[tarinfo.name] = (tarinfo.uid, tarinfo.gid, tarinfo.uname,
+                                      tarinfo.gname, numeric_owner)
+        super().chown(tarinfo, targetpath, numeric_owner)
+
+
 def archive(*entries):
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w") as tar:
         for info, data in entries:
             tar.addfile(info, data)
     buffer.seek(0)
-    return tarfile.open(fileobj=buffer)
+    return RecordingTar.open(fileobj=buffer)
 
 
 def refused(label, *entries):
@@ -63,12 +84,13 @@ def refused(label, *entries):
 
 with tempfile.TemporaryDirectory() as root:
     dest = os.path.join(root, "dest")
-    extract(archive(entry("./", tarfile.DIRTYPE, mode=0o775), entry("hooks/", tarfile.DIRTYPE, mode=0o777),
-                    entry("hooks/install.py", mode=0o4777),
-                    entry("link", tarfile.SYMTYPE, linkname="hooks/install.py"),
-                    entry("hard", tarfile.LNKTYPE, linkname="hooks/install.py",
-                          mode=0o4777)),
-            dest)
+    regular = archive(entry("./", tarfile.DIRTYPE, mode=0o775),
+                      entry("hooks/", tarfile.DIRTYPE, mode=0o777),
+                      entry("hooks/install.py", mode=0o4777),
+                      entry("link", tarfile.SYMTYPE, linkname="hooks/install.py"),
+                      entry("hard", tarfile.LNKTYPE, linkname="hooks/install.py",
+                            mode=0o4777))
+    extract(regular, dest)
     info = os.stat(os.path.join(dest, "hooks/install.py"))
     check("a regular archive extracts", os.path.isfile(os.path.join(dest, "link")),
           True)
@@ -76,6 +98,15 @@ with tempfile.TemporaryDirectory() as root:
           stat.S_IMODE(info.st_mode), 0o755)
     check("ownership is the extracting user's, not the archive's",
           (info.st_uid, info.st_gid), (os.getuid(), os.getgid()))
+    # The check above cannot fail unless the suite runs as root. This one
+    # can, anywhere: every member, directories and links included, must be
+    # handed to the kernel with the extracting user's numeric ids and no
+    # account name left to resolve - never the archive's uid 4242.
+    mine = (os.getuid(), os.getgid(), "", "", True)
+    check("every member is chowned to the extracting user, by number",
+          regular.chowned,
+          {name: mine for name in (".", "hooks", "hooks/install.py",
+                                   "link", "hard")})
 
 refused("absolute name", entry("/tmp/evil"))
 refused("dot-dot name", entry("../evil"))

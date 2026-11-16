@@ -107,6 +107,32 @@ try:
     check("update again has nothing to do",
           run("update")[:2], (0, "nothing to update\n"))
 
+    # A release whose hook fails: the command fails, the previous version is
+    # put back, and both `list` and the next bare update say so.
+    fake.publish("nivuus/demo", "1.1.0", fake_github.build_archive({
+        "nivuus-package.yaml": MANIFEST.format(version="1.1.0"),
+        "hooks/install.py": "import sys\nsys.exit(1)\n"}))
+    code, _, err = run("update")
+    check("a failing release exits 1", code, 1)
+    contains("and says the package was rolled back", err, "rolled back to 1.0.0")
+    code, out, _ = run("list")
+    # AVAILABLE is what the last `check` saw, and none ran since 1.1.0.
+    contains("list shows the version that runs and the release that did not take",
+             out, "demo     1.0.0      1.0.0      installed (1.1.0 rolled back)")
+    code, out, err = run("update")
+    check("a bare update leaves that release alone",
+          (code, out), (0, "nothing to update\n"))
+    contains("and says why", err, "1.1.0 failed and was rolled back")
+
+    # A packages directory that vanished (a failed mount) is a failed check,
+    # not packages "not followed" with exit 0 - the daily timer reads this.
+    packages_dir = env["NIVUUS_PACKAGES_DIR"]
+    os.rename(packages_dir, packages_dir + ".away")
+    code, _, err = run("check")
+    os.rename(packages_dir + ".away", packages_dir)
+    check("check fails when the packages directory is gone", code, 1)
+    contains("and names it", err, f"{packages_dir} does not exist")
+
     code, _, err = run("update", "ghost")
     check("an error exits 1", code, 1)
     contains("and names the package", err, "ghost: not installed")

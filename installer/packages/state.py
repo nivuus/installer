@@ -15,6 +15,13 @@ plus `error`, the message of the failure, kept next to `target_version` so
 file the current installer wrote carries none of these keys and is read as
 installed.
 
+A lay that failed and was rolled back leaves the package `installed`, at the
+version that was put back - that is what runs - with two more keys:
+    rolled_back_from  the version whose lay failed
+    rolled_back_at    ISO 8601 timestamp of the rollback
+and `error`, why it failed. `failed` is kept for a machine nobody can vouch
+for: a lay that was interrupted, or one whose rollback failed too.
+
 The file is 0600 because it holds wizard answers verbatim, secrets included
 (the console's Windows administrator password). It is written atomically -
 a temporary file in the same directory then os.replace - because a
@@ -93,6 +100,8 @@ def mark_installed(state: dict, name: str, version: str,
         record["answers"] = answers
     record.pop("target_version", None)
     record.pop("error", None)
+    record.pop("rolled_back_from", None)
+    record.pop("rolled_back_at", None)
     # What adoption described - a copy laid by hand from some directory - is
     # no longer what runs once a release has been laid over it.
     record.pop("adopted_from", None)
@@ -105,3 +114,21 @@ def mark_failed(state: dict, name: str, target_version: str,
     record["state"] = FAILED
     record["target_version"] = target_version
     record["error"] = error
+    record.pop("rolled_back_from", None)
+    record.pop("rolled_back_at", None)
+
+
+def mark_rolled_back(state: dict, name: str, rejected_version: str,
+                     error: str) -> None:
+    """Record a lay that failed and was undone.
+
+    `version` is left alone: it names the copy that was put back and whose
+    hooks were replayed. The package is healthy, so it stays `installed`;
+    what is remembered is the release that did not take.
+    """
+    record = state.setdefault(name, {})
+    record["state"] = INSTALLED
+    record["rolled_back_from"] = rejected_version
+    record["rolled_back_at"] = _now()
+    record["error"] = error
+    record.pop("target_version", None)

@@ -77,9 +77,11 @@ def cmd_list(_args) -> int:
     known = available.get("packages", {})
     rows = [("PACKAGE", "INSTALLED", "AVAILABLE", "STATE")]
     for name, record in sorted(current.items()):
+        status = state.status(record)
+        if record.get("rolled_back_from"):
+            status += f" ({record['rolled_back_from']} rolled back)"
         rows.append((name, record.get("version", "?"),
-                     known.get(name, {}).get("available", "-"),
-                     state.status(record)))
+                     known.get(name, {}).get("available", "-"), status))
     widths = [max(len(row[i]) for row in rows) for i in range(4)]
     for row in rows:
         print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())

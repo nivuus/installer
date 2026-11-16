@@ -80,8 +80,8 @@ its manifest must carry the same name and version, recorded answers must
 satisfy the new questions, `requires.packages` must be installed and not
 `failed` — all before the directory is swapped. Then `install` (root `/`) +
 `activate` replay, and the state gets `state`/`target_version`/`error`/
-`updated_at`. A failed lay is never retried by a bare `nivuus update`, only by
-naming it. `adopt` records a hand-laid package (tracked files only, no hook,
+`updated_at`. A failed lay is rolled back and never retried by a bare
+`nivuus update`, only by naming it (see the rollback paragraph below). `adopt` records a hand-laid package (tracked files only, no hook,
 no invented answers); `nivuus answers <name> key=value…` then records them,
 typed and validated by the package's own wizard rules, required secrets
 asked on the terminal (never on argv); `secret=` with no value asks a recorded one again, the only way to correct it. An adopted package never ran `resolve`, so it also lacks the facts `activate` may need (the console's NVMe size and PCI address are unreadable once vfio-pci owns the disk); `nivuus facts <name> key=<json>…` (`packages/fact_record.py`) records them, each value decoded as JSON and the whole set validated by the engine's own `parse_facts_event`, under `state[name]["facts"]` — the key the updater and `activate_cli` already read, so a hand-recorded fact and a resolved one are the same thing to `activate`. `nivuus update --self` lays the
@@ -98,6 +98,43 @@ the code is already current, so a machine laid by an older updater catches up. `
 (2026-10-03): the updater follows it through installer's releases, whose
 archive carries `console/` stamped with installer's version. **Deferred**: HA
 `update` entities via mqtt, the `shell` rename.
+
+**A failed lay is rolled back (2026-11-16, `packages/lay.py`).** Until then
+the previous copy was deleted right after the swap, before any hook ran: a
+failing hook left the new tree in place, the package `failed` and out of bare
+updates, and `nivuus update <name>` picked the same release again. Now the
+previous copy waits under `.nivuus-packages-previous/` (sibling of the
+packages directory, **not** under staging, which every run wipes) until
+`install` and `activate` have both succeeded. On a hook failure it is put
+back, **its own `install` and `activate` are replayed**, and the state says
+`installed` at that version with `rolled_back_from` + `error`; a bare update
+skips that one release and lays the next one, naming the package retries it.
+`failed` now means only "nobody can vouch for this machine": an interrupted
+lay (not rolled back — the kept copy is used by the next named update), or a
+rollback whose own hooks failed. **What a rollback cannot undo is everything
+the contract has no hook for**: files only the new version writes, data
+migrated in place, images pulled, anything remote. `scripts/idempotence_harness.py
+--package <previous> --rollback-from <newer>` measures the part that does come
+back (and lists the files left behind); idempotence does not imply it — a hook
+that writes a file only when missing replays cleanly and restores nothing.
+
+**An update checks what the release requires, within what the machine can
+know (`packages/requirements.py`).** Only what the release **adds** over the
+installed manifest is checked, because the rest cannot be measured again: the
+console's NVMe leaves `/sys/block` once vfio-pci owns it, and **the selected
+install features are recorded nowhere on the target**. An added capability is
+measured (`detect_capabilities`); an added feature is refused by name, since
+it cannot be verified — a release adding one is blocked until the engine
+records features. `apt:` stays as lenient as at install: packages the release
+adds that dpkg does not have are a warning, never a refusal, and the update
+installs none. Measured on the reference host the same day: `home-manager`
+declares `docker.io` + `docker-compose-v2` (the host runs `docker-ce`) and
+`desk` declares `coturn` (absent) — a strict apt check would have frozen both.
+A packages directory that is missing or unreadable while packages are
+recorded is now an `UpdateError` (`discover(strict=True)`), not a list of
+packages "not followed" with exit 0. `units.refresh` notes each unit in
+`STAMP_DIR/units-reload.pending` before replacing it and drops the note only
+after `Reload`, so a reload that failed is replayed by the next run.
 
 **Arming `activate` takes three copies onto the target, and the whole phase is
 dead if any is missed** (it was, on the first cut of this branch, while the

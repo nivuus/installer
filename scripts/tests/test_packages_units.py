@@ -17,6 +17,10 @@ import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parents[1]
+# Where the "reload still owed" note lives; set before `packages` is imported
+# so no run of this suite ever touches /var/lib/nivuus.
+os.environ["NIVUUS_STAMP_DIR"] = tempfile.mkdtemp(prefix="nivuus-units-stamp-")
+PENDING = os.path.join(os.environ["NIVUUS_STAMP_DIR"], "units-reload.pending")
 sys.path.insert(0, str(REPO / "installer"))
 sys.path.insert(0, str(HERE))
 
@@ -93,6 +97,57 @@ check("a second run changes nothing",
       units.refresh(release, unit_dir, applied.append), [])
 check("and does not disturb systemd", applied, [])
 
+check("nothing is owed to systemd once it has been told",
+      os.path.exists(PENDING), False)
+
+# A reload that fails is owed until it succeeds. The files are already laid,
+# so the next run finds nothing to rewrite: without the note it would not
+# call systemd at all and the old definitions would run until a reboot.
+unit_dir = machine({"nivuus-check.service": "service v1\n",
+                    "nivuus-check.timer": "timer v1\n"})
+
+
+def bus_is_away(changed):
+    raise units.UnitError("systemd Reload failed: bus is away")
+
+
+check_refused("a failed reload is raised",
+              lambda: units.refresh(release, unit_dir, bus_is_away),
+              "bus is away")
+check("the units were laid all the same",
+      (read(unit_dir, "nivuus-check.service"), read(unit_dir, "nivuus-check.timer")),
+      ("service v2\n", "timer v2\n"))
+applied.clear()
+check("the next run rewrites nothing",
+      units.refresh(release, unit_dir, applied.append), [])
+check("but replays the reload it owes, timer included", applied,
+      [["nivuus-check.service", "nivuus-check.timer"]])
+applied.clear()
+units.refresh(release, unit_dir, applied.append)
+check("and owes nothing once it went through", applied, [])
+
+# The note is written BEFORE the unit file is replaced: a run killed between
+# the two must still owe the reload.
+unit_dir = machine({"nivuus-check.service": "service v1\n"})
+real_replace = units.os.replace
+seen = []
+
+
+def replace_seeing_the_note(src, dst):
+    if dst.startswith(unit_dir):
+        with open(PENDING) as fh:
+            seen.append(fh.read().split())
+    return real_replace(src, dst)
+
+
+units.os.replace = replace_seeing_the_note
+try:
+    units.refresh(release, unit_dir, applied.append)
+finally:
+    units.os.replace = real_replace
+check("the reload is noted before the file is replaced", seen,
+      [["nivuus-check.service"]])
+
 # A unit this machine runs but the release dropped must be seen, not skipped.
 unit_dir = machine({"nivuus-check.timer": "timer v1\n"})
 check_refused("a unit missing from the release is refused",
@@ -121,6 +176,7 @@ echo "$*" >> {log}
 case "$*" in
   *GetUnitFileState*) echo "s \\"${{FAKE_STATE:-enabled}}\\"" ;;
 esac
+[ -z "$FAKE_SLEEP" ] || sleep "$FAKE_SLEEP"
 [ -z "$FAKE_FAIL" ] || {{ echo "Access denied" >&2; exit 1; }}
 """)
 os.chmod(busctl, 0o755)
@@ -149,6 +205,14 @@ check_refused("a systemd refusal is reported",
               lambda: units.systemd_apply(["nivuus-check.service"]),
               "systemd Reload failed: Access denied")
 del os.environ["FAKE_FAIL"]
+
+# A bus that never answers fails the run instead of hanging it.
+os.environ["FAKE_SLEEP"] = "5"
+units.SYSTEMD_TIMEOUT = 0.5
+check_refused("a silent bus is reported, not waited on forever",
+              lambda: units.systemd_apply(["nivuus-check.service"]),
+              "did not answer within")
+del os.environ["FAKE_SLEEP"]
 
 
 if failures:
