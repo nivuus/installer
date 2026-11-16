@@ -63,8 +63,8 @@ if [ "$STATE_NOW" != running ]; then
         docker compose -f /opt/nivuus/ollama/docker-compose.yml --env-file /opt/nivuus/ollama/.env up -d 2>&1 | logger -t "$LOG_TAG"
     fi
     # Self-heal: VM off means the host owns every CPU. The release hook shares a
-    # directory with rebind-host-gpu.sh, which the dispatcher runs in unordered
-    # find(1) order and which has deadlocked before - so re-assert it here.
+    # directory with rebind-host-gpu.sh, which has deadlocked before and can
+    # take the whole release phase down with it - so re-assert it here.
     if [ "$(cat /sys/fs/cgroup/system.slice/cpuset.cpus.effective 2>/dev/null)" \
          != "$(tr -d '\n' < /sys/devices/system/cpu/online)" ]; then
         logger -t "$LOG_TAG" "VM off but host cpuset still restricted - releasing CPUs"

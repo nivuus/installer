@@ -58,7 +58,7 @@ test:
 	    $(PYTHON) $(CONSOLE_DIR)/tests/$$t.py || exit 1; \
 	done
 	@for t in test_handle_vm_start test_vm_control test_vm_idle_shutdown test_winvm \
-	          test_vm_forward_hooks; do \
+	          test_vm_forward_hooks test_libvirt_hook_dispatcher; do \
 	    echo "--- $$t"; \
 	    bash $(CONSOLE_DIR)/tests/$$t.sh || exit 1; \
 	done
