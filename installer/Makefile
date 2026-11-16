@@ -113,7 +113,7 @@ test-packages: test-scripts
 	          test_webapp_runner \
 	          test_install_engine_base test_orange_dhcp_options test_wan_orange_lan6 test_nivuus_bios test_hw_blackbox_ups \
 	          test_firewalld_zone test_docker_repo test_docker_daemon_config \
-	          test_common_regional test_webapp_i18n; do \
+	          test_common_regional test_webapp_i18n test_requirements_pins; do \
 	    echo "--- $$t"; \
 	    $(PYTHON) $(dir $(INSTALLER_DIR))scripts/tests/$$t.py || exit 1; \
 	done

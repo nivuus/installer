@@ -1,9 +1,15 @@
-fastapi
-jinja2
-pydantic
-pywinrm
-pyyaml
-uvicorn
+# Exact pins: an unpinned name is installed at whatever version was
+# published that morning, so yesterday's green proves nothing about
+# today's, and Dependabot (pip, "/") has nothing to propose a bump against.
+# installer/webapp/requirements.txt carries the same pins for the live image;
+# scripts/tests/test_requirements_pins.py fails if the two disagree.
+# No hashes: the repository has no lock mechanism anywhere to extend.
+fastapi==0.163.1
+jinja2==3.1.6
+pydantic==2.14.3
+pywinrm==0.5.0
+pyyaml==6.0.3
+uvicorn==0.54.0
 
 # ruff is pinned HERE, and this is the only place that can pin it. The shared
 # workflow (nivuus/.github ci-python.yml) ends its dependency step with a bare
