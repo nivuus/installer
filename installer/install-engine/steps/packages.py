@@ -44,6 +44,7 @@ from packages.runner import HookError, run_install, run_resolve
 from packages.wizard import (DISK_TYPE, WizardError, load_questions,
                              validate_answers)
 
+from . import apt
 from .bootloader import grub_defaults
 from .package_updates import deploy_updater
 from .util import StepError, chroot_run, write_file
@@ -58,7 +59,7 @@ PACKAGES_REL_DIR = "opt/nivuus-packages"
 CLI_REL_PATH = "installer/packages/activate_cli.py"
 UNIT_SRC_REL_PATH = "configs/systemd/" + UNIT_NAME
 # The activate phase's own hard requirements - NOT the packages' declared apt
-# (that is `manifest.apt`, installed separately below with a lenient policy).
+# (that is `manifest.apt`, installed separately below, one call per package).
 # activate_cli.py is the ExecStart of a systemd unit, so it needs an
 # interpreter; nothing else on a minimal target guarantees one, since
 # debootstrap.py's BASE_INCLUDE has no python3, install.sh is gone
@@ -306,6 +307,32 @@ def _enable_activation(target: str, name: str) -> None:
             f"boot ({link}) : {exc}") from exc
 
 
+def _install_declared_apt(plan, target: str, emit) -> None:
+    """Install each package's declared `apt:` list, one apt-get call each.
+
+    A manifest's apt list is what its hooks need, not a wish list: a failure
+    is fatal, raised before any install hook runs against a system missing
+    what it asked for. One call PER PACKAGE, because apt refuses a whole
+    transaction over a single unknown name: merged into one call, one
+    package's bad name silently took every other package's dependencies down
+    with it (home-manager's docker-compose-v2 took console's qemu/libvirt).
+    Every package is tried before failing, so the error names each culprit
+    and only them.
+    """
+    failures = []
+    for manifest, _, _ in plan:
+        if not manifest.apt:
+            continue
+        emit.info("packages", 94, f"Installing apt dependencies of "
+                  f"« {manifest.label} »: {' '.join(manifest.apt)}")
+        failure = apt.install_failure(target, f"package « {manifest.label} »",
+                                      list(manifest.apt))
+        if failure:
+            failures.append(failure)
+    if failures:
+        raise StepError("\n".join(failures))
+
+
 def apply_packages(plan, target: str, nivuus_dir: str, hw: dict, emit) -> None:
     """Write everything the plan decided, in dependency order."""
     if not plan:
@@ -313,15 +340,11 @@ def apply_packages(plan, target: str, nivuus_dir: str, hw: dict, emit) -> None:
 
     modules: list[str] = []
     hugepages_mib = 0
-    apt: list[str] = []
     for manifest, _, resolution in plan:
         for module in resolution.platform.modules:
             if module not in modules:
                 modules.append(module)
         hugepages_mib += resolution.platform.hugepages_mib
-        for package in manifest.apt:
-            if package not in apt:
-                apt.append(package)
 
     if modules:
         emit.info("packages", 92, f"Kernel modules: {' '.join(modules)}")
@@ -345,11 +368,10 @@ def apply_packages(plan, target: str, nivuus_dir: str, hw: dict, emit) -> None:
     # The activate phase's own hard requirements, installed separately from -
     # and before - the packages' own apt below. It is not the same kind of
     # call: activate_cli.py's ExecStart has no interpreter to run without
-    # python3, and cannot re-parse the manifest without python3-yaml. Merging
-    # this into the packages' lenient call below would let a transient apt
-    # failure sail through as a mere warning while quietly disarming the
-    # whole first-boot activation - the exact "armed, advertised, and
-    # silently inert" failure class this module exists to prevent. check=True
+    # python3, and cannot re-parse the manifest without python3-yaml. Merged
+    # into a package's own call below, one package's bad apt name would make
+    # apt refuse the interpreter too, and the error would blame that package
+    # for disarming the whole first-boot activation. check=True
     # (the chroot_run default) means a failure raises StepError from inside
     # steps.util.run() and stops the install right here; the explicit check
     # below is a second line of defense, so the message names exactly what
@@ -365,23 +387,7 @@ def apply_packages(plan, target: str, nivuus_dir: str, hw: dict, emit) -> None:
             "l'unité d'activation du premier boot n'aurait pas "
             "d'interpréteur pour s'exécuter")
 
-    if apt:
-        emit.info("packages", 94,
-                  f"Installing package apt dependencies: {' '.join(apt)}")
-        # Not fatal - a package may still be usable without an optional
-        # dependency, and failing the whole install here would be worse than
-        # the risk. This leniency covers only the PACKAGES' OWN declared apt
-        # (manifest.apt) - the activate phase's own requirements above are
-        # fatal on purpose. It must never be silent: the install hook is
-        # about to run against a system that does not have what it asked
-        # for, and the operator has to be able to connect the two.
-        proc = chroot_run(target, ["apt-get", "install", "-y", *apt],
-                          check=False)
-        if proc.returncode != 0:
-            emit.warn("packages", 94,
-                      f"apt-get install a échoué (code {proc.returncode}) pour "
-                      f": {' '.join(apt)} — les hooks install vont s'exécuter "
-                      "sans ces dépendances")
+    _install_declared_apt(plan, target, emit)
 
     _deploy_activation(plan, target, nivuus_dir, emit)
     # A machine that receives packages also receives the way to follow them.

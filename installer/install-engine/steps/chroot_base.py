@@ -149,8 +149,10 @@ def _sshd(config: dict, target: str, emit) -> None:
         "X11Forwarding no\n"
     )
     write_file(os.path.join(target, "etc/ssh/sshd_config.d/10-nivuus.conf"), conf)
-    chroot_run(target, ["systemctl", "enable", "ssh"], check=False)
-    chroot_run(target, ["systemctl", "enable", "NetworkManager"], check=False)
+    # Fatal on failure: a host installed without a running sshd or network
+    # has no screen to be reached from.
+    chroot_run(target, ["systemctl", "enable", "ssh"])
+    chroot_run(target, ["systemctl", "enable", "NetworkManager"])
 
 
 def _memory_guard(target: str, emit) -> None:

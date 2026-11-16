@@ -307,6 +307,60 @@ class BindInterface(unittest.TestCase):
                          text.replace(b"</zone>\r\n", LINE.replace(b"\n", b"\r\n") + b"</zone>\r\n"))
 
 
+class RemoveService(unittest.TestCase):
+    """remove_service: the install engine closes ssh on the WAN zones."""
+
+    SSH = b'  <service name="ssh"/>\n'
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tree = Tree(self._tmp.name)
+        self.ext = self.tree.etc / "external.xml"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def remove(self):
+        with mock.patch.object(subprocess, "run", _no_commands):
+            return fz.remove_service(str(self.tree.root), "external", "ssh")
+
+    def test_the_vendor_file_is_the_base_and_only_the_line_goes(self):
+        self.assertTrue(self.remove())
+        self.assertEqual(self.ext.read_bytes(), VENDOR_EXTERNAL.replace(self.SSH, b""))
+        self.assertEqual((self.tree.vendor / "external.xml").read_bytes(), VENDOR_EXTERNAL)
+
+    def test_an_etc_copy_keeps_every_other_byte(self):
+        self.ext.write_bytes(HOST_EXTERNAL)
+        self.assertTrue(self.remove())
+        self.assertEqual(self.ext.read_bytes(), HOST_EXTERNAL.replace(self.SSH, b""))
+
+    def test_second_run_changes_nothing(self):
+        self.assertTrue(self.remove())
+        self.assertFalse(self.remove())
+
+    def test_a_zone_without_the_service_is_not_copied_to_etc(self):
+        (self.tree.vendor / "external.xml").write_bytes(VENDOR_EXTERNAL.replace(self.SSH, b""))
+        self.assertFalse(self.remove())
+        self.assertFalse(self.ext.exists())
+
+    def test_a_service_sharing_a_line_is_refused_untouched(self):
+        text = VENDOR_EXTERNAL.replace(self.SSH, b'  <service name="ssh"/><masquerade/>\n')
+        self.ext.write_bytes(text)
+        with self.assertRaises(fz.ZoneFileError):
+            self.remove()
+        self.assertEqual(self.ext.read_bytes(), text)
+
+    def test_another_service_with_a_longer_name_is_kept(self):
+        text = VENDOR_EXTERNAL.replace(self.SSH, self.SSH + b'  <service name="ssh-custom"/>\n')
+        self.ext.write_bytes(text)
+        self.assertTrue(self.remove())
+        self.assertIn(b'name="ssh-custom"', self.ext.read_bytes())
+
+    def test_a_missing_zone_is_refused(self):
+        with self.assertRaises(fz.ZoneFileError):
+            fz.remove_service(str(self.tree.root), "public", "ssh")
+
+
 class NoRuntime(unittest.TestCase):
     def test_the_step_can_run_no_command(self):
         # Code only, docstrings aside: no process module imported, no tool named.

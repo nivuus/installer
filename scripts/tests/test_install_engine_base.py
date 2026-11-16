@@ -98,6 +98,26 @@ with tempfile.TemporaryDirectory() as tmp:
     lenient = [cmd for cmd, kw in calls if kw.get("check") is False]
     check("enable is not lenient", lenient, [])
 
+# --- sshd and NetworkManager must really be enabled --------------------------- #
+def enable_fails(unit):
+    """util.chroot_run's contract: a failure raises unless check=False."""
+    def fake(target, cmd, **kwargs):
+        if cmd == ["systemctl", "enable", unit] and kwargs.get("check", True):
+            raise chroot_base.StepError(f"command failed (1): {' '.join(cmd)}")
+        return type("R", (), {"returncode": 1 if cmd[-1] == unit else 0})()
+    return fake
+
+
+for unit in ("ssh", "NetworkManager"):
+    chroot_base.chroot_run = enable_fails(unit)
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            chroot_base._sshd({"user": {"username": "alice"}}, tmp, FakeEmit())
+            failures.append(f"systemctl enable {unit} failing: no StepError")
+        except chroot_base.StepError as exc:
+            check(f"the failure names {unit}", f"enable {unit}" in str(exc), True)
+chroot_base.chroot_run = fake_chroot_run
+
 if failures:
     print("FAIL")
     for f in failures:

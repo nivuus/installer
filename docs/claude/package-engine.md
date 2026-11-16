@@ -129,12 +129,14 @@ error surfaced anywhere). Fixed by splitting the one apt call into two:
 requirements — `activate_cli.py` needs an interpreter to run at all and
 re-parses the manifest with PyYAML at first boot, and nothing else pulls
 either in) is installed in its own `apt-get` call whose failure raises
-`StepError` and stops the install; the packages' own declared `apt`
-(`manifest.apt`) stays a separate, deliberately lenient `check=False` call
-— a package may still be usable without an optional dependency, so only a
-warning is emitted. The two must never be merged back into one call: that
-is exactly the "armed, advertised, and silently inert" failure class this
-whole area exists to prevent.
+`StepError` and stops the install. The packages' own declared `apt`
+(`manifest.apt`) is installed **one `apt-get` call per package**
+(`steps/apt.py`), and a failure is fatal too, raised before any install hook
+runs: apt refuses a whole transaction over one unknown name, so the former
+single lenient call let `home-manager`'s nonexistent `docker-compose-v2`
+silently drop `console`'s qemu/libvirt and `desk`'s coturn (audit
+2026-11-16). Every package is tried first, then the StepError names each
+failing package with apt's last lines. Never merge these calls back.
 
 **Kernel parameters are validated in `plan_packages`, not in `bootloader`.**
 The allowlist lives in `bootloader.py::grub_defaults`, which runs at step 7 —
