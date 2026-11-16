@@ -14,7 +14,7 @@ TARGET_IMG    ?= /tmp/nivuus-target.img
 TARGET_SIZE   ?= 16G
 OVMF          ?= /usr/share/OVMF/OVMF_CODE.fd
 
-.PHONY: build-iso test-engine test-portal test-wizard-js test-vm windows-unattend test-packages test-scripts clean help
+.PHONY: build-iso test-engine test-portal test-vm windows-unattend test-packages test-scripts clean help
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*' $(MAKEFILE_LIST) | sed 's/:.*//' | sort
@@ -44,6 +44,7 @@ test-portal:
 # The wizard's i18n.js/regional.js driven under node (negotiation, fallback,
 # regional proposals). Needs node >= 18; the catalog contract itself is
 # checked by test_webapp_i18n.py in test-packages.
+.PHONY: test-wizard-js
 test-wizard-js:
 	node $(dir $(INSTALLER_DIR))scripts/tests/test_webapp_i18n.mjs
 
@@ -102,18 +103,18 @@ test-packages: test-scripts
 	          test_packages_updater test_packages_archive \
 	          test_nivuus_cli test_packages_answers test_packages_fact_record test_self_update \
 	          test_packages_units \
+	          test_install_engine_packages_apply test_install_engine_packages_facts \
+	          test_install_engine_packages_failures test_docker_repo test_docker_daemon_config \
+	          test_common_regional test_webapp_i18n test_requirements_pins \
 	          test_idempotence_harness \
 	          test_install_engine_bootloader test_install_engine_packages \
-	          test_install_engine_packages_apply test_install_engine_packages_facts \
-	          test_install_engine_packages_failures \
 	          test_packages_plan_order \
 	          test_webapp_models \
 	          test_common_hardware \
 	          test_install_engine_features \
 	          test_webapp_runner \
 	          test_install_engine_base test_orange_dhcp_options test_wan_orange_lan6 test_nivuus_bios test_hw_blackbox_ups \
-	          test_firewalld_zone test_docker_repo test_docker_daemon_config \
-	          test_common_regional test_webapp_i18n test_requirements_pins; do \
+	          test_firewalld_zone; do \
 	    echo "--- $$t"; \
 	    $(PYTHON) $(dir $(INSTALLER_DIR))scripts/tests/$$t.py || exit 1; \
 	done
