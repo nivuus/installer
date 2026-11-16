@@ -311,14 +311,18 @@ def iommu_support(acpi_dir: str = "/sys/firmware/acpi/tables") -> dict:
 # --------------------------------------------------------------------------- #
 # CPU topology (for isolcpus / nohz_full)                                     #
 # --------------------------------------------------------------------------- #
-def cpu_topology() -> dict:
+def cpu_topology(cpuinfo_path: str = "/proc/cpuinfo") -> dict:
     """CPU topology, coarsely - enough for the `cpu-hybrid` capability.
 
     Deliberately WITHOUT isolcpus/nohz_full: which CPUs to isolate is only
     knowable by a package that pins vCPUs, and it derives them from
     `performance_cpus` here. See console/hardware.py::isolation_plan.
 
-    Returns {model, total_cpus, hybrid, performance_cpus}.
+    Returns {model, vendor, family, model_id, total_cpus, hybrid,
+    performance_cpus}. `vendor`/`family`/`model_id` are the CPUID identity
+    from /proc/cpuinfo (`vendor_id`, `cpu family`, `model`; family and model_id
+    are ints, vendor "" and ints None when unreadable): platform packages key
+    hardware-specific kernel parameters on them, not on the marketing string.
 
     Strategy (no hardcoded i9-12900K assumptions):
       * Detect hybrid (Intel P+E) layout from max CPU frequency per core.
@@ -329,11 +333,23 @@ def cpu_topology() -> dict:
 
     # /proc/cpuinfo is locale-independent (lscpu output is translated).
     model = ""
+    vendor = ""
+    family: Optional[int] = None
+    model_id: Optional[int] = None
     try:
-        with open("/proc/cpuinfo") as fh:
+        with open(cpuinfo_path) as fh:
             for line in fh:
-                if line.startswith("model name"):
-                    model = line.split(":", 1)[1].strip()
+                key, _, value = line.partition(":")
+                key, value = key.strip(), value.strip()
+                if key == "model name" and not model:
+                    model = value
+                elif key == "vendor_id" and not vendor:
+                    vendor = value
+                elif key == "cpu family" and family is None:
+                    family = int(value) if value.isdigit() else None
+                elif key == "model" and model_id is None:
+                    model_id = int(value) if value.isdigit() else None
+                if model and vendor and family is not None and model_id is not None:
                     break
     except OSError:
         pass
@@ -363,6 +379,9 @@ def cpu_topology() -> dict:
 
     return {
         "model": model,
+        "vendor": vendor,
+        "family": family,
+        "model_id": model_id,
         "total_cpus": total,
         "hybrid": hybrid,
         "performance_cpus": performance_cpus,

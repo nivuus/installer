@@ -16,6 +16,7 @@ import uuid
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from . import apt
+from .docker_config import install_daemon_config
 from .firewalld_zone import (ZoneFileError, bind_interface, default_zone,
                              remove_service)
 from .util import StepError, chroot_run, write_file
@@ -257,6 +258,7 @@ def _docker(target, emit) -> None:
             "feature docker: `docker compose version` fails in the target "
             f"after installing {' '.join(DOCKER_APT)}: this Debian suite does "
             "not ship the Compose v2 plugin (it does from trixie on)")
+    install_daemon_config(target, emit)
     chroot_run(target, ["systemctl", "enable", "docker"])
 
 
