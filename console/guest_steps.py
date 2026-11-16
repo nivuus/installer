@@ -1186,6 +1186,17 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         _grant_qemu_access([source_iso, iso_out], qemu_owner(), chown)
         _grant_qemu_traverse(root, chmod)
 
+    def answer_iso_consumed() -> bool:
+        """Is the domain the steady-state one - defined, no install medium,
+        the right disk? Same reading as domain_defined()'s regime branch."""
+        xml = defined_xml()
+        if xml is None:
+            return False        # unreachable libvirtd proves nothing
+        if source_iso in xml or str(iso_out) in xml:
+            return False
+        return domain_matches_disk(xml, disk, pci_address_of=pci_address_of,
+                                   hw=hw)
+
     def build_done() -> bool:
         # THE GUARD IS TRAVERSED BEFORE THE SHORTCUT, not only inside
         # build_run(). Called only from there, it was skipped entirely
@@ -1207,7 +1218,15 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         # precisely so this reaches an operator as one named line.
         refuse_implicit_wipe()
         if not iso_out.is_file():
-            return False
+            # THE ISO WAS CONSUMED, not lost: guest-ready-watch.py deletes
+            # it (it carries the product key and two passwords) right after
+            # redefining the domain without its install media. A media-less
+            # domain wired to this disk has no reader for an answer ISO, so
+            # there is nothing to build - rebuilding it here would put the
+            # secrets back on disk at every activation, for nobody. Anything
+            # else (no domain, a domain still carrying media, another disk)
+            # needs the ISO: build it.
+            return answer_iso_consumed()
         try:
             expected = fingerprint()
         except (GuestBuildError, OSError):

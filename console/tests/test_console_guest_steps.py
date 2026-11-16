@@ -1898,6 +1898,45 @@ with tempfile.TemporaryDirectory() as tmp:
           dit.already_done(), True)
 
 
+
+# --- the answer ISO, once consumed, is not rebuilt --------------------------
+# guest-ready-watch.py deletes the answer ISO (product key, two passwords)
+# right after redefining the domain without install media. From then on the
+# ISO is ABSENT ON PURPOSE: the build step must read that as done, or every
+# later activation would write the secrets back to disk for nobody.
+def _build_done_without_iso(tmp, dumpxml, **kwargs):
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    st = by_name(plan(tmp, FakeVirsh({"dumpxml": dumpxml,
+                                      "domstate": (0, "shut off\n")}), **kwargs))
+    iso = pathlib.Path(arg(st["build"].command, "--output"))
+    check("(fixture) there is no answer ISO", iso.exists(), False)
+    return st["build"].already_done()
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    regime = "<domain><devices>" + nvme_hostdev() + "</devices></domain>"
+    check("ISO consumed: a media-less domain on the right disk needs no build",
+          _build_done_without_iso(tmp, (0, regime)), True)
+with tempfile.TemporaryDirectory() as tmp:
+    check("no ISO and no domain at all: the ISO must be built",
+          _build_done_without_iso(tmp, (1, "")), False)
+with tempfile.TemporaryDirectory() as tmp:
+    other = "<domain><devices>" + nvme_hostdev(AUTRE_NVME) + "</devices></domain>"
+    check("no ISO and a media-less domain on ANOTHER disk: build",
+          _build_done_without_iso(tmp, (0, other)), False)
+with tempfile.TemporaryDirectory() as tmp:
+    regime = "<domain><devices>" + nvme_hostdev() + "</devices></domain>"
+    check("no ISO and an identity that cannot be read: build, never skip",
+          _build_done_without_iso(tmp, (0, regime),
+                                  pci_address_of=lambda disk: None), False)
+with tempfile.TemporaryDirectory() as tmp:
+    carrying = ("<domain><devices>" + nvme_hostdev()
+                + f"<disk device='cdrom'><source file='{steps.windows_media_path(tmp)}'/></disk>"
+                + f"<disk device='cdrom'><source file='{os.path.join(tmp, 'nivuus-unattend.iso')}'/></disk>"
+                + "</devices></domain>")
+    check("no ISO while the domain still NAMES it: the ISO was lost, build",
+          _build_done_without_iso(tmp, (0, carrying)), False)
+
 if failures:
     for item in failures:
         print(f"FAIL - {item}")
