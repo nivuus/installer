@@ -11,6 +11,11 @@ Usage:
 
 The engine is also runnable standalone (outside the ISO) against a loopback
 disk for fast iteration — point config.disk.path at the loop device.
+
+`--stop-after plan` is the only dry run: hardware detection and package
+planning (including each selected package's `resolve` hook) run, then the
+engine stops before writing anything to the target disk. Every other
+`--stop-after` value runs `partition` first, which wipes config.disk.path.
 """
 from __future__ import annotations
 
@@ -49,9 +54,13 @@ def main() -> int:
     parser.add_argument("--nivuus-src", default="/opt/nivuus-src",
                         help="path to the Nivuus repo payload on the live system")
     parser.add_argument("--stop-after", default=None,
-                        choices=["partition", "debootstrap", "base", "bootloader",
-                                 "features", "packages"],
-                        help="stop the pipeline after this step (for testing)")
+                        choices=["plan", "partition", "debootstrap", "base",
+                                 "bootloader", "features", "packages"],
+                        help="stop the pipeline after this step (for testing). "
+                             "'plan' is the only non-destructive value: it "
+                             "stops before the target disk is written. Every "
+                             "other value runs 'partition' first, which wipes "
+                             "the configured disk.")
     args = parser.parse_args()
 
     if os.geteuid() != 0:
@@ -80,6 +89,10 @@ def main() -> int:
                 return True
             return False
 
+        # Last point at which the target disk is untouched: everything below
+        # writes to it, starting with the wipe inside partition.
+        if stop("plan"):
+            return 0
         fs = partition.partition_and_format(config, target, mounts, emit)
         if stop("partition"):
             return 0

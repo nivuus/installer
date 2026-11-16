@@ -29,6 +29,11 @@ Historique des versions et modifications de Nivuus.
   pré-requis manquant est refusé au wizard plutôt qu'en cours d'installation.
 
 ### Corrigé
+- Moteur d'installation : `--stop-after plan` fait un vrai essai à blanc
+  (détection du matériel, planification des packages, disque cible intact).
+  La documentation présentait `--stop-after partition` comme un essai « sans
+  toucher au disque », alors que cette valeur efface le disque configuré
+  (`wipefs -a`, `sgdisk --zap-all`) avant de s'arrêter.
 - Console : Big Picture ouvre de nouveau sans fenêtre « Ouvrir avec »
   quand Steam tourne déjà. Le lien `steam://open/bigpicture` est confié à
   `steam.exe` au lieu de passer par les associations de Windows.

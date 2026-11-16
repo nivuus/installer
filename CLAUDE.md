@@ -60,7 +60,9 @@ the live image to disk. Full docs: `installer/README.md`.
   reconnection. Override dir via `NIVUUS_PROGRESS_DIR` (default `/run/nivuus-install`).
 - `installer/install-engine/` — `run.py` orchestrator + `steps/` (partition,
   debootstrap, chroot_base, bootloader, features, validate). `--stop-after STEP`
-  for staged testing. `templates/*.j2` render NM bridges, VLAN, PPPoE, hostapd.
+  for staged testing: **only `plan` is non-destructive** (detection + package
+  planning, disk untouched); every other value runs `partition` first, which
+  wipes `disk.path` — loopback image only. `templates/*.j2` render NM bridges, VLAN, PPPoE, hostapd.
   `chroot_base` also lays the **memory guard on every host, whatever the
   wizard selected**: `earlyoom` in `CORE_PACKAGES` (fails the install loudly)
   + `/etc/default/earlyoom` from `EARLYOOM_ARGS` (`-m 10,5 -s 100,100`, `--avoid`
@@ -80,8 +82,8 @@ the live image to disk. Full docs: `installer/README.md`.
 
 **Build & test:** `cd installer && sudo make build-iso` (needs `live-build`).
 `make test-portal` (portal on :8080), `make test-vm` (QEMU UEFI, portal via
-Ethernet fallback — WiFi AP isn't emulable in QEMU), engine on a loopback image
-via `--stop-after`. The riskiest path (partition/format/mount) is validated; the
+Ethernet fallback — WiFi AP isn't emulable in QEMU), engine dry run with
+`--stop-after plan`, deeper stages on a loopback image via `--stop-after`. The riskiest path (partition/format/mount) is validated; the
 debootstrap path uses standard tooling.
 
 **IMPORTANT**: The project is in development mode - do NOT install packages unless explicitly required.

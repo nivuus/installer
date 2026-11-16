@@ -182,7 +182,7 @@ sudo make build-iso                    # → iso-build/*.iso
 # Web portal locally on :8080 (uses this machine's real hardware in the wizard)
 make test-portal
 
-# Engine against a loopback disk image (root) — safe, no real disk touched
+# Engine against a loopback disk image (root) — only the loopback image is wiped
 truncate -s 16G /tmp/t.img
 LOOP=$(sudo losetup --find --show /tmp/t.img)
 # edit config.json's disk.path to $LOOP, then:
@@ -194,8 +194,33 @@ sudo losetup -d $LOOP
 make test-vm
 ```
 
-`--stop-after {partition,debootstrap,base,bootloader,features}` halts the engine
-early for staged testing.
+For a dry run that never writes to the target disk, use `--stop-after plan`
+(no loopback image needed; the progress log still goes to
+`NIVUUS_PROGRESS_DIR`):
+
+```bash
+sudo NIVUUS_PROGRESS_DIR=/tmp/p python3 install-engine/run.py \
+     --config config.json --stop-after plan
+```
+
+`--stop-after STEP` halts the engine once STEP has completed. Without
+`--config` the engine reads the real install config
+(`/run/nivuus-install/config.json`), so always pass one when testing.
+
+| Value | Runs (in order) | Writes to `disk.path`? |
+|---|---|---|
+| `plan` | hardware detection, package planning (each selected package's `resolve` hook) | **no** — the only dry run |
+| `partition` | + `wipefs -a`, `sgdisk --zap-all`, new GPT, `mkfs`, mount on `--target` | **yes — wipes the disk** |
+| `debootstrap` | + debootstrap, API mounts, payload copy, fstab | yes |
+| `base` | + base system configuration in the chroot | yes |
+| `bootloader` | + GRUB | yes |
+| `features` | + selected features | yes |
+| `packages` | + Nivuus packages (`install` hooks) | yes |
+| *(none)* | + validation: the full install | yes |
+
+Package `resolve` hooks are read-only by convention, not by sandbox: `plan`
+guarantees the engine itself writes nothing to the target disk, not that a
+package hook cannot.
 
 ## Notes / limitations
 
