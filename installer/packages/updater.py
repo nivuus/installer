@@ -10,16 +10,18 @@ BEFORE anything is written:
   3. extract it beside the installed copy and load its manifest with the real
      parser; the release must be the package asked for, at the version its
      tag names;
-  4. the recorded wizard answers must satisfy the NEW questions, and every
-     required package must be installed and healthy;
+  4. the recorded wizard answers must satisfy the NEW questions, and the
+     machine must meet what the release requires (requirements.py): its
+     required packages installed and healthy, no capability or feature added
+     that the machine cannot be shown to have;
   5. only then swap the directory, replay install and activate, and record
-     the new version - on success only.
+     the new version - on success only (lay.py).
 
-A failure after the swap is recorded as `failed` with its target version and
-raised: no automatic restore (the hook may already have written outside its
-directory, and restoring the directory alone would describe a machine that
-does not exist), and no automatic retry - `update` without names skips failed
-packages, naming one retries it.
+A hook that fails after the swap is rolled back: the previous copy, kept
+until then, is put back and its own install and activate are replayed.
+lay.py says what that covers and what it cannot. There is no automatic
+retry: `update` without names skips a release that was rolled back and a
+package left `failed`; naming the package retries it.
 
 Three triggers will end up calling this (timer, CLI, Home Assistant), so every
 run holds an exclusive, non-blocking lock: a second concurrent run refuses at
@@ -36,30 +38,17 @@ import tarfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from . import releases, state as state_mod
+from . import releases, requirements, state as state_mod
 from .archive import ArchiveError, extract
 from .dependencies import DependencyError, install_order
-from .discovery import PACKAGES_DIR, discover
-from .facts import STATE_KEY as FACTS_STATE_KEY
+from .discovery import PACKAGES_DIR, DiscoveryError, discover
+from .lay import STAGING_DIR, UpdateError, lay, recover
 from .manifest import MANIFEST_NAME, Manifest, ManifestError, load_manifest
-from .runner import HookError, run_activate, run_install
 from .wizard import WizardError, load_questions, validate_answers
 
 CACHE_DIR = os.environ.get("NIVUUS_CACHE_DIR", "/var/cache/nivuus/packages")
-# Releases are extracted, and the previous copy set aside, OUTSIDE the
-# directory discover() scans - a copy of a manifest left there by an
-# interrupted run would collide with the installed one by name, and discovery
-# drops both. A sibling keeps it on the same filesystem, so the swap is a
-# rename.
-STAGING_DIR = os.environ.get(
-    "NIVUUS_STAGING_DIR",
-    os.path.join(os.path.dirname(PACKAGES_DIR.rstrip("/")), ".nivuus-packages-staging"))
 AVAILABLE_NAME = "available.json"
 LOCK_NAME = ".lock"
-
-
-class UpdateError(RuntimeError):
-    """Raised when an update is refused or a lay fails."""
 
 
 @dataclass(frozen=True)
@@ -105,8 +94,23 @@ def lock():
         os.close(fd)
 
 
-def _installed_manifests() -> tuple[dict[str, Manifest], list[tuple[str, str]]]:
-    manifests, errors = discover(PACKAGES_DIR)
+def _installed_manifests(current_state: dict
+                         ) -> tuple[dict[str, Manifest], list[tuple[str, str]]]:
+    """The manifests of what is installed, or a refusal when they cannot be read.
+
+    A packages directory that is missing or unreadable while the state file
+    records packages is a broken machine (a failed mount, wrong permissions),
+    not a set of packages "without a manifest": answering that made
+    `nivuus check` file every package under "not followed" and exit 0.
+    """
+    if current_state and not os.path.isdir(PACKAGES_DIR):
+        raise UpdateError(
+            f"{PACKAGES_DIR} does not exist, yet {len(current_state)} "
+            f"package(s) are recorded as installed in {state_mod.STATE_FILE}")
+    try:
+        manifests, errors = discover(PACKAGES_DIR, strict=True)
+    except DiscoveryError as exc:
+        raise UpdateError(str(exc)) from exc
     return {m.name: m for m in manifests}, errors
 
 
@@ -138,7 +142,7 @@ def check(fetch=releases.latest_release) -> CheckResult:
     """
     with lock():
         current_state = state_mod.load()
-        manifests, errors = _installed_manifests()
+        manifests, errors = _installed_manifests(current_state)
         pending, current, skipped, unreachable = [], [], list(errors), []
         for name in sorted(current_state):
             release, reason, fetch_failed = _latest(name, manifests, fetch)
@@ -165,6 +169,9 @@ def _write_available(current_state: dict, pending, skipped) -> None:
             entry["notes"] = by_name[name].notes
         if state_mod.status(record) == state_mod.FAILED:
             entry["target_version"] = record.get("target_version", "")
+            entry["error"] = record.get("error", "")
+        elif record.get("rolled_back_from"):
+            entry["rolled_back_from"] = record["rolled_back_from"]
             entry["error"] = record.get("error", "")
         payload["packages"][name] = entry
     payload["skipped"] = {name: reason for name, reason in skipped}
@@ -240,69 +247,30 @@ def _answers_for(manifest: Manifest, record: dict, emit) -> dict:
     return validate_answers(questions, answers)
 
 
-def _check_requirements(manifests: list[Manifest], current_state: dict) -> None:
-    batch = {m.name for m in manifests}
-    for manifest in manifests:
-        for dependency in manifest.packages:
-            record = current_state.get(dependency)
-            if record is None:
-                raise UpdateError(f"{manifest.name}: requires package "
-                                  f"{dependency!r}, which is not installed")
-            if dependency not in batch and state_mod.status(record) == state_mod.FAILED:
-                raise UpdateError(f"{manifest.name}: requires package "
-                                  f"{dependency!r}, whose last update failed")
-
-
-def _swap(name: str, staging: str, root: str) -> Manifest:
-    dest = os.path.join(PACKAGES_DIR, name)
-    aside = os.path.join(STAGING_DIR, f"{name}.previous")
-    if os.path.lexists(aside):
-        shutil.rmtree(aside)
-    if os.path.lexists(dest):
-        os.rename(dest, aside)
+def _check_requirements(staged: list[Manifest], manifests: dict,
+                        current_state: dict, hw: dict, apt_query, emit) -> None:
+    """Refuse the batch when the machine does not meet what a release requires."""
     try:
-        os.rename(root, dest)
-    except OSError:
-        # Never leave the machine with no copy at all: put the previous one
-        # back, then let the failure be recorded and raised.
-        if os.path.lexists(aside) and not os.path.lexists(dest):
-            os.rename(aside, dest)
-        raise
-    for leftover in (aside, staging):
-        if os.path.lexists(leftover):
-            shutil.rmtree(leftover)
-    return load_manifest(os.path.join(dest, MANIFEST_NAME))
-
-
-def _lay(staged: Manifest, staging: str, answers: dict, current_state: dict,
-         hw: dict, emit) -> None:
-    name = staged.name
-    record = current_state[name]
-    # Recorded as failed BEFORE anything is replaced, and cleared only on
-    # success: a run killed mid-lay (signal, power loss) then leaves a record
-    # that says so, never one claiming the old version is still what runs.
-    state_mod.mark_failed(current_state, name, staged.version,
-                          f"interrupted while laying {staged.version}; its "
-                          "hooks may have run partially")
-    state_mod.save(current_state)
-    try:
-        manifest = _swap(name, staging, staged.root)
-        emit.info("packages", 30, f"[{name}] install {manifest.version}")
-        run_install(manifest, hw, answers, "/", emit)
-        stamp = os.path.join(state_mod.STAMP_DIR, f"{name}.activated")
-        if os.path.exists(stamp):
-            os.unlink(stamp)
-        emit.info("packages", 70, f"[{name}] activate {manifest.version}")
-        run_activate(manifest, hw, answers, emit,
-                     facts=record.get(FACTS_STATE_KEY) or {})
-        with open(stamp, "w") as fh:
-            fh.write(manifest.version + "\n")
-    except (HookError, ManifestError, OSError) as exc:
-        state_mod.mark_failed(current_state, name, staged.version, str(exc))
-        state_mod.save(current_state)
-        raise UpdateError(f"{name}: update to {staged.version} failed: {exc}") from exc
-    state_mod.mark_installed(current_state, name, manifest.version, answers)
-    state_mod.save(current_state)
+        requirements.check_packages(staged, current_state)
+        for manifest in staged:
+            requirements.check_machine(manifest, manifests[manifest.name], hw)
+    except requirements.RequirementError as exc:
+        raise UpdateError(str(exc)) from exc
+    for manifest in staged:
+        # apt is lenient at install (a failed apt install is a warning there)
+        # and the update installs nothing: the gap is named, never refused.
+        try:
+            missing = requirements.missing_apt(
+                manifest, manifests[manifest.name], apt_query)
+        except requirements.RequirementError as exc:
+            emit.warn("packages", 0, f"[{manifest.name}] {exc}")
+            continue
+        if missing:
+            emit.warn("packages", 0,
+                      f"[{manifest.name}] release {manifest.version} adds apt "
+                      f"package(s) that are not installed: {', '.join(missing)} "
+                      "- nivuus update installs none, its hooks will run "
+                      "without them")
 
 
 def _default_hw() -> dict:
@@ -311,11 +279,12 @@ def _default_hw() -> dict:
 
 
 def update(names=None, fetch=releases.latest_release, hw_detect=_default_hw,
-           emit=None) -> list[str]:
+           emit=None, apt_query=requirements.dpkg_installed) -> list[str]:
     """Lay the latest release of `names`, or of every healthy package behind.
 
     Returns the names laid, in the order they were laid. Raises UpdateError
-    on the first refusal or failure; packages laid before it stay laid.
+    on the first refusal or failure; packages laid before it stay laid, and
+    the one that failed is rolled back to the version it had (lay.py).
     """
     emit = emit or _NullEmit()
     with lock():
@@ -323,8 +292,12 @@ def update(names=None, fetch=releases.latest_release, hw_detect=_default_hw,
         # writes here, and it holds the lock.
         if os.path.lexists(STAGING_DIR):
             shutil.rmtree(STAGING_DIR)
+        for name in recover():
+            emit.warn("packages", 0, f"[{name}] an interrupted update had left "
+                                     "it without a directory; its previous "
+                                     "copy was put back")
         current_state = state_mod.load()
-        manifests, _ = _installed_manifests()
+        manifests, _ = _installed_manifests(current_state)
         explicit = bool(names)
         for name in names or []:
             if name not in current_state:
@@ -340,10 +313,15 @@ def update(names=None, fetch=releases.latest_release, hw_detect=_default_hw,
                 if explicit:
                     raise UpdateError(f"{name}: cannot be updated: {reason}")
                 emit.warn("packages", 0, f"[{name}] skipped: {reason}")
-            elif _is_newer(release, current_state[name]):
-                chosen.append((name, release))
-            else:
+            elif not _is_newer(release, current_state[name]):
                 emit.info("packages", 0, f"[{name}] already at {release.version}")
+            elif (not explicit and release.version
+                  == current_state[name].get("rolled_back_from")):
+                emit.warn("packages", 0,
+                          f"[{name}] skipped: {release.version} failed and was "
+                          "rolled back; name the package to try it again")
+            else:
+                chosen.append((name, release))
 
         if not chosen:
             return []
@@ -353,17 +331,18 @@ def update(names=None, fetch=releases.latest_release, hw_detect=_default_hw,
             for name, release in chosen:
                 prepared[name] = _prepare(name, release, current_state[name], emit)
             staged = [manifest for _, manifest, _ in prepared.values()]
-            _check_requirements(staged, current_state)
+            # Measured once, before any directory is swapped: a detection
+            # failure must refuse the update, not strand a half-laid package.
+            hw = hw_detect()
+            _check_requirements(staged, manifests, current_state, hw,
+                                apt_query, emit)
             try:
                 order = install_order(staged)
             except DependencyError as exc:
                 raise UpdateError(str(exc)) from exc
-            # Measured once, before any directory is swapped: a detection
-            # failure must refuse the update, not strand a half-laid package.
-            hw = hw_detect()
             for manifest in order:
-                staging, _, answers = prepared[manifest.name]
-                _lay(manifest, staging, answers, current_state, hw, emit)
+                _, _, answers = prepared[manifest.name]
+                lay(manifest, answers, current_state, hw, emit)
                 laid.append(manifest.name)
         finally:
             # Releases staged but never laid - a refusal, or a failure of an

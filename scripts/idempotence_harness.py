@@ -33,8 +33,21 @@ Messages are in English, unlike discovery.py's: those reach an operator in the
 installer portal, these reach a developer in a CI log, and check-english.sh
 judges every added line of a non-test file.
 
+`--rollback-from <dir>` proves a second property, the one a rolled-back
+update stands on (installer/packages/lay.py): when a release's hooks fail,
+the updater puts the previous version back and replays ITS install over
+whatever the failed release wrote. So the previous version (`--package`) is
+installed, then the newer one (`--rollback-from`), then the previous one
+again, and every entry the previous version had written must be back, byte
+for byte. Idempotence does not imply it: a hook that writes a file only when
+it is missing replays cleanly and restores nothing. Entries only the newer
+version wrote are LISTED, not failed: no version knows how to remove them,
+the nivuus.dev/v1 contract has no hook for it, and the report is where that
+limit is stated instead of hidden. A newer install hook that fails is part of
+the scenario, not an error of the proof - a rollback starts exactly there.
+
 Run: python3 scripts/idempotence_harness.py --package <dir> \
-    [--prereq <dir>]... [--ignore GLOB]...
+    [--prereq <dir>]... [--ignore GLOB]... [--rollback-from <dir>]
 """
 
 from __future__ import annotations
@@ -167,6 +180,96 @@ def check_package(package_dir: str, answers=None, hw=None, ignore=(), prereqs=()
     return 1, _report(manifest.name, first, second, root)
 
 
+def _install_prereqs(manifest, prereqs, hw, answers, root) -> str:
+    """Install `prereqs` into `root`, in dependency order. Returns an error or ""."""
+    prereq_manifests, error = _load_prereq_manifests(prereqs)
+    if error:
+        return error
+    try:
+        ordered = install_order([*prereq_manifests, manifest])
+    except DependencyError as exc:
+        return f"{manifest.name}: cannot order prerequisites: {exc}"
+    for prereq in ordered:
+        if prereq.name == manifest.name:
+            continue
+        try:
+            run_install(prereq, hw, answers, root)
+        except HookError as exc:
+            return f"{manifest.name}: prerequisite '{prereq.name}' failed to install: {exc}"
+    return ""
+
+
+def check_rollback(
+    package_dir: str, newer_dir: str, answers=None, hw=None, ignore=(), prereqs=()
+) -> tuple:
+    """Return (exit status, report): does replaying `package_dir` undo `newer_dir`?
+
+    See the module docstring. Status 1 when an entry the previous version
+    wrote is missing or different after its install was replayed over the
+    newer version's; status 0 otherwise, with what the newer version left
+    behind listed in the report.
+    """
+    try:
+        previous = load_manifest(os.path.join(package_dir, MANIFEST_NAME))
+        newer = load_manifest(os.path.join(newer_dir, MANIFEST_NAME))
+    except (ManifestError, OSError) as exc:
+        return 2, f"unreadable manifest: {exc}"
+    if previous.name != newer.name:
+        return 2, (
+            f"{package_dir} is package '{previous.name}' and {newer_dir} is "
+            f"'{newer.name}': a rollback is between two versions of one package"
+        )
+    if not previous.hook_path("install"):
+        return 0, f"{previous.name}: no install hook, nothing to prove"
+
+    answers = {} if answers is None else answers
+    hw = {} if hw is None else hw
+    root = tempfile.mkdtemp(prefix="nivuus-rollback-")
+    kept = f"\n\nScratch root kept at: {root}"
+
+    error = _install_prereqs(previous, prereqs, hw, answers, root)
+    if error:
+        return 2, error + kept
+    try:
+        run_install(previous, hw, answers, root)
+    except HookError as exc:
+        return 1, f"{previous.name}: the install hook failed: {exc}{kept}"
+    baseline = snapshot(root, ignore)
+
+    newer_failed = ""
+    try:
+        run_install(newer, hw, answers, root)
+    except HookError as exc:
+        newer_failed = f" (its install hook failed part-way: {exc})"
+    try:
+        run_install(previous, hw, answers, root)
+    except HookError as exc:
+        return 1, (
+            f"{previous.name}: replaying {previous.version} over "
+            f"{newer.version} failed: {exc}{kept}"
+        )
+    after = snapshot(root, ignore)
+
+    what = f"{previous.name}: replaying {previous.version} over {newer.version}{newer_failed}"
+    lost = sorted(rel for rel in baseline if after.get(rel) != baseline[rel])
+    if lost:
+        lines = [f"{what} does NOT restore what {previous.version} had written", ""]
+        for rel in lost:
+            lines.append(f"  {'changed' if rel in after else 'removed'} {rel}")
+            lines.append(f"      {previous.version} alone: {baseline[rel]}")
+            if rel in after:
+                lines.append(f"      after rollback: {after[rel]}")
+        return 1, "\n".join(lines) + kept
+
+    lines = [f"{what} restores the {len(baseline)} entries {previous.version} had written"]
+    residue = sorted(set(after) - set(baseline))
+    if residue:
+        lines += ["", f"left behind by {newer.version}, which no rollback removes:"]
+        lines += [f"  {rel}" for rel in residue]
+    shutil.rmtree(root, ignore_errors=True)
+    return 0, "\n".join(lines)
+
+
 def _load_json_arg(path: str, what: str) -> tuple:
     """Parse a JSON file given on the CLI. Returns (data, error-or-empty).
 
@@ -196,6 +299,12 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--ignore", action="append", default=[], help="relative glob to ignore, repeatable"
     )
+    parser.add_argument(
+        "--rollback-from",
+        default="",
+        help="directory holding a NEWER version of --package: prove that "
+        "replaying --package over it restores what --package had written",
+    )
     args = parser.parse_args(argv)
 
     answers: dict = {}
@@ -212,9 +321,14 @@ def main(argv=None) -> int:
             print(error)
             return 2
 
-    status, report = check_package(
-        args.package, answers, hw, tuple(args.ignore), tuple(args.prereq)
-    )
+    if args.rollback_from:
+        status, report = check_rollback(
+            args.package, args.rollback_from, answers, hw, tuple(args.ignore), tuple(args.prereq)
+        )
+    else:
+        status, report = check_package(
+            args.package, answers, hw, tuple(args.ignore), tuple(args.prereq)
+        )
     print(report)
     return status
 

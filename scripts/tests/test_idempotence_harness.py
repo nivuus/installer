@@ -129,8 +129,85 @@ with tempfile.TemporaryDirectory() as tmp:
         handle.write("a")
     check("an ignored path is left out of the snapshot", snapshot(tmp, ("f",)), {})
 
-# --- malformed --answers/--hw exit 2, not a raw traceback ------------------ #
+# --- rollback: replaying the previous version must undo the newer one ------ #
+# What installer/packages/lay.py relies on when a release's hooks fail. Three
+# versions of one package, built here: v1 rewrites its file, v2 rewrites the
+# same file and adds another, and a v1 that only writes its file when it is
+# missing - idempotent on its own, and unable to restore anything.
+from idempotence_harness import check_rollback  # noqa: E402
 from idempotence_harness import main as harness_main  # noqa: E402
+
+VERSION_HOOK = """import argparse, json, os, sys
+parser = argparse.ArgumentParser()
+parser.add_argument("--phase", required=True)
+parser.add_argument("--root", default="/")
+args = parser.parse_args()
+json.load(sys.stdin)
+etc = os.path.join(args.root, "etc")
+os.makedirs(etc, exist_ok=True)
+for name in {files!r}:
+    path = os.path.join(etc, name)
+    if {only_if_missing!r} and os.path.exists(path):
+        continue
+    with open(path, "w") as handle:
+        handle.write("{version}\\n")
+sys.exit({status})
+"""
+
+
+def versioned(tmp, label, version, files, only_if_missing=False, name="app", status=0):
+    pkg = pathlib.Path(tmp) / label
+    (pkg / "hooks").mkdir(parents=True)
+    (pkg / "nivuus-package.yaml").write_text(
+        f"apiVersion: nivuus.dev/v1\nname: {name}\nversion: {version}\n"
+        f'label: "{name}"\ntier: userspace\nhooks:\n  install: hooks/install.py\n'
+    )
+    (pkg / "hooks" / "install.py").write_text(
+        VERSION_HOOK.format(
+            files=files, only_if_missing=only_if_missing, version=version, status=status
+        )
+    )
+    return str(pkg)
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    v1 = versioned(tmp, "v1", "1.0.0", ["app.conf"])
+    v2 = versioned(tmp, "v2", "2.0.0", ["app.conf", "app-extra.conf"])
+    keeper = versioned(tmp, "keeper", "1.0.0", ["app.conf"], only_if_missing=True)
+    broken = versioned(tmp, "broken", "2.0.0", ["app.conf"], status=1)
+    other = versioned(tmp, "other", "2.0.0", ["app.conf"], name="other")
+
+    status, report = check_rollback(v1, v2)
+    check("a version that rewrites its files undoes the newer one", status, 0)
+    check(
+        "what only the newer version wrote is listed as left behind",
+        ("left behind by 2.0.0" in report, "etc/app-extra.conf" in report),
+        (True, True),
+    )
+
+    status, report = check_package(keeper)
+    check("a hook that writes only what is missing is idempotent", status, 0)
+    status, report = check_rollback(keeper, v2)
+    check("and still cannot roll a newer version back", status, 1)
+    check(
+        "the report names the file it failed to restore",
+        ("does NOT restore" in report, "changed etc/app.conf" in report),
+        (True, True),
+    )
+
+    status, report = check_rollback(v1, broken)
+    check("a newer hook that fails part-way is where a rollback starts", status, 0)
+    check("and the report says it failed", "install hook failed part-way" in report, True)
+
+    status, report = check_rollback(v1, other)
+    check("two different packages are not a rollback", status, 2)
+    status, report = check_rollback(v1, str(pathlib.Path(tmp) / "absent"))
+    check("an unreadable newer manifest exits 2", status, 2)
+
+    status = harness_main(["--package", keeper, "--rollback-from", v2])
+    check("the command line reaches the rollback proof", status, 1)
+
+# --- malformed --answers/--hw exit 2, not a raw traceback ------------------ #
 
 with tempfile.TemporaryDirectory() as tmp:
     bad = os.path.join(tmp, "bad.json")
