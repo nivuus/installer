@@ -15,6 +15,8 @@ import zipfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "console" / "guest"))
+sys.path.insert(0, str(REPO / "console"))
+sys.path.insert(0, str(REPO / "console" / "tests"))
 
 import fetch_payload  # noqa: E402
 import payload  # noqa: E402
@@ -250,83 +252,114 @@ check("les deux modules nomment le meme dossier",
       fetch_payload.RETRO_DIRNAME, payload.RETRO_DIRNAME)
 
 
-# --- Tache 4 (chaine reelle) : agent.exe voyage desormais DANS le paquet,
-# et fetch_payload.py ne pretend plus qu il est "jamais recuperable" - sur
-# une machine neuve, sans VM Windows a extraire de quoi que ce soit, cette
-# ancienne phrase rendait l etape 40 du provisionnement impossible a
-# satisfaire des le depart.
-check("le paquet embarque bien console/guest/payload/agent/agent.exe",
-      fetch_payload.PACKAGED_AGENT_EXE.is_file(), True)
-# The tracked agent.exe is pinned by digest: a size floor let a different
-# build replace it in silence (it did, in 639c3cd, under an unrelated commit).
-# Replacing the binary now means bumping PACKAGED_AGENT_SHA256 on purpose.
-if fetch_payload.PACKAGED_AGENT_EXE.is_file():
-    check("the tracked agent.exe is the pinned build",
-          hashlib.sha256(fetch_payload.PACKAGED_AGENT_EXE.read_bytes()).hexdigest(),
-          getattr(fetch_payload, "PACKAGED_AGENT_SHA256", None))
+# --- The desk agent: staged from what the desk package published, verified
+# against desk's manifest, and never from a copy inside this package (there
+# is none any more: desk is the single owner of agent.exe).
+import desk_agent  # noqa: E402
+import desk_agent_fixture  # noqa: E402
 
-# A packaged agent.exe that is not the pinned build is refused, by name,
-# before anything is copied into the payload tree.
-_real_agent = fetch_payload.PACKAGED_AGENT_EXE
+_AGENT = b"MZ a published desk agent\n" * 64
+
+check("this package no longer carries an agent.exe of its own",
+      (REPO / "console" / "guest" / "payload" / "agent" / "agent.exe").exists(),
+      False)
+
+# No desk on this machine: nothing is staged, and a stale drivers/agent/
+# left by an earlier run is REMOVED rather than shipped.
+_agent_dir = desk_agent_fixture.isolate()
 with tempfile.TemporaryDirectory() as tmp:
-    tampered = pathlib.Path(tmp) / "agent.exe"
-    tampered.write_bytes(_real_agent.read_bytes() + b"\0")
-    fetch_payload.PACKAGED_AGENT_EXE = tampered
     drivers = pathlib.Path(tmp) / "drivers"
+    (drivers / "agent").mkdir(parents=True)
+    (drivers / "agent" / "agent.exe").write_bytes(b"MZ stale")
+    check("without desk, install_desk_agent stages nothing",
+          fetch_payload.install_desk_agent(drivers), None)
+    check("and removes the stale drivers/agent/",
+          (drivers / "agent").exists(), False)
+
+# desk installed but nothing published: refused, never a silent skip and
+# never the stale copy.
+desk_agent_fixture.install_desk_package()
+with tempfile.TemporaryDirectory() as tmp:
+    drivers = pathlib.Path(tmp) / "drivers"
+    (drivers / "agent").mkdir(parents=True)
+    (drivers / "agent" / "agent.exe").write_bytes(b"MZ stale")
     try:
-        fetch_payload.install_packaged_agent(drivers)
-        failures.append("install_packaged_agent accepted an agent.exe that "
-                        "is not the pinned build")
+        fetch_payload.install_desk_agent(drivers)
+        failures.append("install_desk_agent: went on with desk installed "
+                        "and no agent published")
     except fetch_payload.FetchError as e:
-        check("the refusal names agent.exe and the pin",
-              "agent.exe" in str(e) and "PACKAGED_AGENT_SHA256" in str(e), True)
-    finally:
-        fetch_payload.PACKAGED_AGENT_EXE = _real_agent
-    check("nothing was copied into the payload tree",
-          (drivers / "agent" / "agent.exe").exists(), False)
+        check("the refusal says desk has not published",
+              "has not published" in str(e), True)
 
-# install_packaged_agent() doit copier le binaire du paquet vers drivers/ ET
-# verifier la somme de controle a destination - une copie de 11 Mo tronquee
-# en silence ne se decouvrirait sinon qu a l etape 40, sur un invite sans
-# ecran.
+# Published: the binary and then the manifest land in drivers/agent/.
+_manifest = desk_agent_fixture.publish(_agent_dir, _AGENT, "2.0.0")
 with tempfile.TemporaryDirectory() as tmp:
     drivers = pathlib.Path(tmp) / "drivers"
-    digest = fetch_payload.install_packaged_agent(drivers)
-    dest = drivers / "agent" / "agent.exe"
-    check("install_packaged_agent copie bien le binaire dans drivers/agent/",
-          dest.is_file(), True)
-    check("le sha256 retourne correspond au fichier copie a destination",
-          hashlib.sha256(dest.read_bytes()).hexdigest(), digest)
-    check("le sha256 correspond au binaire du paquet",
-          digest,
-          hashlib.sha256(fetch_payload.PACKAGED_AGENT_EXE.read_bytes()).hexdigest())
+    staged = fetch_payload.install_desk_agent(drivers)
+    check("the published agent is returned",
+          (staged.sha256, staged.desk_version),
+          (hashlib.sha256(_AGENT).hexdigest(), "2.0.0"))
+    check("agent.exe is staged with the published content",
+          (drivers / "agent" / "agent.exe").read_bytes(), _AGENT)
+    check("the manifest is staged verbatim",
+          (drivers / "agent" / "agent.manifest.json").read_bytes(), _manifest)
+    check("no temporary file is left behind",
+          sorted(p.name for p in (drivers / "agent").iterdir()),
+          ["agent.exe", "agent.manifest.json"])
 
-# Un paquet SANS agent.exe (le binaire retire ou jamais commite) doit faire
-# echouer le controle en le NOMMANT - c est la preuve, dans le sens de la
-# tache 4, que ce test detecte vraiment sa disparition.
-_real_agent = fetch_payload.PACKAGED_AGENT_EXE
-fetch_payload.PACKAGED_AGENT_EXE = pathlib.Path(tempfile.gettempdir()) / "agent-absent-du-paquet.exe"
+    # desk republishes: the next fetch replaces both.
+    _newer = b"MZ a NEWER desk agent\n" * 64
+    _newer_manifest = desk_agent_fixture.publish(_agent_dir, _newer, "2.1.0")
+    fetch_payload.install_desk_agent(drivers)
+    check("a republished agent replaces the staged binary",
+          (drivers / "agent" / "agent.exe").read_bytes(), _newer)
+    check("and the staged manifest",
+          (drivers / "agent" / "agent.manifest.json").read_bytes(),
+          _newer_manifest)
+
+    # The published binary no longer matches desk's manifest (overwritten,
+    # corrupted): refused BEFORE the payload tree is touched.
+    (_agent_dir / "agent.exe").write_bytes(_newer + b"\0")
+    try:
+        fetch_payload.install_desk_agent(drivers)
+        failures.append("install_desk_agent accepted a binary that is not "
+                        "the one desk's manifest describes")
+    except fetch_payload.FetchError as e:
+        check("the refusal names the mismatch",
+              "is not the agent desk published" in str(e), True)
+    check("the previously staged binary is untouched by the refusal",
+          (drivers / "agent" / "agent.exe").read_bytes(), _newer)
+    check("and so is its manifest",
+          (drivers / "agent" / "agent.manifest.json").read_bytes(),
+          _newer_manifest)
+
+# A copy that does not come out identical (full disk, interruption) is
+# removed, and no manifest vouches for it.
+desk_agent_fixture.publish(_agent_dir, _AGENT, "2.0.0")
+_real_copyfile = fetch_payload.shutil.copyfile
+fetch_payload.shutil.copyfile = (
+    lambda src, dst: pathlib.Path(dst).write_bytes(_AGENT[:-7]))
 try:
     with tempfile.TemporaryDirectory() as tmp:
+        drivers = pathlib.Path(tmp) / "drivers"
         try:
-            fetch_payload.install_packaged_agent(pathlib.Path(tmp) / "drivers")
-            failures.append(
-                "install_packaged_agent: a accepte un paquet sans agent.exe")
+            fetch_payload.install_desk_agent(drivers)
+            failures.append("install_desk_agent accepted a truncated copy")
         except fetch_payload.FetchError as e:
-            if "agent.exe" not in str(e):
-                failures.append(
-                    f"install_packaged_agent ne nomme pas agent.exe manquant: {e}")
+            check("the refusal says the copy is corrupt",
+                  "corrupt" in str(e), True)
+        check("the truncated copy was removed",
+              (drivers / "agent" / "agent.exe").exists(), False)
+        check("and no manifest was staged for it",
+              (drivers / "agent" / "agent.manifest.json").exists(), False)
 finally:
-    fetch_payload.PACKAGED_AGENT_EXE = _real_agent
+    fetch_payload.shutil.copyfile = _real_copyfile
 
-# fetch_payload.py ne doit plus annoncer agent.exe comme "jamais
-# recuperable" - la phrase devient fausse des que le paquet le porte - et
-# doit dire d ou il vient reellement a la place.
-_src = pathlib.Path(fetch_payload.__file__).read_text()
-check("fetch_payload n annonce plus agent.exe comme jamais recuperable",
-      "never fetchable" in _src, False)
-check("... et dit desormais d ou il vient vraiment",
-      "payload/agent/README.md" in _src and "package itself" in _src, True)
+check("fetch_payload and payload name the same agent directory",
+      fetch_payload.AGENT_DIRNAME, payload.AGENT_DIRNAME)
+check("payload requires exactly the two names desk publishes",
+      sorted(name for _dir, name, _what in payload.AGENT_BINARIES),
+      sorted([desk_agent.BINARY_NAME, desk_agent.MANIFEST_NAME]))
 
 
 # --- winget : la part de « Services de jeu » que la construction PEUT figer.

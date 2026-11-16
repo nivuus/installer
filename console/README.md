@@ -82,9 +82,10 @@ what did not finish:
    `windows-admin.pass`, `apollo-ui.pass`) `guest/build.py` reads its secrets
    from, never on argv.
 2. **payload** — `guest/fetch_payload.py` fetches the offline driver/tool
-   binaries and copies `agent.exe` out of the package itself (see
-   "`agent.exe` ships inside this package" below) — the one binary in the
-   offline payload that is never downloaded. It also stages **winget** (App
+   binaries and stages the agent the `desk` package published (see
+   "`agent.exe` belongs to `desk`" below) — the one binary in the offline
+   payload that is never downloaded, and absent when `desk` is not
+   installed. It also stages **winget** (App
    Installer, pinned to `WINGET_VERSION`, with its offline licence and the
    three x64 frameworks mined out of the vendor's dependency zip): IoT
    Enterprise LTSC ships no Microsoft Store, and `provision/34-gaming-services.ps1`
@@ -227,29 +228,53 @@ what it took to actually build and boot the guest:
 | `apollo_password` | secret | the Apollo streaming UI's password |
 | `guest_workdir` | texte | where secrets/payload/the built ISO live, default `/var/lib/nivuus/guest` |
 
-## `agent.exe` ships inside this package
+## `agent.exe` belongs to `desk`
 
-`console/guest/payload/agent/agent.exe` is a **compiled** artefact — the
-Guacamole agent from `nivuus/desk` — vendored directly into this repository
-instead of being fetched or built. `fetch_payload.py` copies it into the
-offline payload tree at build time, after refusing any file whose sha256 is
-not `PACKAGED_AGENT_SHA256`, and verifies the copy's sha256 against the
-committed file; it is no longer "extracted from the current Windows VM
-before it is wiped", which used to mean a fresh machine — one that never ran
-that VM — had nothing to extract and could not install this console at all.
+`agent.exe` — the Windows agent of `nivuus/desk` — has **one owner, the
+`desk` package**. `desk` builds it and publishes it in its own deployed tree,
+next to a manifest it writes last:
 
-**This is a deliberate, reviewed trade-off, not the natural home for this
-file.** `agent.exe` logically belongs to `nivuus/desk`, and no source
-checkout of that repository exists on this machine, so this package cannot
-build it from source and instead carries the binary directly. Two costs come
-with that: this repository now duplicates ownership of an artefact that is
-not its own, and the vendored copy **will drift** on every new agent
-version, since nothing here rebuilds or re-syncs it automatically — bumping
-it is a manual step (bump the pin with the file). It also freezes ~31 MB
-(two builds so far) into this repository's git history, permanently. See
-`console/guest/payload/agent/README.md` for the measured size/sha256 of the
-version currently vendored, and for the fact that its source revision is
-not recorded.
+```
+/opt/nivuus/desk/agent/agent.exe
+/opt/nivuus/desk/agent/agent.manifest.json   {"schema": 1, "file": "agent.exe", "sha256": …, "size": …, "desk_version": …}
+```
+
+This package carries no copy of it (the 20 MB binary once tracked under
+`guest/payload/agent/` is gone, and so is the sha256 pinned in
+`fetch_payload.py`). `console/desk_agent.py` is the single place that names
+the location and reads the manifest; `guest/fetch_payload.py`,
+`guest/build.py` and the `payload` predicate of `guest_steps.py` all go
+through it, **at the moment a payload is staged**:
+
+| State on the host | What happens |
+|---|---|
+| `desk` not installed, nothing published | The agent is **skipped, and said so**: `fetch_payload.py` removes any `payload/agent/` left by an earlier run, `build.py` renders `config/agent.psd1` with `Enabled = $false`, stage 40 prints why and exits 0, stage 99 does not check the agent. A console without `desk` is a valid machine. |
+| manifest present | The binary is verified against the manifest (size, sha256) before it is copied, the copy is verified again, the manifest is staged last. `build.py` refuses a staged `agent.exe` that is not the published one, writes the digest into `config/agent.psd1`, and stage 40 compares the file it copied onto `C:` with that digest. |
+| anything else (`desk` installed with nothing published, a binary without manifest, an unreadable manifest, a hash mismatch) | **Refused by name.** Never a fallback to another binary. |
+
+**Ordering.** Nothing of the agent lives in this package's tree, so
+`nivuus update console` can neither lose nor revert it; and because the
+`payload` predicate compares the staged manifest with the published one each
+time it is asked, an agent republished by `nivuus update desk` makes the next
+activation of `console` restage it. The only order this relies on is
+"`desk` has published before a payload is staged". The engine guarantees it
+for updates of an installed machine (the agent was published by an earlier
+`desk` activation) but **not at first boot**: `nivuus-package-activate@.service`
+orders nothing between packages, so `console`'s first activation can reach
+the `payload` step before `desk`'s has published. It then stops with
+"the desk package is installed but has not published its agent" and is
+retried at the next boot (the activation stamp is only written on success).
+Closing that gap needs `desk` to publish from its `install` hook — which
+runs in dependency order, before any activation — from a binary prebuilt by
+its release pipeline; that is not there yet.
+
+The format and the path are a contract between two repositories:
+`tests/fixtures/agent-publication-contract.json` is the same file in both,
+pinned by sha256 in `tests/test_console_desk_agent.py` here and in
+`tests/test_desk_agent_contract.py` there.
+
+The running guest is not touched by any of this: a new agent reaches Windows
+when the guest is next provisioned, exactly as before.
 
 ## Limites connues
 

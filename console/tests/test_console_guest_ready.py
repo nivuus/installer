@@ -580,7 +580,9 @@ def run_main(domstate, marker_text, elapsed_s, redefine_ok=True,
                       marker_fn=marker_fn, failure_fn=failure_fn,
                       version_fn=version_fn,
                       redefine_fn=redefine_fn, stop_fn=stop_fn,
-                      state_path=path, now_fn=now_fn)
+                      state_path=path, now_fn=now_fn,
+                      # Never the real virsh: these scenarios carry no ISO.
+                      dumpxml_fn=lambda: "")
         return buf.getvalue() + errbuf.getvalue()
 
     if state_path is not None:
@@ -752,6 +754,100 @@ check("READY + redefine FAILS: a redefinition was still attempted",
       redefined, True)
 check("READY + redefine FAILS: the failure and the retry are explained",
       "echoue" in out.lower() and "medias" in out.lower(), True)
+
+
+# --- the answer ISO is deleted once the domain no longer reads it -----------
+# It carries the product key, the administrator password and the Apollo
+# password, and was never removed from the host. It may go only AFTER the
+# media-less redefinition succeeded.
+def iso_domain_xml(answer_iso, windows_iso):
+    return ("<domain><devices>"
+            f"<disk type='file' device='cdrom'><source file='{windows_iso}'/></disk>"
+            f"<disk type='file' device='cdrom'><source file='{answer_iso}'/></disk>"
+            "<disk type='file' device='disk'><source file='/var/lib/x.qcow2'/></disk>"
+            "</devices></domain>")
+
+
+def ready_pass(state_path, xml, redefine_ok=True, unlink_fn=None):
+    """One READY pass of main(); returns (stopped, redefined, output)."""
+    import contextlib
+    import io
+    stopped, redefined = [], []
+    watch.save_state(state_path, dict(watch.load_state(state_path),
+                                      first_running_at=1000.0))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        watch.main(domstate_fn=lambda: "running", ip_fn=lambda: "192.168.3.2",
+                   probe_fn=lambda ip: True,
+                   marker_fn=lambda ip: "provision_version=B9\n",
+                   failure_fn=lambda ip: "", version_fn=lambda: "B9",
+                   redefine_fn=lambda: redefined.append(1) or redefine_ok,
+                   stop_fn=lambda: stopped.append(1), state_path=state_path,
+                   now_fn=lambda: 1060.0, dumpxml_fn=lambda: xml,
+                   unlink_fn=unlink_fn)
+    return bool(stopped), bool(redefined), buf.getvalue()
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    answer_iso = os.path.join(tmp, watch.ANSWER_ISO_NAME)
+    windows_iso = os.path.join(tmp, "windows-source.iso")
+    for path in (answer_iso, windows_iso):
+        pathlib.Path(path).write_bytes(b"iso")
+    xml = iso_domain_xml(answer_iso, windows_iso)
+    check("only the answer ISO is picked out of the domain's disks",
+          watch.answer_iso_paths(xml), [answer_iso])
+    check("an unparseable definition yields nothing to delete",
+          watch.answer_iso_paths("<domain"), [])
+    state_path = os.path.join(tmp, "state.json")
+
+    # The redefinition failed: the domain still names the ISO, it must stay.
+    stopped, redefined, _ = ready_pass(state_path, xml, redefine_ok=False)
+    check("redefinition failed: the answer ISO is KEPT",
+          (os.path.exists(answer_iso), stopped, redefined), (True, False, True))
+
+    # Redefinition succeeded but the file could not be removed: not terminal,
+    # and the path is remembered - the next definition will not name it.
+    def refuse_unlink(path):
+        raise PermissionError(13, "Permission denied", path)
+    stopped, _, out = ready_pass(state_path, xml, unlink_fn=refuse_unlink)
+    check("deletion failed: the timer keeps running", stopped, False)
+    check("deletion failed: it is said, with the path",
+          "could not delete the answer ISO" in out and answer_iso in out, True)
+    check("deletion failed: the path is remembered in the state",
+          watch.load_state(state_path).get("answer_iso_pending"), [answer_iso])
+
+    # Next pass: the domain is the media-less one, the state still knows.
+    stopped, _, out = ready_pass(state_path, "<domain><devices/></domain>")
+    check("next pass: the remembered answer ISO is deleted",
+          os.path.exists(answer_iso), False)
+    check("the Windows medium is never touched",
+          os.path.exists(windows_iso), True)
+    check("and only then does the timer stop", stopped, True)
+    check("nothing is left pending",
+          "answer_iso_pending" in watch.load_state(state_path), False)
+
+    # Replayed on a console already cleaned: terminal at once, no error.
+    stopped, _, out = ready_pass(state_path, xml)
+    check("an ISO already gone is not an error",
+          (stopped, "could not delete" in out), (True, False))
+
+# The name is copied from guest_steps.py: pin it to the path plan_steps()
+# really hands to build.py.
+sys.path.insert(0, str(HERE.parent))
+os.environ.setdefault("NIVUUS_DESK_AGENT_DIR", "/nonexistent/desk-agent")
+os.environ.setdefault("NIVUUS_PACKAGES_DIR", "/nonexistent/packages")
+import guest_steps  # noqa: E402
+with tempfile.TemporaryDirectory() as tmp:
+    _answers = {"dedicated_nvme": "/dev/nvme1n1", "windows_iso": "/x.iso",
+                "ltsc_key": "k", "admin_password": "p", "apollo_password": "a",
+                "disk_mode": "wipe"}
+    _plan = {s.name: s for s in guest_steps.plan_steps(
+        _answers, {}, tmp, size_of=lambda disk: 2 * 10 ** 12,
+        definition_on_disk=lambda: False)}
+    _cmd = _plan["build"].command
+    check("ANSWER_ISO_NAME is the file guest_steps builds",
+          os.path.basename(_cmd[_cmd.index("--output") + 1]),
+          watch.ANSWER_ISO_NAME)
 
 if failures:
     for item in failures:

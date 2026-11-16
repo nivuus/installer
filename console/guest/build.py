@@ -36,6 +36,7 @@ import autounattend  # noqa: E402
 import media  # noqa: E402
 import payload  # noqa: E402
 import unattend_iso  # noqa: E402
+import desk_agent  # noqa: E402
 from retro import retro_state_path  # noqa: E402
 from guest_secrets import secret_path  # noqa: E402
 
@@ -170,6 +171,35 @@ def build_retro_psd1(cli_value: bool | None,
     return apollo.render_retro(enabled), enabled
 
 
+def build_agent_psd1(drivers_dir: Path) -> tuple[str, object]:
+    """Render config/agent.psd1 from what the desk package published NOW.
+
+    Returns (content, PublishedAgent or None). The decision comes from desk's
+    own publication, never from drivers/agent/ being there: the drivers
+    directory is a persistent working tree, and "an agent.exe is lying
+    there" says nothing about who built it or when.
+
+    When desk published an agent, the staged copy must BE that agent: a
+    drivers/agent/agent.exe that does not match desk's manifest - desk was
+    updated since the payload was fetched, or the file was replaced - is
+    refused here, naming the command that restages it.
+    """
+    try:
+        published = desk_agent.published_agent()
+        if published is None:
+            return apollo.render_agent(None), None
+        staged = drivers_dir / payload.AGENT_DIRNAME / desk_agent.BINARY_NAME
+        if not staged.is_file():
+            raise payload.PayloadError(
+                f"the desk package published an agent (sha256 "
+                f"{published.sha256}) but {staged} is absent. Stage it with:\n"
+                f"  python3 fetch_payload.py --drivers-dir {drivers_dir}")
+        desk_agent.verify(published, staged)
+    except desk_agent.DeskAgentError as exc:
+        raise payload.PayloadError(str(exc)) from exc
+    return apollo.render_agent(published.sha256, published.desk_version), published
+
+
 def enforce_disk_mode_guard(disk_mode: str, target_disk_verified: bool) -> None:
     """Refuse a rebuild the operator has not explicitly signed off on.
 
@@ -242,6 +272,16 @@ def main(argv=None) -> int:
             else:
                 print(f"  retro: {'enabled' if retro_enabled else 'disabled'} "
                       "(--retro/--no-retro given explicitly)")
+            agent_psd1, agent = build_agent_psd1(Path(args.drivers_dir))
+            (config / "agent.psd1").write_text(agent_psd1)
+            if agent is None:
+                print("  desk agent: SKIPPED - the desk package is not "
+                      f"installed (nothing published under "
+                      f"{desk_agent.agent_dir()}); the guest is built "
+                      "without it")
+            else:
+                print(f"  desk agent: sha256 {agent.sha256} "
+                      f"(desk {agent.desk_version})")
             sources = payload.PayloadSources(
                 provision_dir=HERE / "provision", probe_dir=HERE / "probe",
                 drivers_dir=Path(args.drivers_dir), config_dir=config,

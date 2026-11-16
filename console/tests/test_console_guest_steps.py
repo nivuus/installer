@@ -41,6 +41,12 @@ spec.loader.exec_module(steps)
 import qemu_build  # noqa: E402
 sys.path.insert(0, HERE)
 from iso_fixture import fake_iso  # noqa: E402
+import desk_agent_fixture  # noqa: E402
+
+# No desk on this machine unless a test publishes one: the `payload`
+# predicate reads desk's publication, and must not conclude from whatever is
+# installed on the host running this suite.
+DESK_AGENT_DIR = desk_agent_fixture.isolate()
 
 failures = []
 
@@ -301,18 +307,15 @@ def arg(cmd, flag):
     return cmd[cmd.index(flag) + 1] if flag in cmd else None
 
 
-# --- le temoin du payload est COPIE de fetch_payload.py, jamais devine --- #
-# guest_steps.py ne peut pas importer fetch_payload.py (regle du module :
-# rien sous console/guest/ n est importable depuis la phase activate, ces
-# fichiers importent jinja2). Le chemin est donc recopie - et une copie qui
-# derive silencieusement redonne exactement le defaut corrige ici : une
-# etape payload sautee alors qu agent.exe manque. Cette assertion lit la
-# SOURCE de fetch_payload.py et exige que le litteral y soit encore.
-_FETCH_SRC = pathlib.Path(CONSOLE, "guest", "fetch_payload.py").read_text()
-check("le temoin du payload est bien agent/agent.exe",
-      str(steps.PAYLOAD_WITNESS), os.path.join("agent", "agent.exe"))
-check("et fetch_payload.py depose TOUJOURS agent.exe a cet endroit",
-      'drivers_dir / "agent" / "agent.exe"' in _FETCH_SRC, True)
+# --- the agent directory is COPIED from fetch_payload.py, never guessed --- #
+# guest_steps.py cannot import fetch_payload.py (module rule: nothing under
+# console/guest/ is importable from the activate phase, those files import
+# jinja2), so the directory name is copied. This suite CAN import it, and
+# compares the two values rather than reading source text.
+sys.path.insert(0, os.path.join(CONSOLE, "guest"))
+import fetch_payload  # noqa: E402
+check("guest_steps and fetch_payload name the same agent directory",
+      str(steps.PAYLOAD_AGENT_DIR), fetch_payload.AGENT_DIRNAME)
 
 
 NO_DOMAIN = {"dumpxml": (1, ""), "domstate": (1, "")}
@@ -465,35 +468,74 @@ with tempfile.TemporaryDirectory() as tmp:
           other["secrets"].already_done(), False)
 
     # payload: the predicate stays shallow - fetch_payload.py is offline-first
-    # and cheap to replay - but shallow is NOT "any file at all". It names one
-    # witness, agent.exe, because that is the piece an INHERITED payload/ tree
-    # (produced by an older fetch_payload.py, on a host that has run this
-    # before) cannot have: agent.exe is copied out of the package itself, it
-    # is not downloaded. "Any file" accepted such a tree, skipped the step,
-    # and left step 40 of the provisioning with no agent to install.
+    # and cheap to replay - but shallow is NOT "any file at all". It names the
+    # pinned installers (a tree staged before they were downloads, or before a
+    # pin bump, must replay the step) and the desk agent, judged against what
+    # desk published at the moment the question is asked.
     payload_dir = pathlib.Path(payload_cmd[payload_cmd.index("--drivers-dir") + 1])
     payload_dir.mkdir(parents=True, exist_ok=True)
     check("un repertoire de payload vide n est pas fait",
           st["payload"].already_done(), False)
     (payload_dir / "nvidia").mkdir()
     (payload_dir / "nvidia" / "driver.exe").write_text("x")
-    check("UN ARBRE PAYLOAD HERITE, PEUPLE MAIS SANS agent.exe, N EST PAS FAIT",
+    check("an installer under another name is not the pinned one",
           st["payload"].already_done(), False)
-    witness = payload_dir / steps.PAYLOAD_WITNESS
-    witness.parent.mkdir(parents=True, exist_ok=True)
-    check("un repertoire agent/ vide ne suffit pas non plus",
-          st["payload"].already_done(), False)
-    witness.write_text("MZ")
-    # agent.exe alone is no longer enough: the pinned NVIDIA and Apollo
-    # installers are downloads too, and a tree staged before they were - the
-    # reference host's, 2026-10-08 - must replay the step. An installer under
-    # another name (driver.exe above, or a previous pin) does not count.
-    check("agent.exe without the pinned installers is not done",
-          st["payload"].already_done(), False)
-    for rel in steps.payload_witnesses()[1:]:
+    for rel in steps.payload_witnesses():
         (payload_dir / rel).parent.mkdir(parents=True, exist_ok=True)
         (payload_dir / rel).write_text("MZ")
-    check("agent.exe plus the pinned installers is done",
+    # NO DESK ON THIS MACHINE: a console without desk is a valid machine,
+    # and its payload is complete without any agent.
+    check("without desk, the pinned installers alone make the payload done",
+          st["payload"].already_done(), True)
+    # ...but an agent.exe left in the tree by an earlier run is stale: the
+    # step must replay so fetch_payload.py removes it.
+    staged_agent = payload_dir / steps.PAYLOAD_AGENT_DIR
+    staged_agent.mkdir()
+    (staged_agent / "agent.exe").write_bytes(b"MZ stale")
+    check("without desk, a leftover agent/ makes the payload NOT done",
+          st["payload"].already_done(), False)
+
+    # DESK PUBLISHES AN AGENT: the payload is done only once it carries
+    # that agent - binary AND the manifest fetch_payload.py stages last.
+    published = desk_agent_fixture.publish(DESK_AGENT_DIR, b"MZ agent v1", "1.0.0")
+    check("a staged binary with no manifest is not done",
+          st["payload"].already_done(), False)
+    (staged_agent / "agent.manifest.json").write_bytes(published)
+    check("the published agent, staged with its manifest, is done",
+          st["payload"].already_done(), True)
+    (staged_agent / "agent.exe").unlink()
+    check("the manifest without the binary is not done",
+          st["payload"].already_done(), False)
+    (staged_agent / "agent.exe").write_bytes(b"MZ agent v1")
+
+    # UPDATING DESK REPUBLISHES: the same payload tree is no longer current,
+    # with no console update in between - the next activation restages it.
+    desk_agent_fixture.publish(DESK_AGENT_DIR, b"MZ agent v2", "1.1.0")
+    check("DESK REPUBLISHED: THE STAGED AGENT IS STALE, THE STEP REPLAYS",
+          st["payload"].already_done(), False)
+    # The real fetch_payload.py is what repairs it (same environment).
+    fetch_payload.install_desk_agent(payload_dir)
+    check("after the real fetch, the payload carries the new agent",
+          (staged_agent / "agent.exe").read_bytes(), b"MZ agent v2")
+    check("and the step is done again", st["payload"].already_done(), True)
+
+    # DESK INSTALLED BUT NOTHING PUBLISHED (its activation has not run yet):
+    # never "done" - the step runs and fetch_payload.py refuses by name.
+    (DESK_AGENT_DIR / "agent.manifest.json").unlink()
+    (DESK_AGENT_DIR / "agent.exe").unlink()
+    desk_agent_fixture.install_desk_package()
+    check("desk installed and unpublished: the payload is not done",
+          st["payload"].already_done(), False)
+    check_raises("and the real fetch refuses rather than ship the stale agent",
+                 fetch_payload.FetchError,
+                 lambda: fetch_payload.install_desk_agent(payload_dir))
+    # Back to "no desk at all" for the rest of this suite.
+    os.remove(os.path.join(os.environ["NIVUUS_PACKAGES_DIR"],
+                           "desk", "nivuus-package.yaml"))
+    fetch_payload.install_desk_agent(payload_dir)
+    check("desk gone: the real fetch removes the staged agent",
+          staged_agent.exists(), False)
+    check("and the payload is done without one",
           st["payload"].already_done(), True)
 
     # build: the ISO alone never suffices - the fingerprint must agree.
@@ -1855,6 +1897,45 @@ with tempfile.TemporaryDirectory() as tmp:
     check("une ISO courante dont le mode a ete DIT se saute normalement",
           dit.already_done(), True)
 
+
+
+# --- the answer ISO, once consumed, is not rebuilt --------------------------
+# guest-ready-watch.py deletes the answer ISO (product key, two passwords)
+# right after redefining the domain without install media. From then on the
+# ISO is ABSENT ON PURPOSE: the build step must read that as done, or every
+# later activation would write the secrets back to disk for nobody.
+def _build_done_without_iso(tmp, dumpxml, **kwargs):
+    steps.windows_media_path(tmp).write_bytes(b"windows medium")
+    st = by_name(plan(tmp, FakeVirsh({"dumpxml": dumpxml,
+                                      "domstate": (0, "shut off\n")}), **kwargs))
+    iso = pathlib.Path(arg(st["build"].command, "--output"))
+    check("(fixture) there is no answer ISO", iso.exists(), False)
+    return st["build"].already_done()
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    regime = "<domain><devices>" + nvme_hostdev() + "</devices></domain>"
+    check("ISO consumed: a media-less domain on the right disk needs no build",
+          _build_done_without_iso(tmp, (0, regime)), True)
+with tempfile.TemporaryDirectory() as tmp:
+    check("no ISO and no domain at all: the ISO must be built",
+          _build_done_without_iso(tmp, (1, "")), False)
+with tempfile.TemporaryDirectory() as tmp:
+    other = "<domain><devices>" + nvme_hostdev(AUTRE_NVME) + "</devices></domain>"
+    check("no ISO and a media-less domain on ANOTHER disk: build",
+          _build_done_without_iso(tmp, (0, other)), False)
+with tempfile.TemporaryDirectory() as tmp:
+    regime = "<domain><devices>" + nvme_hostdev() + "</devices></domain>"
+    check("no ISO and an identity that cannot be read: build, never skip",
+          _build_done_without_iso(tmp, (0, regime),
+                                  pci_address_of=lambda disk: None), False)
+with tempfile.TemporaryDirectory() as tmp:
+    carrying = ("<domain><devices>" + nvme_hostdev()
+                + f"<disk device='cdrom'><source file='{steps.windows_media_path(tmp)}'/></disk>"
+                + f"<disk device='cdrom'><source file='{os.path.join(tmp, 'nivuus-unattend.iso')}'/></disk>"
+                + "</devices></domain>")
+    check("no ISO while the domain still NAMES it: the ISO was lost, build",
+          _build_done_without_iso(tmp, (0, carrying)), False)
 
 if failures:
     for item in failures:

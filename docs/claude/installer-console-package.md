@@ -167,3 +167,27 @@ things about it are easy to break:
   the wake path's wrong bridge, `/opt/nivuus/…` paths, the missing `winrm`
   client) are unchanged and stay documented in `console/README.md`'s
   **Limites connues** — a separate, still-open item.
+
+* **`agent.exe` belongs to `desk`, and the answer ISO is deleted once consumed
+  (2026-11-16).** The package tracks no agent binary and pins no sha256:
+  `console/desk_agent.py` reads what `desk` publishes under
+  `/opt/nivuus/desk/agent/` (`agent.exe` + `agent.manifest.json`, manifest
+  written last) at the moment a payload is staged, verifies the binary
+  against the manifest, and refuses everything in between — `desk` installed
+  with nothing published is an error, `desk` absent is an explicit skip
+  (`config/agent.psd1` `Enabled = $false`, read by stages 40 and 99). The
+  `payload` predicate compares the staged manifest with the published one, so
+  a `desk` update restages the agent at the next `console` activation with no
+  ordering between the two updates. **Not covered: first boot** — the
+  activation units are unordered, so `console` can reach `payload` before
+  `desk` has published, fails by name and retries at the next boot. Contract
+  fixture shared with `nivuus/desk`:
+  `console/tests/fixtures/agent-publication-contract.json`, pinned by sha256
+  on both sides. Separately, `guest-ready-watch.py` now deletes
+  `nivuus-unattend.iso` (product key, two passwords, owned by the qemu user)
+  right after the media-less redefinition succeeds — its path is read from
+  the domain's own XML before redefining, a failed deletion is remembered in
+  the state file and keeps the timer running — and `guest_steps.build_done()`
+  reads "no ISO + media-less domain on the right disk" as done, so nothing
+  rebuilds it. `PROVISION_VERSION` was left at `B4`: the stage list did not
+  move and a guest provisioned with an agent is identical.

@@ -60,6 +60,7 @@ def make_tree(root: pathlib.Path) -> "payload.PayloadSources":
     (drivers / "winfsp" / "winfsp-2.0.msi").write_bytes(b"MSI")
     (drivers / "agent").mkdir()
     (drivers / "agent" / "agent.exe").write_bytes(b"MZ")
+    (drivers / "agent" / "agent.manifest.json").write_text("{}\n")
     (drivers / "winget" / "deps").mkdir(parents=True)
     (drivers / "winget" / "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle").write_bytes(b"PK")
     (drivers / "winget" / "License1.xml").write_text("<License/>\n")
@@ -74,6 +75,11 @@ def make_tree(root: pathlib.Path) -> "payload.PayloadSources":
     # promised binaries to actually be present, so a placeholder comment
     # (unlike the other config/* stubs above) is refused, not ignored.
     (config / "retro.psd1").write_text("@{\n    Enabled = $false\n}\n")
+    # Same contract for the desk agent toggle. This tree stands for a host
+    # where desk published an agent; the agent-less host has its own cases
+    # at the end of this file.
+    (config / "agent.psd1").write_text(
+        "@{\n    Enabled = $true\n    Sha256 = 'ab'\n    DeskVersion = '1'\n}\n")
     return payload.PayloadSources(provision_dir=root / "provision",
                                   probe_dir=root / "probe",
                                   drivers_dir=drivers,
@@ -86,7 +92,7 @@ with tempfile.TemporaryDirectory() as tmp:
     sources = make_tree(root / "src")
 
     check("nothing missing on a complete tree",
-          payload.missing_binaries(sources.drivers_dir), [])
+          payload.missing_binaries(sources.drivers_dir, agent=True), [])
 
     plan = dict(payload.plan_payload(sources))
     dests = sorted(plan.values())
@@ -274,9 +280,17 @@ with tempfile.TemporaryDirectory() as tmp:
     root = pathlib.Path(tmp)
     missing = payload.missing_binaries(root)
     joined = "\n".join(missing)
-    for needle in ["nvidia", "apollo", "steam", "virtio", "winfsp", "agent",
-                   "winget"]:
+    for needle in ["nvidia", "apollo", "steam", "virtio", "winfsp", "winget"]:
         check(f"empty payload reports {needle} missing", needle in joined, True)
+    # The desk agent is required only when the toggle says desk published
+    # one: a console without desk is a valid machine.
+    check("an agent-less payload does not report the agent missing",
+          "agent" in joined, False)
+    with_agent = "\n".join(payload.missing_binaries(root, agent=True))
+    check("with the agent expected, agent.exe is reported missing",
+          "(agent.exe)" in with_agent, True)
+    check("and so is its manifest",
+          "(agent.manifest.json)" in with_agent, True)
     # SudoVDA rides inside the Apollo installer; requiring it separately would
     # install the same IDD twice.
     check("sudovda is not required separately", "sudovda" in joined.lower(), False)
@@ -324,25 +338,81 @@ with tempfile.TemporaryDirectory() as tmp:
     check("missing netkvm fails the build",
           any("netkvm" in m for m in payload.missing_binaries(root)), True)
 
-# The irreplaceable artefact deserves its own message: no machine can rebuild
-# agent.exe once the current VM is wiped.
+# The desk agent follows config/agent.psd1, the file the guest itself reads.
+def _agent_sources(root: pathlib.Path, toggle: str | None):
+    sources = make_tree(root / "src")
+    toggle_path = sources.config_dir / "agent.psd1"
+    if toggle is None:
+        toggle_path.unlink()
+    else:
+        toggle_path.write_text(toggle)
+    return sources
+
+
+_AGENT_OFF = "@{\n    Enabled = $false\n}\n"
+
+# Expected but not staged: refused, and the message names the remedy.
 with tempfile.TemporaryDirectory() as tmp:
     root = pathlib.Path(tmp)
-    src = root / "src"
-    (src / "provision").mkdir(parents=True)
-    (src / "probe").mkdir()
-    drivers = src / "drivers"
-    _make_complete_payload(drivers)
-    shutil.rmtree(drivers / "agent")
-    sources = payload.PayloadSources(
-        provision_dir=src / "provision", probe_dir=src / "probe",
-        drivers_dir=drivers)
+    sources = make_tree(root / "src")
+    shutil.rmtree(sources.drivers_dir / "agent")
     try:
         payload.stage_payload(root / "dest", sources, "marker")
-        failures.append("stage_payload: accepted a payload with no agent.exe")
+        failures.append("stage_payload: accepted a payload that promises an "
+                        "agent and carries none")
     except payload.PayloadError as e:
-        if "extracted from the current Windows VM" not in str(e):
-            failures.append(f"stage_payload error missing the agent warning: {e}")
+        check("the refusal names agent.exe", "agent.exe" in str(e), True)
+        check("and the command that stages it",
+              "fetch_payload.py --drivers-dir" in str(e), True)
+
+# A binary staged without its manifest was never completely staged
+# (fetch_payload.py writes the manifest last): refused as well.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    sources = make_tree(root / "src")
+    (sources.drivers_dir / "agent" / "agent.manifest.json").unlink()
+    try:
+        payload.stage_payload(root / "dest", sources, "marker")
+        failures.append("stage_payload: accepted an agent.exe with no manifest")
+    except payload.PayloadError as e:
+        check("the refusal names the manifest",
+              "agent.manifest.json" in str(e), True)
+
+# Not expected (desk not installed): the build goes through, and an agent
+# left in the persistent drivers tree by an earlier run does NOT ride along.
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    sources = _agent_sources(root, _AGENT_OFF)
+    check("agent off: agent_enabled reads False",
+          payload.agent_enabled(sources.config_dir), False)
+    dest = root / "dest"
+    payload.stage_payload(dest, sources, "marker")
+    payload.verify_staged(dest)
+    check("agent off: a leftover drivers/agent/ is not staged",
+          (dest / "drivers" / "agent").exists(), False)
+    check("agent off: the toggle itself is staged for the guest",
+          (dest / "config" / "agent.psd1").read_text(), _AGENT_OFF)
+    check("agent off: the other drivers still travel",
+          (dest / "drivers" / "steam" / "SteamSetup.exe").is_file(), True)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    sources = _agent_sources(root, _AGENT_OFF)
+    shutil.rmtree(sources.drivers_dir / "agent")
+    payload.stage_payload(root / "dest", sources, "marker")
+    payload.verify_staged(root / "dest")
+
+# A toggle that is absent, or says neither, is never read as "off".
+for label, toggle in (("absent", None), ("undecided", "@{\n}\n")):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        sources = _agent_sources(root, toggle)
+        try:
+            payload.stage_payload(root / "dest", sources, "marker")
+            failures.append(f"stage_payload: read an {label} agent toggle as off")
+        except payload.PayloadError as e:
+            check(f"{label} agent toggle: the refusal names the file",
+                  "agent.psd1" in str(e), True)
 
 # The rendered configuration must ride in the payload, or 25-apollo has
 # nothing to copy and 50-power has no password to set autologon with.
@@ -377,6 +447,7 @@ with tempfile.TemporaryDirectory() as tmp:
     for name in ["sunshine.conf", "apps.json", "secrets.psd1"]:
         (cfg / name).write_text("x")
     (cfg / "retro.psd1").write_text("@{\n    Enabled = $false\n}\n")
+    (cfg / "agent.psd1").write_text("@{\n    Enabled = $false\n}\n")
     sources = payload.PayloadSources(
         provision_dir=src / "provision", probe_dir=src / "probe",
         drivers_dir=drivers, config_dir=cfg, assets_dir=src / "assets")

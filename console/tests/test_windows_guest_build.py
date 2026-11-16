@@ -18,8 +18,15 @@ import tempfile
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "console" / "guest"))
 
+sys.path.insert(0, str(REPO / "console"))
+sys.path.insert(0, str(REPO / "console" / "tests"))
 import apollo  # noqa: E402
 import build  # noqa: E402
+import desk_agent_fixture  # noqa: E402
+import payload  # noqa: E402
+
+# No desk on this machine unless a test publishes one.
+DESK_AGENT_DIR = desk_agent_fixture.isolate()
 
 failures = []
 
@@ -339,6 +346,65 @@ if _main_fn is not None:
     check("... and does so UNCONDITIONALLY, retro on or off",
           _write_finder.found_under_if, False)
 
+
+
+# --- config/agent.psd1: rendered from what the desk package published -------
+def _agent_psd1_refused(label, drivers, *needles):
+    try:
+        build.build_agent_psd1(drivers)
+    except payload.PayloadError as exc:
+        for needle in needles:
+            check(f"{label}: the refusal says {needle!r}", needle in str(exc), True)
+        return
+    failures.append(f"{label}: build_agent_psd1 went on")
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    drivers = pathlib.Path(tmp) / "drivers"
+    # A stale agent.exe in the persistent drivers tree must not turn the
+    # toggle on: only desk's publication does.
+    (drivers / "agent").mkdir(parents=True)
+    (drivers / "agent" / "agent.exe").write_bytes(b"MZ stale")
+    text, agent = build.build_agent_psd1(drivers)
+    check("without desk the toggle is off, stale agent.exe or not",
+          (text, agent), ("@{\n    Enabled = $false\n}\n", None))
+    check("payload.py reads that rendering as off",
+          (pathlib.Path(tmp) / "agent.psd1").write_text(text)
+          and payload.agent_enabled(pathlib.Path(tmp)), False)
+
+    content = b"MZ the agent desk published"
+    desk_agent_fixture.publish(DESK_AGENT_DIR, content, "3.1.4")
+    # Published, but the payload still carries the stale file: refused.
+    _agent_psd1_refused("stale staged agent", drivers,
+                        "is not the agent desk published", "fetch the payload again")
+    (drivers / "agent" / "agent.exe").unlink()
+    _agent_psd1_refused("published but not staged", drivers,
+                        "fetch_payload.py --drivers-dir")
+    (drivers / "agent" / "agent.exe").write_bytes(content)
+    text, agent = build.build_agent_psd1(drivers)
+    import hashlib  # noqa: E402
+    digest = hashlib.sha256(content).hexdigest()
+    check("published and staged: the toggle is on and carries desk's digest",
+          text, "@{\n    Enabled = $true\n"
+                f"    Sha256 = '{digest}'\n    DeskVersion = '3.1.4'\n}}\n")
+    check("payload.py reads that rendering as on",
+          (pathlib.Path(tmp) / "agent.psd1").write_text(text)
+          and payload.agent_enabled(pathlib.Path(tmp)), True)
+
+    # desk installed and unpublished: a refusal, not "off".
+    (DESK_AGENT_DIR / "agent.manifest.json").unlink()
+    (DESK_AGENT_DIR / "agent.exe").unlink()
+    desk_agent_fixture.install_desk_package()
+    _agent_psd1_refused("desk installed, nothing published", drivers,
+                        "has not published")
+
+# A value that would break out of the psd1 string is refused.
+for bad in ("1.0'; Remove-Item C:", "1.0\nEnabled = $false", "1.0-\u00e9"):
+    try:
+        apollo.render_agent("ab" * 32, bad)
+        failures.append(f"render_agent accepted the version {bad!r}")
+    except apollo.ApolloError:
+        pass
 
 if failures:
     print(f"FAIL ({len(failures)})")

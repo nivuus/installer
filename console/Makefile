@@ -44,7 +44,7 @@ test:
 	          test_console_vm_control_units \
 	          test_console_guest_steps test_console_guest_ready \
 	          test_console_guest_secret_path \
-	          test_console_nvme_identity \
+	          test_console_nvme_identity test_console_desk_agent \
 	          test_vm_wake_gate \
 	          test_retro_marker_bridge \
 	          test_windows_guest_apollo test_windows_guest_autounattend \

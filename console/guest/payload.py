@@ -71,7 +71,6 @@ REQUIRED_BINARIES = [
     ("steam", "SteamSetup.exe", "Steam installer"),
     ("virtio/netkvm", "*.inf", "NetKVM virtio-net driver"),
     ("winfsp", "*.msi", "WinFsp installer (virtiofs depends on it)"),
-    ("agent", "agent.exe", "Guacamole agent, extracted before the wipe"),
     # winget and its x64 frameworks. Not optional and not behind a toggle:
     # Gaming Services is installed by default, LTSC ships no Store, and
     # winget's msstore source is the only client measured to reach it.
@@ -91,6 +90,20 @@ REQUIRED_BINARIES = [
      "Windows App Runtime framework (same silent failure)"),
 ]
 
+
+# The desk agent rides in drivers/agent/, staged by fetch_payload.py from what
+# the desk package published (console/desk_agent.py). It is required exactly
+# when config/agent.psd1 says Enabled = $true, i.e. when desk is installed on
+# the build host: a console without desk is a valid machine, and its payload
+# carries no agent at all. The manifest travels with the binary so the staged
+# pair can be told apart from a binary of unknown origin.
+AGENT_DIRNAME = "agent"
+AGENT_BINARIES = [
+    (AGENT_DIRNAME, "agent.exe", "desk agent, published by the desk package"),
+    (AGENT_DIRNAME, "agent.manifest.json",
+     "manifest of the desk agent (written last by fetch_payload.py: its "
+     "absence means the agent was never completely staged)"),
+]
 
 # The one subdirectory of drivers/ that exists only for retrogaming. Named
 # once, because plan_payload() drops it BY THAT NAME when the option is off.
@@ -115,16 +128,19 @@ RETRO_BINARIES = [
 ]
 
 
-def missing_binaries(drivers_dir: Path, retro: bool = False) -> list[str]:
+def missing_binaries(drivers_dir: Path, retro: bool = False,
+                     agent: bool = False) -> list[str]:
     """Return a human-readable list of the offline binaries not provided.
 
     `retro` comes from the rendered toggle (see retro_enabled), never from
     the directory's own presence: asking "is drivers/retro/ there?" would
     read a fetch that failed halfway as "retrogaming was not wanted", the one
-    confusion this whole option is written to avoid.
+    confusion this whole option is written to avoid. `agent` follows the same
+    rule with config/agent.psd1 (see agent_enabled).
     """
     missing = []
-    required = REQUIRED_BINARIES + (RETRO_BINARIES if retro else [])
+    required = (REQUIRED_BINARIES + (AGENT_BINARIES if agent else [])
+                + (RETRO_BINARIES if retro else []))
     for subdir, pattern, what in required:
         where = drivers_dir.joinpath(*subdir.split("/"))
         if not list(where.glob(pattern)):
@@ -147,9 +163,23 @@ def retro_enabled(config_dir: Path) -> bool:
     is the same confusion (absent vs. explicitly disabled) the file exists
     to prevent.
     """
-    path = config_dir / "retro.psd1"
+    return _toggle(config_dir / "retro.psd1", "retrogaming")
+
+
+def agent_enabled(config_dir: Path) -> bool:
+    """Read the desk-agent toggle this build rendered for the guest.
+
+    Same contract as retro_enabled, for config/agent.psd1: 40-agent.ps1 and
+    99-marker.ps1 decide from that file whether an agent is expected, so the
+    build requires drivers/agent/ exactly when it says so. build.py renders
+    it from what the desk package published (console/desk_agent.py).
+    """
+    return _toggle(config_dir / "agent.psd1", "desk agent")
+
+
+def _toggle(path: Path, what: str) -> bool:
     if not path.is_file():
-        raise PayloadError(f"missing the retrogaming toggle: {path}")
+        raise PayloadError(f"missing the {what} toggle: {path}")
     text = path.read_text()
     if re.search(r"Enabled\s*=\s*\$true", text):
         return True
@@ -157,7 +187,7 @@ def retro_enabled(config_dir: Path) -> bool:
         return False
     raise PayloadError(
         f"{path} carries no 'Enabled = $true' nor 'Enabled = $false': the "
-        "retrogaming state cannot be guessed, and guessing 'off' would "
+        f"{what} state cannot be guessed, and guessing 'off' would "
         "silently drop the feature from a build that asked for it")
 
 
@@ -183,12 +213,17 @@ def plan_payload(sources: PayloadSources) -> list[tuple[Path, str]]:
     `fetch_payload.py --retro` leaves ~30 MB behind that a later build with
     the option unchecked would otherwise still ship - the very cost the
     option exists to avoid, and a guest carrying an interpreter and a
-    wheelhouse it is told never to open.
+    wheelhouse it is told never to open. drivers/agent/ is dropped the same
+    way when the desk agent is off: a binary staged while desk was installed
+    must not ride into a payload that says there is no agent.
     """
     retro = (retro_enabled(sources.config_dir)
              if sources.config_dir is not None else False)
+    agent = (agent_enabled(sources.config_dir)
+             if sources.config_dir is not None else False)
     drivers = [(src, rel) for src, rel in _walk(sources.drivers_dir, "drivers")
-               if retro or not rel.startswith(f"drivers/{RETRO_DIRNAME}/")]
+               if (retro or not rel.startswith(f"drivers/{RETRO_DIRNAME}/"))
+               and (agent or not rel.startswith(f"drivers/{AGENT_DIRNAME}/"))]
     entries = (_walk(sources.provision_dir, "provision")
                + _walk(sources.probe_dir, "probe")
                + drivers)
@@ -236,14 +271,19 @@ def stage_payload(dest_root: Path, sources: PayloadSources, marker: str) -> None
     # configuration, therefore no retrogaming either.
     retro = (retro_enabled(sources.config_dir)
              if sources.config_dir is not None else False)
-    missing = missing_binaries(sources.drivers_dir, retro=retro)
+    agent = (agent_enabled(sources.config_dir)
+             if sources.config_dir is not None else False)
+    missing = missing_binaries(sources.drivers_dir, retro=retro, agent=agent)
     if missing:
         error_msg = ("offline payload incomplete, refusing to build:\n  - "
                      + "\n  - ".join(missing))
-        if any("agent.exe" in item for item in missing):
+        if any(f"({name})" in item for item in missing
+               for _dir, name, _what in AGENT_BINARIES):
             error_msg += (
-                "\n\nagent.exe must be extracted from the current Windows VM "
-                "BEFORE it is wiped - no machine can rebuild it afterwards."
+                "\n\nconfig/agent.psd1 says Enabled = $true (the desk "
+                "package published an agent), so drivers/agent/ must carry "
+                "it. Stage it with:\n"
+                f"  python3 fetch_payload.py --drivers-dir {sources.drivers_dir}"
             )
         if retro:
             # Name the command, the way every guest-side message here does: a
@@ -306,6 +346,7 @@ def verify_staged(dest_root: Path) -> None:
         "config/apps.json",
         "config/secrets.psd1",
         "config/retro.psd1",
+        "config/agent.psd1",
     ]
     for rel in required:
         path = dest_root / rel
@@ -314,7 +355,8 @@ def verify_staged(dest_root: Path) -> None:
     # Required above, so it is there: the staged toggle is the same one the
     # guest will read, and it alone says whether drivers/retro/ is required.
     missing = missing_binaries(dest_root / "drivers",
-                               retro=retro_enabled(dest_root / "config"))
+                               retro=retro_enabled(dest_root / "config"),
+                               agent=agent_enabled(dest_root / "config"))
     if missing:
         raise PayloadError(
             "staged payload is incomplete:\n  - "

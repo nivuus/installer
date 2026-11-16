@@ -78,8 +78,16 @@ stale, pre-Secure-Boot leftover the guard exists to catch, it is the one
 THIS package's own pipeline created, already keyed, a short while ago. See
 guard_fresh_varstore()'s docstring in domain.py for the full argument.
 
+Once that redefinition has succeeded, the answer ISO has no reader left and
+is DELETED from the host (remove_answer_iso()): it carries the product key,
+the administrator password and the Apollo password in clear, and it is owned
+by the qemu user so the guest could open it. Deleting it earlier would break
+a Setup still reading it; never deleting it left those secrets on disk for
+the life of the console. guest_steps.py's `build` predicate reads "no ISO
+and a media-less domain" as done, so nothing rebuilds it.
+
 Consequently the timer does NOT stop on READY alone - only once the
-redefinition has actually succeeded. Stopping on READY unconditionally
+redefinition has actually succeeded and the ISO is gone. Stopping on READY unconditionally
 would mean a redefinition that fails once (a transient libvirt hiccup, disk
 full, anything) never gets retried, and the domain keeps its install media
 forever - the exact failure this whole mechanism exists to prevent. See
@@ -114,6 +122,7 @@ import socket
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ElementTree
 
 VM_NAME = "Windows"
 WINRM_PORT = 5985
@@ -535,6 +544,57 @@ def redefine_steady_state(run=subprocess.run,
     return getattr(proc, "returncode", 1) == 0
 
 
+# guest_steps.py's own name for the answer ISO (`iso_out`, under the guest
+# workdir). Copied, not imported: this script runs standalone from
+# /usr/local/sbin. test_console_guest_ready.py pins it against the path
+# guest_steps.plan_steps() really hands to build.py.
+ANSWER_ISO_NAME = "nivuus-unattend.iso"
+
+
+def answer_iso_paths(domain_xml: str) -> list[str]:
+    """The answer ISO(s) the domain carries, read from its own definition.
+
+    The workdir is a wizard answer this script never receives; the domain's
+    XML is where the path actually used is written. Only a disk source named
+    ANSWER_ISO_NAME counts - never the Windows medium, never anything else
+    the domain happens to mount.
+    """
+    try:
+        root = ElementTree.fromstring(domain_xml)
+    except ElementTree.ParseError:
+        return []
+    paths = []
+    for source in root.iter("source"):
+        path = source.get("file") or ""
+        if os.path.basename(path) == ANSWER_ISO_NAME and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def remove_answer_iso(paths: list[str], unlink=os.unlink) -> list[str]:
+    """Delete each answer ISO; return the paths that could NOT be removed.
+
+    Already gone counts as removed. The running qemu keeps the file open
+    until the guest powers off, which unlink does not disturb; the next
+    start reads the media-less definition and never looks for it.
+    """
+    remaining = []
+    for path in paths:
+        try:
+            unlink(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            print(f"guest-ready: could not delete the answer ISO {path}: "
+                  f"{exc.strerror or exc}", file=sys.stderr)
+            remaining.append(path)
+        else:
+            print(f"guest-ready: answer ISO deleted ({path}) - it carried "
+                  "the product key and two passwords, and the domain no "
+                  "longer reads it")
+    return remaining
+
+
 def stop_self(run=subprocess.run) -> None:
     """Stop the timer that re-triggers this script - there is nothing left
     to learn once a terminal state is reached. Best-effort: if systemctl
@@ -565,7 +625,8 @@ def _marker_detail(marker_text: str | WinrmClientFailure | None,
 
 def main(*, domstate_fn=None, ip_fn=None, probe_fn=None, marker_fn=None,
          failure_fn=None, version_fn=None, redefine_fn=None, stop_fn=None,
-         state_path: str | None = None, now_fn=None) -> int:
+         state_path: str | None = None, now_fn=None, dumpxml_fn=None,
+         unlink_fn=None) -> int:
     domstate_fn = domstate_fn or query_domstate
     ip_fn = ip_fn or find_guest_ip
     probe_fn = probe_fn or probe_port
@@ -575,6 +636,8 @@ def main(*, domstate_fn=None, ip_fn=None, probe_fn=None, marker_fn=None,
     redefine_fn = redefine_fn or redefine_steady_state
     stop_fn = stop_fn or stop_self
     now_fn = now_fn or time.time
+    dumpxml_fn = dumpxml_fn or query_dumpxml
+    unlink_fn = unlink_fn or os.unlink
     state_path = state_path or STATE_PATH
 
     state = load_state(state_path)
@@ -633,9 +696,21 @@ def main(*, domstate_fn=None, ip_fn=None, probe_fn=None, marker_fn=None,
                if isinstance(marker_text, str) and not ready else None)
     result = classify(domstate=domstate, ready=ready, elapsed_s=elapsed,
                       failed=failure is not None)
-    save_state(state_path, {"first_running_at": first_running_at,
-                            "classification": result,
-                            "last_probe_at": now})
+    # Read BEFORE the redefinition, which removes the ISO from the domain:
+    # the definition is the only place its path is written. Paths a previous
+    # pass could not delete are carried in the state, since by then the
+    # domain may no longer name them.
+    pending = state.get("answer_iso_pending")
+    iso_paths = [p for p in pending if isinstance(p, str)] if isinstance(
+        pending, list) else []
+    if result == READY:
+        iso_paths += [p for p in answer_iso_paths(dumpxml_fn())
+                      if p not in iso_paths]
+    new_state = {"first_running_at": first_running_at,
+                 "classification": result, "last_probe_at": now}
+    if iso_paths:
+        new_state["answer_iso_pending"] = iso_paths
+    save_state(state_path, new_state)
 
     if result == READY:
         print(f"guest-ready: temoin de provisionnement a jour (version "
@@ -650,7 +725,15 @@ def main(*, domstate_fn=None, ip_fn=None, probe_fn=None, marker_fn=None,
         if redefine_fn():
             print("guest-ready: domaine redefini sans les medias "
                  "d installation")
-            stop_fn()
+            # Only now: until the definition stopped naming it, a start of
+            # the domain would still look for the ISO.
+            remaining = remove_answer_iso(iso_paths, unlink_fn)
+            new_state.pop("answer_iso_pending", None)
+            if remaining:
+                new_state["answer_iso_pending"] = remaining
+            save_state(state_path, new_state)
+            if not remaining:
+                stop_fn()
         else:
             print("guest-ready: la redefinition sans les medias a echoue - "
                  "le domaine garde les medias d installation ; nouvelle "
