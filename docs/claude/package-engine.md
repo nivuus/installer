@@ -52,16 +52,13 @@ touching it:
   regardless, since that runs as root. The rule protects against accident and
   ordering mistakes — real, worth having — but must be described as that, not
   as a security boundary. Real sandboxing would be its own project.
-* **`chroot_base.py:9` imports `crypt`, removed from the Python stdlib in 3.13
-  (PEP 594).** Used for exactly one thing (line 98): hashing the user
-  account's password. The live ISO builds on **bookworm**
-  (`iso-build/auto/config --distribution bookworm`), Python 3.11, so
-  production is unaffected today — but `run.py` cannot even be imported on a
-  Python 3.13 host, and the day the ISO base moves to trixie the installer
-  breaks at the step that creates the user account, at the very end of an
-  otherwise successful install. Remedies: `passlib`, `openssl passwd -6`, or
-  `chpasswd -e` inside the chroot. Dated technical debt, not a bug to fix now
-  — out of the package-engine plan's scope.
+* **`crypt` is gone from the engine (fixed 2026-11-16).** It was removed from
+  the stdlib in Python 3.13 (PEP 594) and made `run.py` unimportable there.
+  `chroot_base._user` now hands a clear password to `chpasswd` on stdin
+  inside the target, which hashes it through PAM with the target's own method
+  (yescrypt on Debian); a pre-computed `password_hash` still goes through
+  `chpasswd --encrypted`. Neither is ever on argv. CR, LF and NUL are refused
+  (model and engine): chpasswd reads one `user:password` per line.
 
 Activation uses a stamp (`/var/lib/nivuus/packages/<name>.activated`), not a
 self-disabling unit: an interrupted activation must retry at the next boot

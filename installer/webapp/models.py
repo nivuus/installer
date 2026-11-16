@@ -44,6 +44,14 @@ class UserConfig(BaseModel):
     ssh_port: int = Field(22, ge=1, le=65535)
     password_auth: bool = True
 
+    @field_validator("password", "password_hash")
+    @classmethod
+    def _one_line(cls, v: Optional[str]) -> Optional[str]:
+        # The engine feeds `user:password` lines to chpasswd.
+        if v is not None and any(c in v for c in "\r\n\x00"):
+            raise ValueError("must not contain a line break or NUL")
+        return v
+
     @field_validator("username")
     @classmethod
     def _valid_username(cls, v: str) -> str:

@@ -51,6 +51,14 @@ check("default suite", models.InstallConfig(**base_kwargs(["os-base"])).suite, "
 check("bookworm selectable",
       models.InstallConfig(**base_kwargs(["os-base"]), suite="bookworm").suite, "bookworm")
 
+# --- the account password is one chpasswd line ------------------------------ #
+for bad in ("a\nb", "a\rb", "a\x00b"):
+    check_raises(f"password {bad!r} refused", lambda b=bad: models.InstallConfig(
+        disk={"path": "/dev/sda"}, user={"username": "u", "password": b}))
+check("non-Latin password accepted", models.InstallConfig(
+    disk={"path": "/dev/sda"}, user={"username": "u", "password": "密码 كلمة"}).user.password,
+    "密码 كلمة")
+
 # --- les features VM ont quitte le wizard -------------------------------- #
 for parti in ("kvm-vfio", "gpu-passthrough", "retro"):
     check(f"{parti} n est plus une feature",

@@ -7,7 +7,6 @@ memory guard every host gets whatever the wizard selected.
 from __future__ import annotations
 
 import os
-import crypt
 
 from common.debian import DEFAULT_SUITE
 
@@ -105,6 +104,14 @@ def _hostname(config: dict, target: str) -> None:
     write_file(os.path.join(target, "etc/hosts"), hosts)
 
 
+def _refuse_line_breaks(value: str, field: str) -> None:
+    """chpasswd reads one `user:password` per line: a CR, LF or NUL in the
+    value would end the line early and could name a second account."""
+    if any(c in value for c in "\r\n\x00"):
+        raise StepError(f"config.user.{field} contains a line break or NUL, "
+                        "which chpasswd cannot take")
+
+
 def _user(config: dict, target: str, emit) -> None:
     user = config.get("user", {})
     username = user.get("username")
@@ -115,16 +122,22 @@ def _user(config: dict, target: str, emit) -> None:
     chroot_run(target, ["useradd", "-m", "-s", "/bin/bash",
                         "-G", "sudo", username], check=False)
 
-    # Password: prefer a pre-computed hash; otherwise hash the plaintext here.
+    # Both forms go to chpasswd on stdin, never on argv: argv is
+    # world-readable in /proc while the command runs, and a failing command's
+    # argv is copied into the StepError that the portal streams to
+    # /ws/progress unauthenticated. A pre-computed hash is passed as such; a
+    # clear password is hashed by the TARGET (chpasswd through PAM, with the
+    # method its pam_unix line names - yescrypt on Debian), so the engine
+    # needs no hashing module (crypt left the stdlib in Python 3.13).
     pw_hash = user.get("password_hash")
-    if not pw_hash and user.get("password"):
-        pw_hash = crypt.crypt(user["password"], crypt.mksalt(crypt.METHOD_SHA512))
+    password = user.get("password")
     if pw_hash:
-        # On stdin, never on argv: argv is world-readable in /proc while the
-        # command runs, and a failing command's argv is copied into the
-        # StepError that the portal streams to /ws/progress unauthenticated.
+        _refuse_line_breaks(pw_hash, "password_hash")
         chroot_run(target, ["chpasswd", "--encrypted"],
                    input_text=f"{username}:{pw_hash}\n")
+    elif password:
+        _refuse_line_breaks(password, "password")
+        chroot_run(target, ["chpasswd"], input_text=f"{username}:{password}\n")
     # Lock root login by default (sudo via the user instead).
     chroot_run(target, ["passwd", "-l", "root"], check=False)
 

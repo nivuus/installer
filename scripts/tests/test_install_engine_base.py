@@ -114,6 +114,35 @@ with tempfile.TemporaryDirectory() as tmp:
     check("chpasswd is told the password is already hashed",
           chpasswd, [["chpasswd", "--encrypted"]])
 
+# A clear password goes to chpasswd on stdin and the TARGET hashes it (its PAM
+# policy: yescrypt on Debian); the engine imports no hashing module.
+calls.clear()
+with tempfile.TemporaryDirectory() as tmp:
+    secret = "çé 密码 كلمة:pass"
+    chroot_base._user({"user": {"username": "alice", "password": secret}},
+                      tmp, FakeEmit())
+    check("no command carries the clear password on argv",
+          [cmd for cmd, kw in calls if any(secret in part for part in cmd)], [])
+    check("chpasswd receives user:password on stdin, any script",
+          [(cmd, kw.get("input_text")) for cmd, kw in calls if cmd[0] == "chpasswd"],
+          [(["chpasswd"], f"alice:{secret}\n")])
+check("the engine no longer depends on the crypt module",
+      "crypt" in sys.modules, False)
+
+# chpasswd reads one user per line: a line break in the password would set a
+# second account's password. Refused before anything runs.
+for bad in ("a\nroot:x", "a\rb", "a\x00b"):
+    calls.clear()
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            chroot_base._user({"user": {"username": "alice", "password": bad}},
+                              tmp, FakeEmit())
+            failures.append(f"password {bad!r}: no StepError")
+        except chroot_base.StepError as exc:
+            check(f"password {bad!r}: the error does not quote it", bad in str(exc), False)
+        check(f"password {bad!r}: chpasswd never runs",
+              [cmd for cmd, kw in calls if cmd[0] == "chpasswd"], [])
+
 
 # --- sshd and NetworkManager must really be enabled --------------------------- #
 def enable_fails(unit):
