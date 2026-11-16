@@ -16,7 +16,7 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "installer" / "install-engine"))
 sys.path.insert(0, str(REPO / "installer"))
 
-from steps import docker_config, features  # noqa: E402
+from steps import docker_config, docker_repo, features  # noqa: E402
 
 failures = []
 
@@ -124,11 +124,13 @@ def fake_chroot_run(target, cmd, **kwargs):
 
     class R:
         returncode = 0
-        stdout = stderr = ""
+        stdout = "amd64\n" if cmd[0] == "dpkg" else ""
+        stderr = ""
     return R()
 
 
 features.chroot_run = features.apt.chroot_run = fake_chroot_run
+docker_repo.chroot_run = fake_chroot_run
 with tempfile.TemporaryDirectory() as tmp:
     features.apply_features({"features": ["docker"]}, tmp, "/opt/nivuus", {}, FakeEmit())
     check("docker feature ships daemon.json",

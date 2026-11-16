@@ -1,9 +1,9 @@
 """Extracting a package archive without letting it write outside its directory.
 
 `tarfile`'s own `filter="data"` (PEP 706) would do this, but it only exists
-from Python 3.12 and the 3.11 security releases after 3.11.4 - and the
-installed target is Debian bookworm, whose python3.11 is 3.11.2 and rejects
-the keyword. So the same rules are applied here, member by member, on every
+from Python 3.12 and the 3.11 security releases after 3.11.4 - and an
+installed target may be Debian bookworm (still selectable, trixie is the
+default), whose python3.11 is 3.11.2 and rejects the keyword. So the same rules are applied here, member by member, on every
 Python: one code path, tested wherever the suites run.
 
 Refused, at the first offending member (callers extract into a staging

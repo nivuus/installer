@@ -10,6 +10,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from common.debian import DEFAULT_SUITE
+
 # Feature keys the wizard offers; the engine gates each step on these.
 #
 # The VM features are gone: kvm-vfio, gpu-passthrough and retro are the
@@ -99,7 +101,7 @@ class InstallConfig(BaseModel):
     # which is the only side that can read the manifests. Pydantic checks the
     # shape; packages/wizard.py checks the meaning.
     packages: dict[str, dict] = Field(default_factory=dict)
-    suite: str = "bookworm"
+    suite: str = DEFAULT_SUITE
     mirror: str = "http://deb.debian.org/debian"
 
     @field_validator("hostname")

@@ -138,6 +138,21 @@ silently drop `console`'s qemu/libvirt and `desk`'s coturn (audit
 2026-11-16). Every package is tried first, then the StepError names each
 failing package with apt's last lines. Never merge these calls back.
 
+**The `docker` feature installs Docker CE from Docker's repository (2026-11-16,
+owner's decision; supersedes Debian's `docker.io`/`docker-compose`).**
+`steps/docker_repo.py` lays `/etc/apt/keyrings/docker.asc` and a deb822
+`/etc/apt/sources.list.d/docker.sources` (target's suite, `dpkg
+--print-architecture` of the target, `stable`), runs `apt-get update`, then one
+fatal apt call for `docker-ce docker-ce-cli containerd.io docker-buildx-plugin
+docker-compose-plugin`; `docker compose version` is checked in the target,
+`install_daemon_config` writes `daemon.json`, then `systemctl enable docker`.
+The key is **shipped** (`templates/docker-archive-keyring.asc`, fingerprint
+`9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88`), never fetched at install
+time; `test_docker_repo.py` fails if its fingerprint changes. Packages of the
+suite declare no Docker apt name: they rely on this feature. The default Debian
+suite of the engine and the portal is `trixie` (`common/debian.py`); bookworm
+stays selectable and Docker's repository serves both.
+
 **Kernel parameters are validated in `plan_packages`, not in `bootloader`.**
 The allowlist lives in `bootloader.py::grub_defaults`, which runs at step 7 —
 after `partition` has wiped the disk. `plan_packages` now calls it purely for

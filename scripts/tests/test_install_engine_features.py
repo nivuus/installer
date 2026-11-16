@@ -151,32 +151,7 @@ def install_fails(label, config, fake, needle, target_setup=None):
         features.chroot_run = features.apt.chroot_run = real
 
 
-# Docker: Debian's names. docker-compose-v2 exists in no Debian suite, and
-# asking apt for it made it refuse docker.io as well.
-with tempfile.TemporaryDirectory() as tmp:
-    calls.clear()
-    features.apply_features({"features": ["os-base", "docker"]}, tmp,
-                            "/opt/nivuus", {}, FakeEmit())
-    check("docker installs Debian's engine and Compose plugin",
-          [c for c in calls if c[:2] == ["apt-get", "install"]],
-          [["apt-get", "install", "-y", "docker.io", "docker-compose"]])
-    check("the Compose plugin is checked in the target",
-          ["docker", "compose", "version"] in calls, True)
-    check("docker is enabled", ["systemctl", "enable", "docker"] in calls, True)
-
-install_fails("an unknown docker package fails the install",
-              {"features": ["os-base", "docker"]},
-              failing_on("docker.io", stderr="E: Unable to locate package docker-compose"),
-              "Unable to locate package docker-compose")
-install_fails("the docker failure names its feature",
-              {"features": ["os-base", "docker"]}, failing_on("docker.io"),
-              "feature docker")
-install_fails("a suite without the Compose v2 plugin fails the install",
-              {"features": ["os-base", "docker"]},
-              failing_on("docker compose version", code=1), "Compose v2 plugin")
-install_fails("docker that cannot be enabled fails the install",
-              {"features": ["os-base", "docker"]},
-              failing_on("enable docker", code=1), "enable docker")
+# The docker feature has its own suite: scripts/tests/test_docker_repo.py.
 install_fails("hostapd that does not install fails the install",
               {"features": ["os-base", "wifi-ap"], "wifi_ap": {"enabled": True}},
               failing_on("hostapd"), "feature wifi-ap")

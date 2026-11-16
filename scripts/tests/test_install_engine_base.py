@@ -135,6 +135,15 @@ for unit in ("ssh", "NetworkManager"):
             check(f"the failure names {unit}", f"enable {unit}" in str(exc), True)
 chroot_base.chroot_run = fake_chroot_run
 
+# The suite defaults to trixie when the wizard names none; a named one is kept.
+with tempfile.TemporaryDirectory() as tmp:
+    chroot_base._apt_sources({}, tmp)
+    check("default suite in sources.list",
+          (pathlib.Path(tmp) / "etc/apt/sources.list").read_text().split()[2], "trixie")
+    chroot_base._apt_sources({"suite": "bookworm"}, tmp)
+    check("named suite in sources.list",
+          (pathlib.Path(tmp) / "etc/apt/sources.list").read_text().split()[2], "bookworm")
+
 if failures:
     print("FAIL")
     for f in failures:

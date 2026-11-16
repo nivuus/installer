@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 import crypt
 
+from common.debian import DEFAULT_SUITE
+
 from .util import StepError, chroot_run, chroot_stream, write_file
 
 # Core packages installed via apt in the chroot (NOT via debootstrap --include),
@@ -61,7 +63,7 @@ def _install_core_packages(target: str, emit) -> None:
 
 
 def _apt_sources(config: dict, target: str) -> None:
-    suite = config.get("suite", "bookworm")
+    suite = config.get("suite", DEFAULT_SUITE)
     mirror = config.get("mirror", "http://deb.debian.org/debian")
     sources = "\n".join([
         f"deb {mirror} {suite} main contrib non-free non-free-firmware",

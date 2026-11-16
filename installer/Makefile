@@ -104,7 +104,7 @@ test-packages: test-scripts
 	          test_install_engine_features \
 	          test_webapp_runner \
 	          test_install_engine_base test_orange_dhcp_options test_wan_orange_lan6 test_nivuus_bios test_hw_blackbox_ups \
-	          test_firewalld_zone; do \
+	          test_firewalld_zone test_docker_repo test_docker_daemon_config; do \
 	    echo "--- $$t"; \
 	    $(PYTHON) $(dir $(INSTALLER_DIR))scripts/tests/$$t.py || exit 1; \
 	done

@@ -16,6 +16,7 @@ import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "installer" / "webapp"))
+sys.path.insert(0, str(REPO / "installer"))
 
 from pydantic import ValidationError  # noqa: E402
 
@@ -44,6 +45,11 @@ def check_raises(label, fn):
         return
     failures.append(f"{label}: raised nothing, want ValidationError")
 
+
+# --- the default suite is the engine's (trixie), bookworm stays selectable -- #
+check("default suite", models.InstallConfig(**base_kwargs(["os-base"])).suite, "trixie")
+check("bookworm selectable",
+      models.InstallConfig(**base_kwargs(["os-base"]), suite="bookworm").suite, "bookworm")
 
 # --- les features VM ont quitte le wizard -------------------------------- #
 for parti in ("kvm-vfio", "gpu-passthrough", "retro"):
