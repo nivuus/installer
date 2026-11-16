@@ -12,3 +12,10 @@ updates:
       interval: weekly
     commit-message:
       prefix: "chore"
+  # The live image's venv pins (kept equal to the root ones by a test).
+  - package-ecosystem: pip
+    directory: "/installer/webapp"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore"

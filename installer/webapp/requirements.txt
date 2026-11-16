@@ -3,9 +3,12 @@
 # install-engine/steps/features.py). The Windows guest left with the console
 # package: nothing under installer/ imports autounattend any more, and
 # console/nivuus-package.yaml declares its own python3-jinja2.
-# On the live ISO these come from Debian packages; this file documents versions for dev.
-fastapi>=0.110
-uvicorn[standard]>=0.27
-pydantic>=2.5
-jinja2>=3.1
-pyyaml>=6.0
+# The live image installs exactly these into its venv
+# (iso-build/config/hooks/normal/0500-nivuus-venv.hook.chroot). Pinned, and
+# equal to the pins of the repository's requirements.txt (CI), checked by
+# scripts/tests/test_requirements_pins.py.
+fastapi==0.163.1
+uvicorn[standard]==0.54.0
+pydantic==2.14.3
+jinja2==3.1.6
+pyyaml==6.0.3

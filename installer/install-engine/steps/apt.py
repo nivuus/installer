@@ -49,3 +49,13 @@ def install(target: str, owner: str, names: list[str]) -> None:
     failure = install_failure(target, owner, names)
     if failure:
         raise StepError(failure)
+
+
+def update(target: str, owner: str) -> None:
+    """Refresh apt's lists for `owner` (a source it just added), or raise."""
+    proc = chroot_run(target, ["apt-get", "update"], check=False)
+    if proc.returncode == 0:
+        return
+    message = f"{owner}: apt-get update failed (exit {proc.returncode})"
+    tail = _tail(proc)
+    raise StepError(f"{message}\n{tail}" if tail else message)

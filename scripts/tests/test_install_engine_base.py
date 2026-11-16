@@ -9,6 +9,7 @@ base step and not behind a feature.
 
 Run: python3 scripts/tests/test_install_engine_base.py
 """
+import os
 import pathlib
 import re
 import shlex
@@ -18,8 +19,10 @@ import tempfile
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "installer" / "install-engine"))
 sys.path.insert(0, str(REPO / "installer"))
+sys.path.insert(0, str(REPO / "scripts" / "tests"))
 
 from steps import chroot_base  # noqa: E402
+import regional_fixtures as fx  # noqa: E402
 
 failures = []
 
@@ -114,6 +117,35 @@ with tempfile.TemporaryDirectory() as tmp:
     check("chpasswd is told the password is already hashed",
           chpasswd, [["chpasswd", "--encrypted"]])
 
+# A clear password goes to chpasswd on stdin and the TARGET hashes it (its PAM
+# policy: yescrypt on Debian); the engine imports no hashing module.
+calls.clear()
+with tempfile.TemporaryDirectory() as tmp:
+    secret = "çé 密码 كلمة:pass"
+    chroot_base._user({"user": {"username": "alice", "password": secret}},
+                      tmp, FakeEmit())
+    check("no command carries the clear password on argv",
+          [cmd for cmd, kw in calls if any(secret in part for part in cmd)], [])
+    check("chpasswd receives user:password on stdin, any script",
+          [(cmd, kw.get("input_text")) for cmd, kw in calls if cmd[0] == "chpasswd"],
+          [(["chpasswd"], f"alice:{secret}\n")])
+check("the engine no longer depends on the crypt module",
+      "crypt" in sys.modules, False)
+
+# chpasswd reads one user per line: a line break in the password would set a
+# second account's password. Refused before anything runs.
+for bad in ("a\nroot:x", "a\rb", "a\x00b"):
+    calls.clear()
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            chroot_base._user({"user": {"username": "alice", "password": bad}},
+                              tmp, FakeEmit())
+            failures.append(f"password {bad!r}: no StepError")
+        except chroot_base.StepError as exc:
+            check(f"password {bad!r}: the error does not quote it", bad in str(exc), False)
+        check(f"password {bad!r}: chpasswd never runs",
+              [cmd for cmd, kw in calls if cmd[0] == "chpasswd"], [])
+
 
 # --- sshd and NetworkManager must really be enabled --------------------------- #
 def enable_fails(unit):
@@ -134,6 +166,66 @@ for unit in ("ssh", "NetworkManager"):
         except chroot_base.StepError as exc:
             check(f"the failure names {unit}", f"enable {unit}" in str(exc), True)
 chroot_base.chroot_run = fake_chroot_run
+
+# The suite defaults to trixie when the wizard names none; a named one is kept.
+with tempfile.TemporaryDirectory() as tmp:
+    chroot_base._apt_sources({}, tmp)
+    check("default suite in sources.list",
+          (pathlib.Path(tmp) / "etc/apt/sources.list").read_text().split()[2], "trixie")
+    chroot_base._apt_sources({"suite": "bookworm"}, tmp)
+    check("named suite in sources.list",
+          (pathlib.Path(tmp) / "etc/apt/sources.list").read_text().split()[2], "bookworm")
+
+# --- locale, keyboard and time zone: any the target supports ---------------- #
+def regional_target(tmp):
+    fx.seed(tmp)
+    return pathlib.Path(tmp)
+
+
+calls.clear()
+with tempfile.TemporaryDirectory() as tmp:
+    target = regional_target(tmp)
+    chroot_base._locale_and_time({"locale": "ja_JP.UTF-8", "timezone": "Asia/Tokyo",
+                                  "keyboard": {"layout": "jp", "variant": "kana"}},
+                                 tmp, FakeEmit())
+    check("locale.gen names the locale and its charset",
+          (target / "etc/locale.gen").read_text(), "ja_JP.UTF-8 UTF-8\n")
+    check("default locale", (target / "etc/default/locale").read_text(),
+          "LANG=ja_JP.UTF-8\n")
+    keyboard = (target / "etc/default/keyboard").read_text()
+    check("keyboard layout", 'XKBLAYOUT="jp"' in keyboard.splitlines(), True)
+    check("keyboard variant", 'XKBVARIANT="kana"' in keyboard.splitlines(), True)
+    check("time zone link", os.readlink(target / "etc/localtime"),
+          "/usr/share/zoneinfo/Asia/Tokyo")
+    check("locale-gen is not lenient",
+          [kw.get("check", True) for cmd, kw in calls if cmd == ["locale-gen"]], [True])
+
+with tempfile.TemporaryDirectory() as tmp:
+    target = regional_target(tmp)
+    chroot_base._locale_and_time({}, tmp, FakeEmit())
+    check("defaults: en_US.UTF-8, us, Etc/UTC",
+          ((target / "etc/default/locale").read_text(),
+           'XKBLAYOUT="us"' in (target / "etc/default/keyboard").read_text(),
+           os.readlink(target / "etc/localtime")),
+          ("LANG=en_US.UTF-8\n", True, "/usr/share/zoneinfo/Etc/UTC"))
+
+for label, cfg, needle in (
+        ("an unsupported locale", {"locale": "xx_YY.UTF-8"}, "xx_YY.UTF-8"),
+        ("a non-UTF-8 locale", {"locale": "ja_JP.EUC-JP"}, "ja_JP.EUC-JP"),
+        ("an unknown layout", {"keyboard": {"layout": "qq"}}, "'qq'"),
+        ("a variant of another layout", {"keyboard": {"layout": "us", "variant": "bepo"}},
+         "'bepo'"),
+        ("a missing time zone", {"timezone": "Mars/Olympus"}, "Mars/Olympus")):
+    with tempfile.TemporaryDirectory() as tmp:
+        regional_target(tmp)
+        try:
+            chroot_base._locale_and_time(cfg, tmp, FakeEmit())
+            failures.append(f"{label}: no StepError")
+        except chroot_base.StepError as exc:
+            check(f"{label} is refused by name", needle in str(exc), True)
+
+check("the keyboard packages are core packages",
+      {"keyboard-configuration", "console-setup"} <= set(chroot_base.CORE_PACKAGES), True)
 
 if failures:
     print("FAIL")

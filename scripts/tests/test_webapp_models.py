@@ -16,6 +16,7 @@ import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "installer" / "webapp"))
+sys.path.insert(0, str(REPO / "installer"))
 
 from pydantic import ValidationError  # noqa: E402
 
@@ -44,6 +45,35 @@ def check_raises(label, fn):
         return
     failures.append(f"{label}: raised nothing, want ValidationError")
 
+
+# --- the default suite is the engine's (trixie), bookworm stays selectable -- #
+check("default suite", models.InstallConfig(**base_kwargs(["os-base"])).suite, "trixie")
+check("bookworm selectable",
+      models.InstallConfig(**base_kwargs(["os-base"]), suite="bookworm").suite, "bookworm")
+
+# --- regional settings: no country assumed ---------------------------------- #
+plain = models.InstallConfig(**base_kwargs(["os-base"]))
+check("default time zone is UTC", plain.timezone, "Etc/UTC")
+check("default keyboard", (plain.keyboard.layout, plain.keyboard.variant), ("us", ""))
+check("no default Wi-Fi country", plain.wifi_ap.country, "")
+check_raises("an enabled access point needs a country", lambda: models.InstallConfig(
+    **base_kwargs(["os-base"]), wifi_ap={"enabled": True}))
+check("country normalised", models.InstallConfig(
+    **base_kwargs(["os-base"]), wifi_ap={"enabled": True, "country": "jp"}).wifi_ap.country, "JP")
+check_raises("a country is two letters", lambda: models.InstallConfig(
+    **base_kwargs(["os-base"]), wifi_ap={"enabled": True, "country": "JPN"}))
+check_raises("a layout cannot break its line", lambda: models.InstallConfig(
+    **base_kwargs(["os-base"]), keyboard={"layout": 'us"\nX=1'}))
+check_raises("a time zone cannot climb out of zoneinfo", lambda: models.InstallConfig(
+    **base_kwargs(["os-base"]), timezone="../../etc/passwd"))
+
+# --- the account password is one chpasswd line ------------------------------ #
+for bad in ("a\nb", "a\rb", "a\x00b"):
+    check_raises(f"password {bad!r} refused", lambda b=bad: models.InstallConfig(
+        disk={"path": "/dev/sda"}, user={"username": "u", "password": b}))
+check("non-Latin password accepted", models.InstallConfig(
+    disk={"path": "/dev/sda"}, user={"username": "u", "password": "密码 كلمة"}).user.password,
+    "密码 كلمة")
 
 # --- les features VM ont quitte le wizard -------------------------------- #
 for parti in ("kvm-vfio", "gpu-passthrough", "retro"):

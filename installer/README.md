@@ -39,6 +39,8 @@ The live root runs entirely in RAM; the engine debootstraps Debian onto the
 | `install-engine/steps/` | `partition`, `debootstrap`, `chroot_base`, `bootloader`, `features`, `validate`. |
 | `install-engine/templates/` | Jinja2 configs: NM bridges, VLAN, PPPoE, hostapd. |
 | `webapp/` | FastAPI portal: `main.py` (routes + `/ws/progress`), `models.py` (Pydantic), `installer_runner.py`, `static/` + `templates/` wizard. |
+| `common/regional.py` | Locales, XKB layouts and time zones read from Debian's own files (`SUPPORTED`, `base.lst`, `zoneinfo`): the portal offers them, the engine checks the answer against the target. |
+| `webapp/static/i18n/` | Wizard text, one JSON catalog per language, English (`en.json`) the reference and fallback. A new language is a new file; `i18n.js` negotiates from `navigator.languages`. |
 | `ap/` | Hotspot bring-up: `bring-up-ap.sh`, `hostapd-setup.conf.tmpl`. |
 | `iso-build/` | live-build config, hooks (venv + enable services), `build.sh`. |
 

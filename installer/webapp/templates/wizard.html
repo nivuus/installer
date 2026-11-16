@@ -1,15 +1,17 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Installation Nivuus</title>
+  <!-- Every visible text carries a data-i18n key; the words live in
+       /static/i18n/<lang>.json, English (en.json) being the reference. -->
+  <title data-i18n="page.title"></title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <header class="topbar">
     <div class="brand">NIVUUS</div>
-    <div class="subtitle">Assistant d'installation</div>
+    <div class="subtitle" data-i18n="header.subtitle"></div>
   </header>
 
   <main id="app">
@@ -19,95 +21,99 @@
     <form id="wizard" autocomplete="off">
       <!-- 1. Disk -->
       <section class="step" data-step="disk">
-        <h2>1 · Disque cible</h2>
-        <p class="warn">⚠️ Le disque sélectionné sera entièrement effacé.</p>
-        <div id="disks" class="cards">Détection du matériel…</div>
-        <label class="check"><input type="checkbox" id="use_lvm"> Utiliser LVM</label>
+        <h2 data-i18n="disk.title"></h2>
+        <p class="warn" data-i18n="disk.warning"></p>
+        <div id="disks" class="cards" data-i18n="disk.detecting"></div>
+        <label class="check"><input type="checkbox" id="use_lvm"> <span data-i18n="disk.lvm"></span></label>
       </section>
 
       <!-- 2. System -->
       <section class="step" data-step="system" hidden>
-        <h2>2 · Système</h2>
-        <label>Nom d'hôte <input name="hostname" value="nivuus" required></label>
-        <label>Domaine (optionnel) <input name="domain" placeholder="local"></label>
-        <label>Locale
-          <select name="locale">
-            <option value="en_US.UTF-8">en_US.UTF-8</option>
-            <option value="fr_FR.UTF-8">fr_FR.UTF-8</option>
-          </select>
+        <h2 data-i18n="system.title"></h2>
+        <label><span data-i18n="system.hostname"></span> <input name="hostname" value="nivuus" required></label>
+        <label><span data-i18n="system.domain"></span> <input name="domain" placeholder="local"></label>
+        <label><span data-i18n="system.locale"></span>
+          <select name="locale" id="locale"></select>
         </label>
-        <label>Fuseau horaire <input name="timezone" value="Europe/Paris"></label>
+        <label><span data-i18n="system.keyboard"></span>
+          <select name="keyboard_layout" id="keyboard_layout"></select>
+        </label>
+        <label><span data-i18n="system.keyboard_variant"></span>
+          <select name="keyboard_variant" id="keyboard_variant"></select>
+        </label>
+        <p id="regional_missing" class="hint" hidden></p>
+        <label><span data-i18n="system.timezone"></span> <input name="timezone" id="timezone" value="Etc/UTC"></label>
       </section>
 
       <!-- 3. Account -->
       <section class="step" data-step="account" hidden>
-        <h2>3 · Compte administrateur</h2>
-        <label>Nom d'utilisateur <input name="username" required></label>
-        <label>Mot de passe <input name="password" type="password"></label>
-        <label>Clé SSH publique (optionnel)
+        <h2 data-i18n="account.title"></h2>
+        <label><span data-i18n="account.username"></span> <input name="username" required></label>
+        <label><span data-i18n="account.password"></span> <input name="password" type="password"></label>
+        <label><span data-i18n="account.ssh_key"></span>
           <textarea name="ssh_key" rows="3" placeholder="ssh-ed25519 AAAA…"></textarea>
         </label>
-        <label>Port SSH <input name="ssh_port" type="number" value="22" min="1" max="65535"></label>
-        <label class="check"><input type="checkbox" name="password_auth" checked> Autoriser l'authentification SSH par mot de passe</label>
+        <label><span data-i18n="account.ssh_port"></span> <input name="ssh_port" type="number" value="22" min="1" max="65535"></label>
+        <label class="check"><input type="checkbox" name="password_auth" checked> <span data-i18n="account.password_auth"></span></label>
       </section>
 
       <!-- 4. WAN -->
       <section class="step" data-step="wan" hidden>
-        <h2>4 · Connexion Internet (WAN)</h2>
-        <label>Mode
+        <h2 data-i18n="wan.title"></h2>
+        <label><span data-i18n="wan.mode"></span>
           <select name="wan_mode" id="wan_mode">
-            <option value="dhcp">DHCP (simple)</option>
-            <option value="pppoe">PPPoE (fibre Orange/Sosh)</option>
+            <option value="dhcp" data-i18n="wan.mode_dhcp"></option>
+            <option value="pppoe" data-i18n="wan.mode_pppoe"></option>
           </select>
         </label>
-        <label>Interface WAN
+        <label><span data-i18n="wan.interface"></span>
           <select name="wan_interface" id="wan_interface"></select>
         </label>
         <div id="pppoe_fields" hidden>
-          <label>VLAN ID <input name="wan_vlan" type="number" value="835"></label>
-          <label>Identifiant PPPoE <input name="pppoe_user" placeholder="fti/xxxxx"></label>
-          <label>Mot de passe PPPoE <input name="pppoe_password" type="password"></label>
+          <label><span data-i18n="wan.vlan"></span> <input name="wan_vlan" type="number" value="835"></label>
+          <label><span data-i18n="wan.pppoe_user"></span> <input name="pppoe_user"></label>
+          <label><span data-i18n="wan.pppoe_password"></span> <input name="pppoe_password" type="password"></label>
         </div>
       </section>
 
       <!-- 5. WiFi AP -->
       <section class="step" data-step="wifi" hidden>
-        <h2>5 · Point d'accès WiFi (production)</h2>
-        <label class="check"><input type="checkbox" id="wifi_enabled" name="wifi_enabled"> Activer le point d'accès WiFi</label>
+        <h2 data-i18n="wifi.title"></h2>
+        <label class="check"><input type="checkbox" id="wifi_enabled" name="wifi_enabled"> <span data-i18n="wifi.enable"></span></label>
         <div id="wifi_fields" hidden>
-          <label>Pays <input name="wifi_country" value="FR" maxlength="2"></label>
-          <label>SSID privé <input name="private_ssid" value="Nivuus"></label>
-          <label>Mot de passe privé <input name="private_passphrase" type="password" placeholder="8–63 caractères"></label>
-          <label>SSID invités (optionnel) <input name="public_ssid"></label>
-          <label>Mot de passe invités <input name="public_passphrase" type="password"></label>
-          <label class="check"><input type="checkbox" name="dual_band" checked> Double bande (2.4 + 5 GHz)</label>
+          <label><span data-i18n="wifi.country"></span> <input name="wifi_country" id="wifi_country" maxlength="2"></label>
+          <label><span data-i18n="wifi.private_ssid"></span> <input name="private_ssid" value="Nivuus"></label>
+          <label><span data-i18n="wifi.private_passphrase"></span> <input name="private_passphrase" type="password" data-i18n-placeholder="wifi.passphrase_hint"></label>
+          <label><span data-i18n="wifi.public_ssid"></span> <input name="public_ssid"></label>
+          <label><span data-i18n="wifi.public_passphrase"></span> <input name="public_passphrase" type="password"></label>
+          <label class="check"><input type="checkbox" name="dual_band" checked> <span data-i18n="wifi.dual_band"></span></label>
           <div id="wifi_ifaces" class="hint"></div>
         </div>
       </section>
 
       <!-- 6. Features -->
       <section class="step" data-step="features" hidden>
-        <h2>6 · Fonctionnalités</h2>
+        <h2 data-i18n="features.title"></h2>
         <div id="features" class="features"></div>
       </section>
 
       <!-- 7. Review -->
       <section class="step" data-step="review" hidden>
-        <h2>7 · Récapitulatif</h2>
+        <h2 data-i18n="review.title"></h2>
         <pre id="summary" class="summary"></pre>
-        <p class="warn">Cliquez sur « Installer » pour lancer l'installation. Cette action efface le disque sélectionné.</p>
+        <p class="warn" data-i18n="review.warning"></p>
       </section>
     </form>
 
     <div class="nav-buttons">
-      <button id="prevBtn" type="button">← Précédent</button>
-      <button id="nextBtn" type="button">Suivant →</button>
-      <button id="installBtn" type="button" class="primary" hidden>Installer</button>
+      <button id="prevBtn" type="button" data-i18n="nav.previous"></button>
+      <button id="nextBtn" type="button" data-i18n="nav.next"></button>
+      <button id="installBtn" type="button" class="primary" hidden data-i18n="nav.install"></button>
     </div>
 
     <!-- Progress overlay -->
     <section id="progress" class="progress" hidden>
-      <h2>Installation en cours…</h2>
+      <h2 data-i18n="progress.title"></h2>
       <div class="bar"><div id="barFill" class="bar-fill"></div></div>
       <div id="pctLabel" class="pct">0 %</div>
       <ul id="log" class="log"></ul>
@@ -115,6 +121,8 @@
     </section>
   </main>
 
+  <script src="/static/i18n.js"></script>
+  <script src="/static/regional.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

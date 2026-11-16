@@ -16,6 +16,12 @@ python3-venv
 python3-pip
 ca-certificates
 
+# Wizard choices are read from Debian's own lists (common/regional.py):
+# locales -> /usr/share/i18n/SUPPORTED, xkb-data -> XKB layouts. The time
+# zone comes from the browser and is checked against the target.
+locales
+xkb-data
+
 # Install engine: partitioning, debootstrap, filesystems, payload copy
 debootstrap
 parted

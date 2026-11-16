@@ -16,6 +16,10 @@ import uuid
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from . import apt
+from common.debian import DEFAULT_SUITE
+
+from .docker_config import install_daemon_config
+from .docker_repo import DOCKER_APT, install_docker_source
 from .firewalld_zone import (ZoneFileError, bind_interface, default_zone,
                              remove_service)
 from .util import StepError, chroot_run, write_file
@@ -38,14 +42,6 @@ GUEST_VPN_TUN = "nvguest0"
 
 # The zone the PPPoE WAN profile names (templates/pppoe-wan.nmconnection.j2).
 WAN_PROFILE_ZONE = "external"
-
-# Debian names, not Docker Inc.'s repository: docker.io is the engine (its
-# Recommends pull docker-cli on trixie), docker-compose provides the
-# `docker compose` CLI plugin from trixie on
-# (/usr/libexec/docker/cli-plugins/docker-compose, 2.26). docker-compose-v2 is
-# an Ubuntu name that Debian never had; on bookworm docker-compose is the
-# Python v1 with no plugin, which the check in _docker() refuses by name.
-DOCKER_APT = ["docker.io", "docker-compose"]
 
 
 def _env() -> Environment:
@@ -74,7 +70,7 @@ def apply_features(config: dict, target: str, nivuus_dir: str, hw: dict,
     if "firewall" in features:
         _firewall(config, target, emit)
     if "docker" in features:
-        _docker(target, emit)
+        _docker(target, config.get("suite", DEFAULT_SUITE), emit)
     if features & {"home-assistant", "mqtt"}:
         _home_assistant_mqtt(target, nivuus_dir, features, emit)
 
@@ -158,13 +154,18 @@ def _wifi_ap(config, target, env, emit) -> None:
     wifi = config.get("wifi_ap", {})
     if not wifi.get("enabled"):
         return
+    # The regulatory domain decides the legal channels and power: it is the
+    # owner's country, asked by the wizard, never a default.
+    country = (wifi.get("country") or "").upper()
+    if not (len(country) == 2 and country.isascii() and country.isalpha()):
+        raise StepError("feature wifi-ap: wifi_ap.country must be the ISO 3166-1 "
+                        f"alpha-2 code of the country the access point runs in, got {country!r}")
     emit.info("features", 88, "Configuring hostapd WiFi access point…")
     apt.install(target, "feature wifi-ap", ["hostapd"])
     chroot_run(target, ["systemctl", "unmask", "hostapd"])
 
     hostapd_dir = os.path.join(target, "etc/hostapd")
     os.makedirs(hostapd_dir, exist_ok=True)
-    country = wifi.get("country", "FR")
     common = dict(
         country=country,
         private_ssid=wifi.get("private_ssid", "Nivuus"),
@@ -206,6 +207,7 @@ def _firewall(config, target, emit) -> None:
     except ZoneFileError as exc:
         raise StepError(f"cannot bind {GUEST_VPN_TUN} to the external zone: {exc}") from exc
     _close_ssh_on_wan(target, emit)
+    _ssh_port(target, int(config.get("user", {}).get("ssh_port", 22)), emit)
     # Persist IP forwarding for routing between WAN and bridges.
     write_file(os.path.join(target, "etc/sysctl.d/99-nivuus-forward.conf"),
                "net.ipv4.ip_forward = 1\n")
@@ -245,19 +247,51 @@ def _close_ssh_on_wan(target, emit) -> None:
 
 
 # --------------------------------------------------------------------------- #
-def _docker(target, emit) -> None:
-    emit.info("features", 92, "Installing Docker engine…")
+def _docker(target, suite, emit) -> None:
+    """Docker CE from Docker's repository (see steps/docker_repo.py)."""
+    emit.info("features", 92, f"Adding Docker's apt repository for {suite}…")
+    install_docker_source(target, suite)
+    emit.info("features", 93, "Installing Docker engine…")
     apt.install(target, "feature docker", DOCKER_APT)
-    # Checked, not assumed: every package's activate hook runs `docker compose`,
-    # and a suite whose archive has no Compose v2 plugin (bookworm) installs
-    # the names above without error and still leaves no `docker compose`.
+    # Checked, not assumed: every package's activate hook runs `docker compose`;
+    # an install that leaves no working plugin must stop here, not at the
+    # first package's activation.
     proc = chroot_run(target, ["docker", "compose", "version"], check=False)
     if proc.returncode != 0:
         raise StepError(
             "feature docker: `docker compose version` fails in the target "
-            f"after installing {' '.join(DOCKER_APT)}: this Debian suite does "
-            "not ship the Compose v2 plugin (it does from trixie on)")
+            f"after installing {' '.join(DOCKER_APT)}")
+    install_daemon_config(target, emit)
     chroot_run(target, ["systemctl", "enable", "docker"])
+
+
+def _ssh_port(target, port: int, emit) -> None:
+    """Make firewalld's `ssh` service and fail2ban's sshd jail use `port`.
+
+    The zones name the service, not a port: firewalld's own ssh.xml says
+    22/tcp, so an sshd moved to another port was reachable from no zone at
+    all. A service file in /etc/firewalld/services shadows the vendor one
+    (firewalld.service(5)), so overriding it moves every zone that lists
+    `ssh` - the LAN ones - and none that does not - the WAN ones, closed by
+    _close_ssh_on_wan(). fail2ban's sshd jail says `port = ssh`, i.e. 22 from
+    /etc/services: without the override it would ban on a port sshd no longer
+    listens on.
+    """
+    if port != 22:
+        write_file(os.path.join(target, "etc/firewalld/services/ssh.xml"),
+                   '<?xml version="1.0" encoding="utf-8"?>\n'
+                   "<!-- Managed by the Nivuus installer: sshd listens on "
+                   f"{port} (sshd_config.d/10-nivuus.conf). -->\n"
+                   "<service>\n"
+                   "  <short>SSH</short>\n"
+                   "  <description>Secure Shell on the port the installer "
+                   "configured.</description>\n"
+                   f'  <port protocol="tcp" port="{port}"/>\n'
+                   "</service>\n")
+        emit.info("features", 90, f"firewalld service ssh moved to port {port}")
+    write_file(os.path.join(target, "etc/fail2ban/jail.d/nivuus-sshd.local"),
+               "# Managed by the Nivuus installer\n"
+               f"[sshd]\nport = {port}\n")
 
 
 # --------------------------------------------------------------------------- #

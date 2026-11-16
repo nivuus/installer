@@ -7,7 +7,9 @@ memory guard every host gets whatever the wizard selected.
 from __future__ import annotations
 
 import os
-import crypt
+
+from common import regional
+from common.debian import DEFAULT_SUITE
 
 from .util import StepError, chroot_run, chroot_stream, write_file
 
@@ -16,6 +18,10 @@ from .util import StepError, chroot_run, chroot_stream, write_file
 CORE_PACKAGES = [
     "network-manager", "openssh-server", "sudo", "dbus", "polkitd",
     "ifupdown", "iproute2", "iputils-ping", "earlyoom",
+    # The keyboard layout the wizard asked for: keyboard-configuration owns
+    # /etc/default/keyboard (and pulls xkb-data, the list it is checked
+    # against), console-setup applies it to the text console at boot.
+    "keyboard-configuration", "console-setup",
 ]
 
 # earlyoom options. On 2026-09-27 orphaned test workers took ~28 GB with swap
@@ -61,7 +67,7 @@ def _install_core_packages(target: str, emit) -> None:
 
 
 def _apt_sources(config: dict, target: str) -> None:
-    suite = config.get("suite", "bookworm")
+    suite = config.get("suite", DEFAULT_SUITE)
     mirror = config.get("mirror", "http://deb.debian.org/debian")
     sources = "\n".join([
         f"deb {mirror} {suite} main contrib non-free non-free-firmware",
@@ -73,20 +79,57 @@ def _apt_sources(config: dict, target: str) -> None:
 
 
 def _locale_and_time(config: dict, target: str, emit) -> None:
+    """Locale, keyboard and time zone, each checked against the target.
+
+    The values come from the wizard, which offers what the live medium
+    ships; the target's own lists are the authority, so a value it cannot
+    apply stops the install here instead of booting a host with no locale,
+    a QWERTY console for an AZERTY owner, or a dangling /etc/localtime.
+    """
     locale = config.get("locale", "en_US.UTF-8")
-    timezone = config.get("timezone", "Europe/Paris")
-    emit.info("base", 62, f"Configuring locale {locale} and timezone {timezone}…")
+    timezone = config.get("timezone", "Etc/UTC")
+    keyboard = config.get("keyboard") or {}
+    layout = keyboard.get("layout", "us")
+    variant = keyboard.get("variant", "")
+    emit.info("base", 62, f"Configuring locale {locale}, keyboard {layout}"
+              f"{'/' + variant if variant else ''} and timezone {timezone}…")
 
-    write_file(os.path.join(target, "etc/locale.gen"), f"{locale} UTF-8\n")
+    supported = regional.locales_of(target)
+    if supported is None:
+        raise StepError(f"the target has no /{regional.SUPPORTED} (package locales)")
+    if locale not in supported:
+        raise StepError(f"locale {locale!r} is not a UTF-8 locale this Debian supports")
+    write_file(os.path.join(target, "etc/locale.gen"), f"{locale} {supported[locale]}\n")
     write_file(os.path.join(target, "etc/default/locale"), f"LANG={locale}\n")
-    chroot_run(target, ["locale-gen"], check=False)
+    chroot_run(target, ["locale-gen"])
 
-    # Timezone via symlink + /etc/timezone.
+    _keyboard(target, layout, variant)
+
+    if not regional.timezone_exists(target, timezone):
+        raise StepError(f"time zone {timezone!r} is not in the target's /{regional.ZONEINFO}")
     localtime = os.path.join(target, "etc/localtime")
     if os.path.lexists(localtime):
         os.remove(localtime)
     os.symlink(f"/usr/share/zoneinfo/{timezone}", localtime)
     write_file(os.path.join(target, "etc/timezone"), f"{timezone}\n")
+
+
+def _keyboard(target: str, layout: str, variant: str) -> None:
+    """/etc/default/keyboard, read by console-setup and systemd-localed."""
+    layouts = regional.layouts_of(target)
+    if layouts is None:
+        raise StepError(f"the target has no /{regional.XKB_BASE_LST} (package xkb-data)")
+    if layout not in layouts:
+        raise StepError(f"keyboard layout {layout!r} is not an XKB layout")
+    if variant and variant not in layouts[layout]["variants"]:
+        raise StepError(f"keyboard variant {variant!r} does not belong to layout {layout!r}")
+    write_file(os.path.join(target, "etc/default/keyboard"),
+               "# Managed by the Nivuus installer (keyboard(5))\n"
+               'XKBMODEL="pc105"\n'
+               f'XKBLAYOUT="{layout}"\n'
+               f'XKBVARIANT="{variant}"\n'
+               'XKBOPTIONS=""\n'
+               'BACKSPACE="guess"\n')
 
 
 def _hostname(config: dict, target: str) -> None:
@@ -103,6 +146,14 @@ def _hostname(config: dict, target: str) -> None:
     write_file(os.path.join(target, "etc/hosts"), hosts)
 
 
+def _refuse_line_breaks(value: str, field: str) -> None:
+    """chpasswd reads one `user:password` per line: a CR, LF or NUL in the
+    value would end the line early and could name a second account."""
+    if any(c in value for c in "\r\n\x00"):
+        raise StepError(f"config.user.{field} contains a line break or NUL, "
+                        "which chpasswd cannot take")
+
+
 def _user(config: dict, target: str, emit) -> None:
     user = config.get("user", {})
     username = user.get("username")
@@ -113,16 +164,22 @@ def _user(config: dict, target: str, emit) -> None:
     chroot_run(target, ["useradd", "-m", "-s", "/bin/bash",
                         "-G", "sudo", username], check=False)
 
-    # Password: prefer a pre-computed hash; otherwise hash the plaintext here.
+    # Both forms go to chpasswd on stdin, never on argv: argv is
+    # world-readable in /proc while the command runs, and a failing command's
+    # argv is copied into the StepError that the portal streams to
+    # /ws/progress unauthenticated. A pre-computed hash is passed as such; a
+    # clear password is hashed by the TARGET (chpasswd through PAM, with the
+    # method its pam_unix line names - yescrypt on Debian), so the engine
+    # needs no hashing module (crypt left the stdlib in Python 3.13).
     pw_hash = user.get("password_hash")
-    if not pw_hash and user.get("password"):
-        pw_hash = crypt.crypt(user["password"], crypt.mksalt(crypt.METHOD_SHA512))
+    password = user.get("password")
     if pw_hash:
-        # On stdin, never on argv: argv is world-readable in /proc while the
-        # command runs, and a failing command's argv is copied into the
-        # StepError that the portal streams to /ws/progress unauthenticated.
+        _refuse_line_breaks(pw_hash, "password_hash")
         chroot_run(target, ["chpasswd", "--encrypted"],
                    input_text=f"{username}:{pw_hash}\n")
+    elif password:
+        _refuse_line_breaks(password, "password")
+        chroot_run(target, ["chpasswd"], input_text=f"{username}:{password}\n")
     # Lock root login by default (sudo via the user instead).
     chroot_run(target, ["passwd", "-l", "root"], check=False)
 

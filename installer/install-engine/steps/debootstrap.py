@@ -9,6 +9,8 @@ import os
 import re
 import shutil
 
+from common.debian import DEFAULT_SUITE
+
 from .util import StepError, run, run_stream, MountTracker
 
 # Keep the debootstrap --include minimal and safe. Packages with heavy service
@@ -22,7 +24,7 @@ BASE_INCLUDE = [
 
 
 def run_debootstrap(config: dict, target: str, emit) -> None:
-    suite = config.get("suite", "bookworm")
+    suite = config.get("suite", DEFAULT_SUITE)
     mirror = config.get("mirror", "http://deb.debian.org/debian")
 
     emit.info("debootstrap", 10,

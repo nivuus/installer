@@ -151,35 +151,25 @@ def install_fails(label, config, fake, needle, target_setup=None):
         features.chroot_run = features.apt.chroot_run = real
 
 
-# Docker: Debian's names. docker-compose-v2 exists in no Debian suite, and
-# asking apt for it made it refuse docker.io as well.
-with tempfile.TemporaryDirectory() as tmp:
-    calls.clear()
-    features.apply_features({"features": ["os-base", "docker"]}, tmp,
-                            "/opt/nivuus", {}, FakeEmit())
-    check("docker installs Debian's engine and Compose plugin",
-          [c for c in calls if c[:2] == ["apt-get", "install"]],
-          [["apt-get", "install", "-y", "docker.io", "docker-compose"]])
-    check("the Compose plugin is checked in the target",
-          ["docker", "compose", "version"] in calls, True)
-    check("docker is enabled", ["systemctl", "enable", "docker"] in calls, True)
-
-install_fails("an unknown docker package fails the install",
-              {"features": ["os-base", "docker"]},
-              failing_on("docker.io", stderr="E: Unable to locate package docker-compose"),
-              "Unable to locate package docker-compose")
-install_fails("the docker failure names its feature",
-              {"features": ["os-base", "docker"]}, failing_on("docker.io"),
-              "feature docker")
-install_fails("a suite without the Compose v2 plugin fails the install",
-              {"features": ["os-base", "docker"]},
-              failing_on("docker compose version", code=1), "Compose v2 plugin")
-install_fails("docker that cannot be enabled fails the install",
-              {"features": ["os-base", "docker"]},
-              failing_on("enable docker", code=1), "enable docker")
+# The docker feature has its own suite: scripts/tests/test_docker_repo.py.
 install_fails("hostapd that does not install fails the install",
+              {"features": ["os-base", "wifi-ap"],
+               "wifi_ap": {"enabled": True, "country": "DE"}},
+              failing_on("hostapd"), "apt-get install failed")
+install_fails("an access point without a country fails before installing anything",
               {"features": ["os-base", "wifi-ap"], "wifi_ap": {"enabled": True}},
-              failing_on("hostapd"), "feature wifi-ap")
+              failing_on("never-matches"), "ISO 3166-1")
+
+# The access point's regulatory domain is the configured country, any country.
+with tempfile.TemporaryDirectory() as tmp:
+    features.apply_features({"features": ["os-base", "wifi-ap"],
+                             "wifi_ap": {"enabled": True, "country": "jp",
+                                         "private_passphrase": "x" * 12,
+                                         "interfaces_24": ["wlan0"]}},
+                            tmp, "/opt/nivuus", {}, FakeEmit())
+    conf = (pathlib.Path(tmp) / "etc/hostapd/2.4Ghz.conf").read_text()
+    check("hostapd country_code is the configured one",
+          "country_code=JP" in conf.splitlines(), True)
 install_fails("fail2ban that does not install fails the install",
               {"features": ["os-base", "firewall"]}, failing_on("fail2ban"),
               "feature firewall")
@@ -258,6 +248,58 @@ with tempfile.TemporaryDirectory() as tmp:
           zone_has_ssh(target, "internal"), False)
     check("public is not assumed when it is not the DefaultZone",
           zone_has_ssh(target, "public"), True)
+
+# --- the configured SSH port is the one firewalld opens --------------------- #
+VENDOR_SSH = ('<?xml version="1.0" encoding="utf-8"?>\n<service>\n  <short>SSH</short>\n'
+              '  <port protocol="tcp" port="22"/>\n</service>\n')
+
+
+def open_ports(target, zone):
+    """tcp ports firewalld opens in `zone`: its <port>s and its services'.
+
+    A service is read the way firewalld reads it: /etc/firewalld/services
+    shadows /usr/lib/firewalld/services.
+    """
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(zone_text(target, zone))
+    ports = {p.get("port") for p in root.findall("port") if p.get("protocol") == "tcp"}
+    for svc in root.findall("service"):
+        path = target / "etc/firewalld/services" / f"{svc.get('name')}.xml"
+        if not path.is_file():
+            path = target / "usr/lib/firewalld/services" / f"{svc.get('name')}.xml"
+        if path.is_file():
+            ports |= {p.get("port") for p in ET.parse(path).getroot().findall("port")
+                      if p.get("protocol") == "tcp"}
+    return ports
+
+
+def firewall_target(tmp):
+    target = pathlib.Path(tmp)
+    vendor = target / "usr/lib/firewalld/zones"
+    vendor.mkdir(parents=True)
+    for zone, text in VENDOR.items():
+        (vendor / f"{zone}.xml").write_text(text)
+    services = target / "usr/lib/firewalld/services"
+    services.mkdir(parents=True)
+    (services / "ssh.xml").write_text(VENDOR_SSH)
+    return target
+
+
+for port in (2222, 22):
+    with tempfile.TemporaryDirectory() as tmp:
+        target = firewall_target(tmp)
+        features.apply_features({"features": ["os-base", "firewall"],
+                                 "user": {"ssh_port": port}}, str(target),
+                                "/opt/nivuus", {}, FakeEmit())
+        for zone in ("home", "internal"):
+            check(f"port {port}: {zone} opens exactly the configured SSH port",
+                  open_ports(target, zone), {str(port)})
+        for zone in ("external", "public"):
+            check(f"port {port}: {zone} (WAN) does not open it",
+                  str(port) in open_ports(target, zone), False)
+        jail = target / "etc/fail2ban/jail.d/nivuus-sshd.local"
+        check(f"port {port}: fail2ban's sshd jail watches the configured port",
+              jail.is_file() and f"port = {port}" in jail.read_text(), True)
 
 # Les features VM ont quitte ce fichier.
 check("plus de _kvm_vfio_thermal", hasattr(features, "_kvm_vfio_thermal"), False)

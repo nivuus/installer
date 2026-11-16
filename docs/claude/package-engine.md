@@ -52,16 +52,13 @@ touching it:
   regardless, since that runs as root. The rule protects against accident and
   ordering mistakes — real, worth having — but must be described as that, not
   as a security boundary. Real sandboxing would be its own project.
-* **`chroot_base.py:9` imports `crypt`, removed from the Python stdlib in 3.13
-  (PEP 594).** Used for exactly one thing (line 98): hashing the user
-  account's password. The live ISO builds on **bookworm**
-  (`iso-build/auto/config --distribution bookworm`), Python 3.11, so
-  production is unaffected today — but `run.py` cannot even be imported on a
-  Python 3.13 host, and the day the ISO base moves to trixie the installer
-  breaks at the step that creates the user account, at the very end of an
-  otherwise successful install. Remedies: `passlib`, `openssl passwd -6`, or
-  `chpasswd -e` inside the chroot. Dated technical debt, not a bug to fix now
-  — out of the package-engine plan's scope.
+* **`crypt` is gone from the engine (fixed 2026-11-16).** It was removed from
+  the stdlib in Python 3.13 (PEP 594) and made `run.py` unimportable there.
+  `chroot_base._user` now hands a clear password to `chpasswd` on stdin
+  inside the target, which hashes it through PAM with the target's own method
+  (yescrypt on Debian); a pre-computed `password_hash` still goes through
+  `chpasswd --encrypted`. Neither is ever on argv. CR, LF and NUL are refused
+  (model and engine): chpasswd reads one `user:password` per line.
 
 Activation uses a stamp (`/var/lib/nivuus/packages/<name>.activated`), not a
 self-disabling unit: an interrupted activation must retry at the next boot
@@ -137,6 +134,21 @@ single lenient call let `home-manager`'s nonexistent `docker-compose-v2`
 silently drop `console`'s qemu/libvirt and `desk`'s coturn (audit
 2026-11-16). Every package is tried first, then the StepError names each
 failing package with apt's last lines. Never merge these calls back.
+
+**The `docker` feature installs Docker CE from Docker's repository (2026-11-16,
+owner's decision; supersedes Debian's `docker.io`/`docker-compose`).**
+`steps/docker_repo.py` lays `/etc/apt/keyrings/docker.asc` and a deb822
+`/etc/apt/sources.list.d/docker.sources` (target's suite, `dpkg
+--print-architecture` of the target, `stable`), runs `apt-get update`, then one
+fatal apt call for `docker-ce docker-ce-cli containerd.io docker-buildx-plugin
+docker-compose-plugin`; `docker compose version` is checked in the target,
+`install_daemon_config` writes `daemon.json`, then `systemctl enable docker`.
+The key is **shipped** (`templates/docker-archive-keyring.asc`, fingerprint
+`9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88`), never fetched at install
+time; `test_docker_repo.py` fails if its fingerprint changes. Packages of the
+suite declare no Docker apt name: they rely on this feature. The default Debian
+suite of the engine and the portal is `trixie` (`common/debian.py`); bookworm
+stays selectable and Docker's repository serves both.
 
 **Kernel parameters are validated in `plan_packages`, not in `bootloader`.**
 The allowlist lives in `bootloader.py::grub_defaults`, which runs at step 7 —

@@ -41,6 +41,13 @@ test-portal:
 	NIVUUS_PROGRESS_DIR=/tmp/nivuus-progress \
 	  python3 $(INSTALLER_DIR)/webapp/main.py
 
+# The wizard's i18n.js/regional.js driven under node (negotiation, fallback,
+# regional proposals). Needs node >= 18; the catalog contract itself is
+# checked by test_webapp_i18n.py in test-packages.
+.PHONY: test-wizard-js
+test-wizard-js:
+	node $(dir $(INSTALLER_DIR))scripts/tests/test_webapp_i18n.mjs
+
 test-vm:
 	@test -n "$(ISO)" || { echo "No ISO found; run 'make build-iso' first"; exit 1; }
 	@test -f $(TARGET_IMG) || truncate -s $(TARGET_SIZE) $(TARGET_IMG)
@@ -96,6 +103,9 @@ test-packages: test-scripts
 	          test_packages_updater test_packages_archive \
 	          test_nivuus_cli test_packages_answers test_packages_fact_record test_self_update \
 	          test_packages_units \
+	          test_install_engine_packages_apply test_install_engine_packages_facts \
+	          test_install_engine_packages_failures test_docker_repo test_docker_daemon_config \
+	          test_common_regional test_webapp_i18n test_requirements_pins \
 	          test_idempotence_harness \
 	          test_install_engine_bootloader test_install_engine_packages \
 	          test_packages_plan_order \
