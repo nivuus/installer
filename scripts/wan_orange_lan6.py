@@ -36,6 +36,11 @@ TOOL_TIMEOUT_S = int(os.environ.get("NIVUUS_LAN6_TOOL_TIMEOUT_S", "30"))
 # SOLICIT to Orange and makes the LANs lose and regain their prefix.
 SILENT_LIMIT = 4
 BACKOFF = (1, 5, 15, 60)
+# Passes in a row that could not be carried out (a tool failed, an address was
+# still tentative) before the loop gives up, withdraws and fails the unit. One
+# such pass is not a verdict on IPv6: the LANs keep what they have and the next
+# pass tries again.
+FAILED_PASS_LIMIT = 4
 # The link-local address radvd advertises from. Not the bridge's own: the
 # Thread border router advertises from that one with router lifetime 0, which
 # makes every client drop it as default router until the next advertisement.
@@ -97,6 +102,13 @@ def tool(*argv, check=False):
     return result
 
 
+def write_state(path, text):
+    """Replace a state file whole: a stop in the middle leaves the old content."""
+    partial = path.with_name(path.name + ".partial")
+    partial.write_text(text)
+    os.replace(partial, path)
+
+
 def sysctl(values):
     for key, value in values.items():
         (PROC / WAN / key).write_text(value + "\n")
@@ -128,7 +140,7 @@ def set_addresses(want):
     known, wanted = applied(), sorted(want)
     # Intent first: an address added just before a failure is then still
     # known to the withdrawal that follows.
-    record.write_text(json.dumps(sorted(set(known) | set(wanted))))
+    write_state(record, json.dumps(sorted(set(known) | set(wanted))))
     for name, addr in known:
         if (name, addr) not in wanted:
             tool("ip", "-6", "addr", "del", addr, "dev", name)
@@ -136,7 +148,7 @@ def set_addresses(want):
         # Asserted on every run: NetworkManager drops it when it reactivates the bridge.
         deprecated = ("preferred_lft", "0") if addr.startswith(ROUTER_LL + "/") else ()
         tool("ip", "-6", "addr", "replace", addr, "dev", name, *deprecated, check=True)
-    record.write_text(json.dumps(wanted))
+    write_state(record, json.dumps(wanted))
     for name in sorted({name for name, _ in wanted}):
         settle(name)
 
@@ -167,7 +179,7 @@ def advertise(text):
             tool("systemctl", "stop", RADVD_UNIT)
             path.unlink()
     elif not path.exists() or path.read_text() != text:
-        path.write_text(text)
+        write_state(path, text)
         tool("systemctl", "restart", RADVD_UNIT, check=True)
     elif tool("systemctl", "is-active", "--quiet", RADVD_UNIT).returncode != 0:
         tool("systemctl", "start", RADVD_UNIT, check=True)
@@ -186,9 +198,9 @@ def unusable(reason):
     if state["bad"] == 1:
         print("wan-orange-lan6: %s; DHCPv6 restart after %d such runs" % (reason, limit), file=sys.stderr)
     if state["bad"] < limit:
-        path.write_text(json.dumps(state))
+        write_state(path, json.dumps(state))
         return
-    path.write_text(json.dumps({"bad": 0, "restarts": state["restarts"] + 1}))
+    write_state(path, json.dumps({"bad": 0, "restarts": state["restarts"] + 1}))
     print("wan-orange-lan6: %s; restarting the DHCPv6 client for a full exchange" % reason, file=sys.stderr)
     tool("systemctl", "--no-block", "restart", DHCP6_UNIT, check=True)
 
@@ -232,10 +244,28 @@ def withdraw():
 
 
 def run():
+    """Apply every INTERVAL_S; withdraw on the way out.
+
+    Withdrawal follows a verdict (no prefix, no route, a silent gateway: apply
+    hands nothing out then) or the end of the loop. A pass that could not be
+    carried out (RuntimeError) is not a verdict: it is reported, the LANs keep
+    their addresses and radvd, and the next pass tries again. Only
+    FAILED_PASS_LIMIT of them in a row end the loop, which then withdraws and
+    fails the unit. A configuration error (ValueError) ends it at once.
+    """
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    failed = 0
     try:
         while True:
-            apply()
+            try:
+                apply()
+                failed = 0
+            except RuntimeError as error:
+                failed += 1
+                if failed >= FAILED_PASS_LIMIT:
+                    raise
+                print("wan-orange-lan6: pass failed (%d of %d in a row before withdrawing), "
+                      "LANs left as they are: %s" % (failed, FAILED_PASS_LIMIT, error), file=sys.stderr)
             time.sleep(INTERVAL_S)
     finally:
         withdraw()

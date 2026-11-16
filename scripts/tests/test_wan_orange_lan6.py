@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for scripts/wan_orange_lan6.py. Run: python3 scripts/tests/test_wan_orange_lan6.py"""
 import ipaddress
+import json
 import os
 import pathlib
 import signal
@@ -61,7 +62,9 @@ FAKES = {
     "ip": '''case "$*" in
   "-j -6 route show default dev"*) if [ -e "$T/route" ]; then echo '[{"dst":"default","gateway":"fe80::1"}]'; else echo '[]'; fi ;;
   "-j -6 addr show dev"*) [ -e "$T/dadfailed" ] && echo '[{"addr_info":[{"local":"fe80::1","dadfailed":true}]}]' ;;
-  *) echo "ip $*" >> "$T/calls"; [ -e "$T/ip_hangs" ] && sleep 30; case "$*" in *"dev $(cat "$T/missing" 2>/dev/null)") exit 2 ;; esac ;;
+  *) echo "ip $*" >> "$T/calls"; [ -e "$T/ip_hangs" ] && sleep 30; case "$*" in *"dev $(cat "$T/missing" 2>/dev/null)") exit 2 ;; esac
+     case "$*" in "-6 addr replace"*) if [ -e "$T/replace_fails_once" ]; then rm "$T/replace_fails_once"
+       echo "RTNETLINK answers: No such device" >&2; exit 2; fi ;; esac ;;
 esac''',
     "rdisc6": 'echo "rdisc6 $*" >> "$T/calls"; [ -e "$T/ra_answers" ] && : > "$T/route"; exit 0',
     "ndisc6": 'echo "ndisc6 $*" >> "$T/calls"; [ -e "$T/alive" ] || exit "$(cat "$T/ndisc6_rc" 2>/dev/null || echo 2)"',
@@ -273,6 +276,63 @@ class Applied(unittest.TestCase):
         self.assertEqual(proc.wait(timeout=10), 0)
         self.assertIn("ip -6 addr del 2a01:db8:0:c000::1/64 dev lan0", self.calls())
         self.assertFalse((self.tmp / "state/radvd.conf").exists())
+
+    def wait_for(self, predicate, timeout=15):
+        deadline = time.time() + timeout
+        while time.time() < deadline and not predicate():
+            time.sleep(0.1)
+        return predicate()
+
+    def test_a_transient_error_leaves_the_lans_addressed(self):
+        # 2026-11-16 audit: one failed pass (NetworkManager reactivating a
+        # bridge under the loop) withdrew IPv6 from the whole LAN.
+        self.healthy()
+        proc = subprocess.Popen([sys.executable, str(SCRIPT), "run"], env=self.env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        self.assertTrue(self.wait_for(lambda: (self.tmp / "state/radvd.conf").exists()))
+        self.calls(reset=True)
+        (self.tmp / "replace_fails_once").write_text("")
+        self.assertTrue(self.wait_for(lambda: not (self.tmp / "replace_fails_once").exists()))
+        # The pass after the failed one asserts the addresses again.
+        self.assertTrue(self.wait_for(lambda: self.calls().count("addr replace 2a01:db8:0:c000::1/64 dev lan0") >= 2))
+        self.assertIsNone(proc.poll(), "the loop died on a transient error")
+        calls = self.calls()
+        self.assertNotIn("addr del", calls)
+        self.assertNotIn("systemctl stop", calls)
+        self.assertTrue((self.tmp / "state/radvd.conf").exists())
+        proc.send_signal(signal.SIGTERM)
+        _, err = proc.communicate(timeout=10)
+        self.assertIn("No such device", err)
+
+    def test_an_error_that_lasts_withdraws_and_fails_the_unit(self):
+        self.healthy()
+        (self.tmp / "missing").write_text("lan1")
+        proc = subprocess.run([sys.executable, str(SCRIPT), "run"], env=self.env,
+                              capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("lan1", proc.stderr)
+        self.assertIn("ip -6 addr del 2a01:db8:0:c000::1/64 dev lan0", self.calls())
+
+    def test_an_interrupted_state_write_leaves_a_readable_file(self):
+        # A stop in the middle of a write left a truncated JSON, and every
+        # later pass then raised until /run was cleaned.
+        real_state, real_write = lan6.STATE, pathlib.Path.write_text
+        lan6.STATE = self.tmp / "state"
+        self.addCleanup(setattr, lan6, "STATE", real_state)
+        lan6.unusable("first")
+
+        def torn(path, data, *args, **kwargs):
+            real_write(path, data[: len(data) // 2])
+            raise OSError("killed in the middle of the write")
+        pathlib.Path.write_text = torn
+        try:
+            with self.assertRaises(OSError):
+                lan6.unusable("second")
+        finally:
+            pathlib.Path.write_text = real_write
+        lan6.unusable("third")
+        self.assertEqual(json.loads((self.tmp / "state/wan-orange.lan6-health").read_text())["bad"], 2)
 
 
 class Shipped(unittest.TestCase):
