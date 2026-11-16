@@ -125,3 +125,28 @@ def render_retro(enabled: bool) -> str:
     """
     flag = "$true" if enabled else "$false"
     return "@{\n" f"    Enabled = {flag}\n" "}\n"
+
+
+def render_agent(sha256: str | None, desk_version: str | None = None) -> str:
+    """Render config/agent.psd1: is a desk agent part of this payload?
+
+    Rendered on every build, like retro.psd1 and for the same reason: an
+    absent file cannot be told apart from a payload that predates the toggle.
+    `sha256` is None when the desk package is not installed on the build host
+    - the guest then installs no agent, and 40-agent.ps1 says why. Otherwise
+    it is the digest desk published for agent.exe: 40-agent.ps1 compares the
+    file it copied onto C: with it, so the binary that runs is the one its
+    owner published, end to end.
+    """
+    if sha256 is None:
+        return "@{\n    Enabled = $false\n}\n"
+    version = desk_version or ""
+    for name, value in (("Sha256", sha256), ("DeskVersion", version)):
+        if not value.isascii() or "'" in value or "\n" in value or "\r" in value:
+            raise ApolloError(
+                f"{name} must be ASCII without quote or line break to be "
+                f"written into agent.psd1, got {value!r}")
+    return ("@{\n    Enabled = $true\n"
+            f"    Sha256 = '{sha256}'\n"
+            f"    DeskVersion = '{version}'\n"
+            "}\n")

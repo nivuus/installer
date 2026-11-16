@@ -4,6 +4,12 @@
     The agent is a payload artefact with no user state: it is redeployed on
     every rebuild by construction, so nothing about it goes to D:.
 
+    It belongs to the desk package, which publishes it on the host next to a
+    manifest; the build copies it into this payload and records its sha256
+    in config\agent.psd1. This stage ALWAYS runs: on a host without desk the
+    toggle says Enabled = $false, the stage says so and exits in success. A
+    stage that is simply absent would leave no trace of why there is no agent.
+
     It must run in session 1, never as a service. Window capture
     (Windows.Graphics.Capture) and input injection (SendInput) do not cross the
     session boundary - the same constraint that banned the SYSTEM-session
@@ -20,9 +26,33 @@ $TaskName = 'guacamole-agent'
 $AgentDir = 'C:\nivuus\agent'
 $LogFile = 'C:\nivuus\agent.log'
 
+# --- Is there an agent in this payload at all?
+$toggle = Join-Path $PayloadRoot 'config\agent.psd1'
+if (-not (Test-Path $toggle)) {
+    # build.py renders this file in every case and payload.verify_staged
+    # requires it: its absence means a payload older than the toggle, whose
+    # state cannot be deduced. Only an explicit Enabled = $false may skip.
+    throw "$toggle is missing: this payload predates the desk agent toggle, its state cannot be deduced"
+}
+$agentConfig = Import-PowerShellDataFile -Path $toggle
+if (-not $agentConfig.Enabled) {
+    Write-Host "desk agent skipped (config\agent.psd1: Enabled = `$false): the desk package was not installed on the host when this payload was built, so no agent was published. No scheduled task is registered. This stage ran and had nothing to do."
+    return
+}
+
 New-Item -ItemType Directory -Force -Path $AgentDir | Out-Null
+$agentExe = Join-Path $AgentDir 'agent.exe'
 Copy-Item -Path (Join-Path $PayloadRoot 'drivers\agent\agent.exe') `
-          -Destination (Join-Path $AgentDir 'agent.exe') -Force
+          -Destination $agentExe -Force
+# The binary that will run must be the one its owner published: compare what
+# landed on C: with the digest the build took from desk's manifest. -ne on
+# strings ignores case, and Get-FileHash answers in upper case.
+$agentHash = (Get-FileHash -Algorithm SHA256 -Path $agentExe).Hash
+if ($agentHash -ne $agentConfig.Sha256) {
+    Remove-Item -Path $agentExe -Force -ErrorAction SilentlyContinue
+    throw "agent.exe copied to $agentExe has sha256 $agentHash, but desk published $($agentConfig.Sha256) (desk $($agentConfig.DeskVersion)): the copy was removed and no task is registered"
+}
+Write-Host "desk agent $($agentConfig.DeskVersion), sha256 $agentHash"
 Copy-Item -Path (Join-Path $PayloadRoot 'provision\assets\run-agent.ps1') `
           -Destination (Join-Path $AgentDir 'run-agent.ps1') -Force
 

@@ -54,6 +54,7 @@ GUEST_DIR = HERE / "guest"
 
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
+import desk_agent  # noqa: E402
 import qemu_build  # noqa: E402
 # Re-exported: the identity helpers lived here first and the suites still
 # reach them through this module.
@@ -98,15 +99,20 @@ DOMAIN_NAME = "Windows"
 DISK_MODES = ("wipe", "rebuild")
 
 
-# The one payload file whose presence proves the CURRENT fetch_payload.py
-# ran, not merely that some payload/ tree exists. Mirrors that script's own
-# `dest = drivers_dir / "agent" / "agent.exe"` - copied, not imported (the
-# module docstring's rule). See payload_done() for why it is this file.
-PAYLOAD_WITNESS = Path("agent") / "agent.exe"
+# Where fetch_payload.py stages the desk agent inside the payload tree.
+# Mirrors that script's AGENT_DIRNAME - copied, not imported (the module
+# docstring's rule). See agent_staged() for what "staged" means.
+PAYLOAD_AGENT_DIR = Path("agent")
 
 
 def payload_witnesses() -> list[Path]:
-    """agent.exe plus the pinned installers, at their pinned names.
+    """The pinned installers, at their pinned names.
+
+    Their presence proves the CURRENT fetch_payload.py ran, not merely that
+    some payload/ tree exists: a tree staged before they were downloads, or
+    before a pin bump, does not carry these names. The desk agent is NOT a
+    witness any more - a console without desk has none - and is judged on
+    its own by agent_staged().
 
     guest/pinned_installers.py is imported lazily and on its own: the other
     guest/ modules import jinja2 at module scope, and this one must stay
@@ -116,8 +122,44 @@ def payload_witnesses() -> list[Path]:
         sys.path.insert(0, str(GUEST_DIR))
     import pinned_installers  # noqa: PLC0415
 
-    return [PAYLOAD_WITNESS] + [Path(pin.subdir) / pin.filename
-                                for pin in pinned_installers.PINNED]
+    return [Path(pin.subdir) / pin.filename for pin in pinned_installers.PINNED]
+
+
+def agent_staged(payload_dir: Path,
+                 published: Callable[[], object] | None = None) -> bool:
+    """Does the payload tree carry exactly the agent desk published NOW?
+
+    This is what makes the two packages converge whatever the order of their
+    updates: the agent is compared with desk's publication every time the
+    `payload` step is asked whether it is done, so a desk update that
+    republished the agent makes the step replay, and nothing kept inside the
+    console package can go stale.
+
+      * desk not installed  - staged means "no agent/ directory at all": one
+        left by an earlier run must be removed by fetch_payload.py.
+      * an agent published  - staged means agent.exe is there and the staged
+        manifest equals the published one byte for byte. fetch_payload.py
+        writes that manifest last, after verifying the copy, so its presence
+        vouches for the binary beside it.
+      * anything unusable (desk installed but nothing published, unreadable
+        manifest) - not staged: the step runs, and fetch_payload.py refuses
+        with the sentence that says what to do.
+    """
+    try:
+        agent = (published or desk_agent.published_agent)()
+    except desk_agent.DeskAgentError:
+        return False
+    staged_dir = payload_dir / PAYLOAD_AGENT_DIR
+    if agent is None:
+        return not staged_dir.exists()
+    try:
+        staged = (staged_dir / desk_agent.MANIFEST_NAME).read_bytes()
+    except OSError:
+        return False
+    return (staged == agent.manifest_bytes
+            and (staged_dir / desk_agent.BINARY_NAME).is_file())
+
+
 # The states in which the guest is already up, listed positively rather than
 # excluding "shut off". `in shutdown` and `crashed` are states to get OUT of,
 # not successes: read as "already started" they would leave a crashed guest
@@ -363,6 +405,9 @@ def package_inputs(guest_dir: str | Path = GUEST_DIR,
     # build.py imports it for the retro marker path, and a change there moves
     # where the retrogaming choice is read from.
     inputs["retro.py"] = _file_digest(Path(console_dir) / "retro.py")
+    # build.py and fetch_payload.py import it to find and check the desk
+    # agent: a change there moves what is accepted into the image.
+    inputs["desk_agent.py"] = _file_digest(Path(console_dir) / "desk_agent.py")
     return inputs
 
 
@@ -958,7 +1003,8 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
                chown: Callable[[str, int, int], None] | None = None,
                chmod: Callable[[str, int], None] | None = None,
                sleep: Callable[[float], None] | None = None,
-               definition_on_disk: Callable[[], bool] | None = None
+               definition_on_disk: Callable[[], bool] | None = None,
+               published_agent: Callable[[], object] | None = None
                ) -> list[Step]:
     """The six steps, in order, for this host's answers. Runs nothing.
 
@@ -1095,24 +1141,22 @@ def plan_steps(answers: Mapping[str, object], hw: Mapping[str, object],
         # Shallow on purpose: fetch_payload.py is offline-first and cheap to
         # replay, so it re-verifies what is there far better than we could.
         #
-        # But shallow is not "anything at all". The witness is agent.exe
-        # SPECIFICALLY, and it is not an arbitrary pick: it is the newest
-        # thing fetch_payload.py places (it is copied out of the package
-        # itself, not downloaded - see guest/fetch_payload.py's
-        # PACKAGED_AGENT_EXE), so it is the one file an inherited payload/
-        # tree - one produced by an OLDER fetch_payload.py, on a host that
-        # has run this before - is guaranteed not to have. "Any file at all"
-        # accepted exactly that tree, skipped the step, and left step 40 of
-        # the provisioning with no agent to install: the void the packaging
-        # of agent.exe had just filled. Whatever ends up being the last
-        # payload piece added, this predicate must name it.
+        # But shallow is not "anything at all". Two things are named:
         #
-        # Which, since the NVIDIA driver and Apollo became downloads, means
-        # them too, by their PINNED file names: a payload staged before they
-        # were fetched carries agent.exe and neither installer (measured on
-        # the reference host 2026-10-08), and a pin bump leaves the old
-        # version's name. Either way the step must replay, or build.py stops
-        # at "offline payload incomplete" with nothing left to fetch them.
+        # The pinned NVIDIA and Apollo installers, by their PINNED file
+        # names: a payload staged before they were fetched carries neither
+        # (measured on the reference host 2026-10-08), and a pin bump leaves
+        # the old version's name. Either way the step must replay, or
+        # build.py stops at "offline payload incomplete" with nothing left
+        # to fetch them.
+        #
+        # The desk agent, against what desk published at THIS moment - see
+        # agent_staged(). It used to be a file inside this package, and the
+        # witness of this predicate; it is now desk's, read where desk
+        # publishes it, so a payload carrying an older agent (or one left
+        # from before desk was removed) is not done.
+        if not agent_staged(payload_dir, published_agent):
+            return False
         return all((payload_dir / rel).is_file() for rel in payload_witnesses())
 
     # ACCESS IS A PROPERTY OF THE ARTEFACTS - the workdir, the copied

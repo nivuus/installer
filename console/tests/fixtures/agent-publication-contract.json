@@ -1,0 +1,11 @@
+{
+  "contract": 1,
+  "directory": "/opt/nivuus/desk/agent",
+  "binary": "agent.exe",
+  "manifest": "agent.manifest.json",
+  "example": {
+    "binary_hex": "4d5a90006e6976757573206167656e7420636f6e747261637420666978747572650a",
+    "desk_version": "1.2.5",
+    "manifest_text": "{\n  \"desk_version\": \"1.2.5\",\n  \"file\": \"agent.exe\",\n  \"schema\": 1,\n  \"sha256\": \"e5b73c7e34e8713062775b50d242c7d7bcaba0dde24d70e8b43a5014e315973c\",\n  \"size\": 34\n}\n"
+  }
+}

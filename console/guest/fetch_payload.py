@@ -50,6 +50,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import hashlib
+import os
 import shutil
 import subprocess
 import sys
@@ -59,6 +60,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pinned_installers
+
+# console/ root, for desk_agent - the single definition of where desk
+# publishes its agent, shared with build.py and guest_steps.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import desk_agent  # noqa: E402
 
 
 class FetchError(RuntimeError):
@@ -129,21 +135,12 @@ WINGET_DEPS_MEMBER_DIR = "x64"
 WINGET_DEPS_REQUIRED = ("Microsoft.VCLibs.140.00.UWPDesktop",
                         "Microsoft.WindowsAppRuntime.")
 
-# agent.exe is the ONE offline payload binary that is never downloaded: it is
-# a compiled artefact of the sibling repository nivuus/desk, vendored
-# straight into this package (see payload/agent/README.md and
-# console/README.md for the reserve behind that decision - no source
-# checkout of nivuus/desk exists on a build machine, so it cannot be built
-# here, and it used to have to be extracted from the one production Windows
-# VM that happened to be running it, which left a fresh machine with nothing
-# to extract at all).
-PACKAGED_AGENT_EXE = Path(__file__).resolve().parent / "payload" / "agent" / "agent.exe"
-# The one build of it this package accepts: the tracked file as measured on
-# 2026-11-14. The source revision of this build is NOT recorded (see
-# payload/agent/README.md); the pin only guarantees that the binary that ships
-# is that file, and that replacing it is a deliberate change of this constant
-# rather than a silent blob swap.
-PACKAGED_AGENT_SHA256 = "63491776adc9879009470435c4fd97ba17a2a7e9bdd2d8ede2734883f9e21eea"
+# agent.exe is the ONE offline payload binary that is never downloaded, and
+# this package does not own it: nivuus/desk builds it and publishes it in its
+# own tree, next to a manifest carrying its sha256 (see console/desk_agent.py
+# for the location, the format and the three states). install_desk_agent()
+# stages what desk published, or stages nothing when desk is not installed.
+AGENT_DIRNAME = "agent"
 
 # Retrogaming (OPTIONAL, --retro). Three artefacts the guest cannot obtain on
 # its own, ~30 MB in total: a payload built WITHOUT retrogaming carries none
@@ -359,55 +356,58 @@ def fetch(item: Download, drivers_dir: Path) -> str:
     return hexdigest
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _replace_atomically(dest: Path, write) -> None:
+    """Produce `dest` through a sibling temporary file and a rename."""
+    part = dest.with_name(dest.name + ".part")
+    try:
+        write(part)
+        os.replace(part, dest)
+    finally:
+        part.unlink(missing_ok=True)
 
 
-def install_packaged_agent(drivers_dir: Path) -> str:
-    """Copy the package's own agent.exe into the offline payload tree.
+def install_desk_agent(drivers_dir: Path):
+    """Stage the agent desk published into the offline payload tree.
 
-    Unlike fetch(), there is no network and no manifest here: the source of
-    truth is the file tracked in this repository's git history
-    (PACKAGED_AGENT_EXE), pinned by PACKAGED_AGENT_SHA256 and refused when
-    it does not match, not a URL that can rot. What still matters is
-    verifying the COPY, not just making it - a 20 MB file that gets
-    silently truncated by a full disk or an interrupted process would
-    otherwise surface only deep inside provisioning, on a screenless guest,
-    as an agent.exe that will not run. Comparing sha256 at both ends catches
-    that immediately, at build time.
+    Returns the PublishedAgent that was staged, or None when desk is not
+    installed on this machine - in which case drivers/agent/ is REMOVED: the
+    drivers directory is a persistent working tree, and an agent.exe left
+    there by an earlier run would otherwise look like a current one.
+
+    The source is verified against desk's manifest before anything is
+    written, the copy is verified again once in place (a 20 MB file truncated
+    by a full disk would otherwise surface deep inside provisioning, on a
+    screenless guest), and the manifest is staged LAST: guest_steps.py reads
+    "the staged manifest equals the published one" as "this payload carries
+    the published agent", so it must never be there before the binary is.
     """
-    if not PACKAGED_AGENT_EXE.is_file():
+    try:
+        published = desk_agent.published_agent()
+        if published is not None:
+            desk_agent.verify(published)
+    except desk_agent.DeskAgentError as exc:
+        raise FetchError(str(exc)) from exc
+    dest_dir = drivers_dir / AGENT_DIRNAME
+    if published is None:
+        if dest_dir.exists():
+            shutil.rmtree(dest_dir)
+        return None
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    staged_manifest = dest_dir / desk_agent.MANIFEST_NAME
+    staged_manifest.unlink(missing_ok=True)
+    dest = dest_dir / desk_agent.BINARY_NAME
+    _replace_atomically(dest, lambda part: shutil.copyfile(published.binary, part))
+    try:
+        desk_agent.verify(published, dest)
+    except desk_agent.DeskAgentError as exc:
+        dest.unlink(missing_ok=True)
         raise FetchError(
-            f"the package does not carry agent.exe: {PACKAGED_AGENT_EXE} is "
-            "missing. See console/guest/payload/agent/README.md - the "
-            "binary must be committed there before this console can be "
-            "built at all."
-        )
-    src_digest = _sha256(PACKAGED_AGENT_EXE)
-    if src_digest != PACKAGED_AGENT_SHA256:
-        raise FetchError(
-            f"the package's agent.exe ({PACKAGED_AGENT_EXE}) has sha256 "
-            f"{src_digest}, but this package pins PACKAGED_AGENT_SHA256 = "
-            f"{PACKAGED_AGENT_SHA256}: it is not the pinned build. Restore "
-            "the tracked file, or bump the pin on purpose (see "
-            "console/guest/payload/agent/README.md)."
-        )
-    dest = drivers_dir / "agent" / "agent.exe"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(PACKAGED_AGENT_EXE, dest)
-    dest_digest = _sha256(dest)
-    if src_digest != dest_digest:
-        raise FetchError(
-            f"copying agent.exe from the package to {dest} produced a "
-            f"different sha256 ({dest_digest}) than the package's own copy "
-            f"({src_digest}) - the copy is corrupt, most likely truncated. "
-            f"Delete {dest} and re-run."
-        )
-    return dest_digest
+            f"copying {published.binary} to {dest} did not produce the "
+            f"published agent - the copy is corrupt, most likely truncated, "
+            f"and was removed: {exc}") from exc
+    _replace_atomically(staged_manifest,
+                        lambda part: part.write_bytes(published.manifest_bytes))
+    return published
 
 
 # w11/amd64 is the 24H2 driver set; the guest is build 26100.
@@ -624,8 +624,16 @@ def main(argv=None) -> int:
             " (--retro/--no-retro given explicitly)" if args.retro is not None
             else " (from the install wizard's marker, no --retro/--no-retro "
                  "given)"))
-        print(f"  agent sha256 {install_packaged_agent(drivers)} "
-              "(bundled in the package, not downloaded)")
+        agent = install_desk_agent(drivers)
+        if agent is None:
+            print(f"  agent: SKIPPED - the desk package is not installed "
+                  f"(nothing published under {desk_agent.agent_dir()}). The "
+                  "guest is built without the desk agent; stage 40 will say "
+                  "so on the guest.")
+        else:
+            print(f"  agent sha256 {agent.sha256} (published by desk "
+                  f"{agent.desk_version} in {agent.binary.parent}, verified "
+                  "against its manifest)")
         # AVANT les telechargements : fetch() garde ce qui existe deja, donc
         # un epinglage releve ne change rien tant que l ancien est encore la.
         for gone in prune_stale_winget(drivers):
@@ -653,10 +661,6 @@ def main(argv=None) -> int:
         print("\nRetrogaming is off for this payload: 7zr.exe, the Python "
               "installer and the retro wheels were NOT fetched, and "
               "32-retro.ps1 will say on the guest that the option is off.")
-    print(f"\nagent/agent.exe came from the package itself "
-          f"({PACKAGED_AGENT_EXE}), not from a live VM: see "
-          "console/guest/payload/agent/README.md for the reserve that "
-          "decision carries.")
     return 0
 
 

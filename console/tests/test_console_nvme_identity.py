@@ -17,6 +17,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+# No desk on this machine, as far as this suite can tell: guest_steps reads
+# desk's agent publication, and must not conclude from the host running it.
+_NO_DESK = tempfile.mkdtemp(prefix="nivuus-no-desk-")
+os.environ["NIVUUS_DESK_AGENT_DIR"] = os.path.join(_NO_DESK, "desk-agent")
+os.environ["NIVUUS_PACKAGES_DIR"] = os.path.join(_NO_DESK, "packages")
+
 CONSOLE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CONSOLE))
 import guest_steps  # noqa: E402

@@ -36,6 +36,12 @@ import subprocess
 import sys
 import tempfile
 
+# No desk on this machine, as far as this suite can tell: guest_steps reads
+# desk's agent publication, and must not conclude from the host running it.
+_NO_DESK = tempfile.mkdtemp(prefix="nivuus-no-desk-")
+os.environ["NIVUUS_DESK_AGENT_DIR"] = os.path.join(_NO_DESK, "desk-agent")
+os.environ["NIVUUS_PACKAGES_DIR"] = os.path.join(_NO_DESK, "packages")
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 HOOK = os.path.join(ROOT, "console", "hooks", "activate.py")

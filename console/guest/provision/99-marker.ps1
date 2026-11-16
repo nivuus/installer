@@ -52,6 +52,16 @@ if (-not $svc -or $svc.Status -ne 'Running') {
 if (-not (Test-Path 'D:\Steam\steam.exe')) { throw 'no steam.exe on D:' }
 if (-not (Test-Path 'D:\state\NIVUUS-DATA.id')) { throw 'D: carries no Nivuus marker' }
 
+# Is an agent expected at all? Same toggle as 40-agent.ps1: on a host without
+# the desk package the payload carries none, and its absence is not a defect
+# of this guest. Anything but an explicit toggle is refused, as there.
+$agentToggle = Join-Path $PayloadRoot 'config\agent.psd1'
+if (-not (Test-Path $agentToggle)) {
+    throw "$agentToggle is missing: this payload predates the desk agent toggle, its state cannot be deduced"
+}
+$agentExpected = [bool](Import-PowerShellDataFile -Path $agentToggle).Enabled
+$sid = 'disabled'
+
 # La preuve que l'agent vit dans la session INTERACTIVE. check-session.sh ne
 # peut pas servir sur une appliance : il exige le montage CIFS que la bascule
 # supprime et un binaire de developpement sous C:\dev.
@@ -65,23 +75,27 @@ if (-not (Test-Path 'D:\state\NIVUUS-DATA.id')) { throw 'D: carries no Nivuus ma
 # Cet etage est lance par la cle Run a l'ouverture de session, donc il s'execute
 # LUI-MEME dans la session console : son propre SessionId est la reference, sans
 # appel d'API ni Add-Type (qui couterait trois minutes de compilation C#).
-$sessionFile = Join-Path $StateDir 'agent-session.txt'
-if (-not (Test-Path $sessionFile)) { throw 'the agent never reported a session id' }
-$sid = (Get-Content $sessionFile -Raw).Trim()
-$consoleSid = "$((Get-Process -Id $PID).SessionId)"
-if ($sid -ne $consoleSid) {
-    throw "the agent runs in session '$sid', not the interactive session '$consoleSid': window capture and input injection would both fail"
-}
+if ($agentExpected) {
+    $sessionFile = Join-Path $StateDir 'agent-session.txt'
+    if (-not (Test-Path $sessionFile)) { throw 'the agent never reported a session id' }
+    $sid = (Get-Content $sessionFile -Raw).Trim()
+    $consoleSid = "$((Get-Process -Id $PID).SessionId)"
+    if ($sid -ne $consoleSid) {
+        throw "the agent runs in session '$sid', not the interactive session '$consoleSid': window capture and input injection would both fail"
+    }
 
-# The session file only proves the agent ran once, at stage-40 time. What
-# must be durable is that it comes back at every future logon - so check the
-# scheduled task is registered and enabled, not that agent.exe is alive right
-# now. A live-process check would be flaky: the agent legitimately exits when
-# it cannot reach its signalling server (not part of this appliance), and a
-# perfectly healthy guest would fail that check by coincidence of timing.
-$agentTask = Get-ScheduledTask -TaskName $AgentTaskName -ErrorAction SilentlyContinue
-if (-not $agentTask) { throw "scheduled task $AgentTaskName is not registered" }
-if ($agentTask.State -eq 'Disabled') { throw "scheduled task $AgentTaskName is disabled" }
+    # The session file only proves the agent ran once, at stage-40 time. What
+    # must be durable is that it comes back at every future logon - so check the
+    # scheduled task is registered and enabled, not that agent.exe is alive right
+    # now. A live-process check would be flaky: the agent legitimately exits when
+    # it cannot reach its signalling server (not part of this appliance), and a
+    # perfectly healthy guest would fail that check by coincidence of timing.
+    $agentTask = Get-ScheduledTask -TaskName $AgentTaskName -ErrorAction SilentlyContinue
+    if (-not $agentTask) { throw "scheduled task $AgentTaskName is not registered" }
+    if ($agentTask.State -eq 'Disabled') { throw "scheduled task $AgentTaskName is disabled" }
+} else {
+    Write-Host 'desk agent not expected (config\agent.psd1: Enabled = $false): its session and scheduled task are not checked'
+}
 
 # --- Rebuild invariants. Everything above proves the guest works RIGHT NOW;
 # these prove it will still be Apollo's paired guest after the next C:
