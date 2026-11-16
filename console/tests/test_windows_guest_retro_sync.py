@@ -458,7 +458,7 @@ class FakeGuest:
         self.journal.append(("ps", script))
         return 0, self.steam, ""
 
-    def execute(self, commande, quoi):
+    def execute(self, commande, quoi, timeout=None):
         """Le canal des commandes brutes du vrai invite (Guest.execute), par
         lequel passe la reinstallation du paquet. La surface doit etre la
         meme : un faux plus etroit prouverait le comportement d une API qui
@@ -846,7 +846,7 @@ class GuestPip(FakeGuest):
         self.apres = apres
         self.pip = []
 
-    def execute(self, commande, quoi):
+    def execute(self, commande, quoi, timeout=None):
         self.pip.append(commande)
         self.journal.append(("pip", None))
         self.rapports["identite"] = self.apres
@@ -1023,7 +1023,7 @@ check("... et chaque echec est signale", _signale.getvalue().count("sentinelle")
 def _capture(journal):
     """Le transport de winrm_exec.py, remplace par un carnet : ce qui suit
     exerce le VRAI Guest, seulement sans WinRM au bout."""
-    def run(kind, script, guest_ip=None):
+    def run(kind, script, guest_ip=None, timeout=None):
         journal.append((kind, script, guest_ip))
         return 0, "", ""
     return run
@@ -1072,7 +1072,7 @@ check("... avec de la marge pour un contrat qui s allongerait cote invite",
 
 
 def _reponse(rc, out):
-    def run(kind, script, guest_ip=None):
+    def run(kind, script, guest_ip=None, timeout=None):
         return rc, out, ""
     return run
 
