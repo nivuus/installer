@@ -60,6 +60,40 @@ with tempfile.TemporaryDirectory() as tmp:
 check("a missing packages dir is empty, not an error",
       discover("/nonexistent/packages"), ([], []))
 
+# A directory that EXISTS and cannot be listed (a failed mount, wrong
+# permissions) is not "no packages": answering ([], []) there made every
+# installed package read as "no manifest, not followed" and `nivuus check`
+# exit 0. os.listdir is the boundary, replaced here because chmod 000 does
+# not stop root and the suite must fail the same way under any uid.
+import packages.discovery as discovery_mod  # noqa: E402
+from packages.discovery import DiscoveryError  # noqa: E402
+
+real_listdir = discovery_mod.os.listdir
+
+
+def denied(path):
+    raise PermissionError(13, "Permission denied", path)
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    discovery_mod.os.listdir = denied
+    try:
+        found, errors = discover(tmp)
+        check("an unreadable packages dir offers nothing", found, [])
+        check("and is reported, naming the directory",
+              [(source, "cannot be listed" in message)
+               for source, message in errors], [(tmp, True)])
+        try:
+            discover(tmp, strict=True)
+            failures.append("strict discovery of an unreadable dir: "
+                            "expected DiscoveryError")
+        except DiscoveryError as exc:
+            check("the strict refusal names the directory", tmp in str(exc), True)
+    finally:
+        discovery_mod.os.listdir = real_listdir
+check("strict or not, a directory that does not exist is still empty",
+      discover("/nonexistent/packages", strict=True), ([], []))
+
 # A directory NAMED nivuus-package.yaml is not "not a package": it is an
 # attempt at being one that went wrong, and this module's whole thesis is that
 # present-but-broken is always worth reporting. Skipping it in silence is
