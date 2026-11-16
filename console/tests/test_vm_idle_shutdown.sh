@@ -24,12 +24,27 @@ fail() { echo "  ✗ $1"; FAIL=$((FAIL + 1)); }
 setup_sandbox() {
     SANDBOX=$(mktemp -d)
     mkdir -p "$SANDBOX/bin" "$SANDBOX/state"
-    cat > "$SANDBOX/bin/virsh" <<'EOF'
+    # virsh answers domstate from $SANDBOX/domstates, one line per call (the
+    # last line repeats); FAIL = libvirtd not answering. Every call is logged.
+    echo running > "$SANDBOX/domstates"
+    cat > "$SANDBOX/bin/virsh" <<EOF
 #!/bin/bash
-case "$1" in
-    domstate) echo running ;;
+echo "virsh \$*" >> "$SANDBOX/calls"
+case "\$1" in
+    domstate)
+        n=\$(( \$(cat "$SANDBOX/domstate.n" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "$SANDBOX/domstate.n"
+        st=\$(sed -n "\${n}p" "$SANDBOX/domstates"); [ -n "\$st" ] || st=\$(tail -n1 "$SANDBOX/domstates")
+        if [ "\$st" = FAIL ]; then
+            echo "error: failed to connect to the hypervisor" >&2; exit 1
+        fi
+        echo "\$st" ;;
 esac
 EOF
+    # Nothing on the host is touched: systemctl, docker and sleep are fakes.
+    for tool in systemctl docker sleep; do
+        printf '#!/bin/bash\necho "%s $*" >> "%s/calls"\n' "$tool" "$SANDBOX" > "$SANDBOX/bin/$tool"
+    done
+    : > "$SANDBOX/calls"
     cat > "$SANDBOX/bin/winvm" <<'EOF'
 #!/bin/bash
 # 10 minutes = 6000000000 units of 100 ns. Idle counter moves as much as time.
@@ -56,6 +71,7 @@ run_target() {
     VM_IDLE_STATE_DIR="$SANDBOX/state" NF_CONNTRACK="$SANDBOX/conntrack" \
         VM_IDLE_WINVM="$SANDBOX/bin/winvm" \
         PATH="$SANDBOX/bin:$PATH" bash "$TARGET" >/dev/null 2>&1
+    RC=$?
 }
 strikes() { awk '{print $3}' "$SANDBOX/state/state"; }
 
@@ -192,6 +208,53 @@ run_target
 [ "$(strikes)" = "0" ] && pass "strikes stay 0" || fail "strikes=$(strikes)"
 [ "$(awk '{print $1}' "$SANDBOX/state/state")" = "6000000001" ] && pass "baseline stored" \
     || fail "state=$(cat "$SANDBOX/state/state")"
+teardown_sandbox
+
+# 2026-11-16 audit: a virsh that failed was read as "not running", at the top
+# (VM-off self-heal: ollama started, CPUs released while the VM may run) and
+# while waiting for the hibernation (counted as done: no ACPI fallback, counter
+# reset).
+echo "[15] virsh fails -> no decision: nothing touched, strikes kept, unit fails"
+setup_sandbox
+echo FAIL > "$SANDBOX/domstates"
+run_target
+[ "$RC" -ne 0 ] && pass "exits non-zero" || fail "rc=$RC"
+[ "$(strikes)" = "1" ] && pass "strikes kept at 1" || fail "strikes=$(strikes)"
+grep -qE "^(systemctl|docker)" "$SANDBOX/calls" && fail "touched the host: $(cat "$SANDBOX/calls")" \
+    || pass "no wake socket, container or CPU self-heal on an unknown state"
+grep -q "virsh" "$SANDBOX/log" && pass "the journal names the virsh failure" || fail "log: $(cat "$SANDBOX/log")"
+teardown_sandbox
+
+hibernation_pass() { # $@: domstate answers after the first one (running)
+    setup_sandbox
+    echo "1 1 2" > "$SANDBOX/state/state"
+    printf '%s\n' running "$@" > "$SANDBOX/domstates"
+    run_target
+}
+
+echo "[16] the domain leaves running -> hibernated: no ACPI, strikes reset"
+hibernation_pass running "shut off"
+grep -q "virsh shutdown" "$SANDBOX/calls" && fail "ACPI sent: $(cat "$SANDBOX/calls")" || pass "no ACPI shutdown"
+[ "$(strikes)" = "0" ] && pass "strikes reset" || fail "strikes=$(strikes)"
+teardown_sandbox
+
+echo "[17] the domain stays running -> ACPI fallback"
+hibernation_pass running
+grep -q "virsh shutdown --mode acpi Windows" "$SANDBOX/calls" && pass "ACPI shutdown sent" || fail "calls: $(cat "$SANDBOX/calls")"
+teardown_sandbox
+
+echo "[18] virsh fails while waiting -> not a hibernation: no ACPI, strikes kept, unit fails"
+hibernation_pass FAIL
+grep -q "virsh shutdown" "$SANDBOX/calls" && fail "ACPI sent to a guest that may be hibernating" || pass "no ACPI shutdown"
+[ "$(strikes)" = "3" ] && pass "strikes kept: the next pass decides again" || fail "strikes=$(strikes)"
+[ "$RC" -ne 0 ] && pass "exits non-zero" || fail "rc=$RC"
+grep -q "virsh" "$SANDBOX/log" && pass "the journal names the virsh failure" || fail "log: $(cat "$SANDBOX/log")"
+teardown_sandbox
+
+echo "[19] a failed query in between is only retried"
+hibernation_pass FAIL FAIL "shut off"
+grep -q "virsh shutdown" "$SANDBOX/calls" && fail "ACPI sent: $(cat "$SANDBOX/calls")" || pass "no ACPI shutdown"
+[ "$(strikes)" = "0" ] && pass "strikes reset" || fail "strikes=$(strikes)"
 teardown_sandbox
 
 echo

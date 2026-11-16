@@ -22,16 +22,26 @@ if [ -f "$HOOKPATH" ] && [ -s "$HOOKPATH" ] && [ -x "$HOOKPATH" ]; then
     [ "$EXEC_EXIT_CODE" -ne 0 ] && FAILED="$EXEC_EXIT_CODE"
 
 elif [ -d "$HOOKPATH" ]; then
-    FILES=$(find -L "$HOOKPATH" -maxdepth 1 -type f -executable -print;)
-    logger -t libvirt-hook-qemu "Directory hook path: $HOOKPATH. Files found: $FILES"
-    for file in $FILES; do
-        if [ -n "$file" ]; then
-            logger -t libvirt-hook-qemu "Attempting to execute file in dir: $file with args: $@"
-            "$file" "$@"
-            EXEC_EXIT_CODE=$?
-            echo "run $file"
-            logger -t libvirt-hook-qemu "Execution finished for $file with code $EXEC_EXIT_CODE."
-            [ "$EXEC_EXIT_CODE" -ne 0 ] && FAILED="$EXEC_EXIT_CODE"
+    # Sub-hooks run in the C-locale order of their names, so a numeric prefix
+    # ("10-...") means what it says. find(1) alone yields directory order,
+    # which differs from one filesystem (and one write history) to the next.
+    # NUL-separated, so a name with a space is one file.
+    mapfile -d '' FILES < <(find -L "$HOOKPATH" -maxdepth 1 -type f -executable -print0 | LC_ALL=C sort -z)
+    logger -t libvirt-hook-qemu "Directory hook path: $HOOKPATH. Files found: ${FILES[*]}"
+    for file in "${FILES[@]}"; do
+        logger -t libvirt-hook-qemu "Attempting to execute file in dir: $file with args: $*"
+        "$file" "$@"
+        EXEC_EXIT_CODE=$?
+        echo "run $file"
+        logger -t libvirt-hook-qemu "Execution finished for $file with code $EXEC_EXIT_CODE."
+        [ "$EXEC_EXIT_CODE" -ne 0 ] && FAILED="$EXEC_EXIT_CODE"
+        # A `prepare` refusal aborts the start: the hooks after it must not
+        # prepare the host for a VM that will not run (confine the CPUs, stop
+        # containers). libvirt runs the `release` hooks to undo the ones that
+        # did run. Every other phase runs all its hooks: they clean up.
+        if [ "$HOOK_NAME" = "prepare" ] && [ "$FAILED" -ne 0 ]; then
+            logger -t libvirt-hook-qemu "$file refused the start: the prepare hooks after it are skipped"
+            break
         fi
     done
 fi

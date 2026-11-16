@@ -106,6 +106,10 @@ injoignable, 3 rétrogaming introuvable ou témoin absent, 4 le témoin refuse l
 synchronisation, 5 le scan a échoué, 6 la synchronisation a échoué, 7 une
 session de streaming est en cours, 8 la console exécute une autre construction
 du paquet retro que celle livrée par cet hôte.
+
+A guest call that outlives its bound (WINRM_TIMEOUT_S, RETRO_TIMEOUTS_S) is an
+error like an unreachable guest (exit 2): the client is killed, a stuck retro
+step is stopped in the guest, and the Steam hold is removed.
 """
 from __future__ import annotations
 
@@ -118,7 +122,7 @@ import subprocess
 import sys
 import threading
 import zipfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 HERE = Path(__file__).resolve().parent
 WINRM_EXEC = HERE / "winrm_exec.py"
@@ -239,16 +243,32 @@ MAX_REPORT_CHARS = 4000
 
 _MISSING = 44  # sortie convenue de nos scripts PowerShell : « fichier absent »
 
+# Every WinRM call is bounded. Without a bound, a command frozen in the guest
+# (Steam's -shutdown on a modal dialog nobody can close, retro.exe blocked on a
+# share) blocked this script for ever while HoldKeeper kept the Steam hold
+# fresh, so Steam never came back. The default covers stop_steam, whose guest
+# side waits at most ~50 s; the retro steps get their own budget, sync the
+# largest since it downloads artwork game by game. These are ceilings for a
+# step that is stuck, not estimates of a normal run.
+WINRM_TIMEOUT_S = 180
+RETRO_TIMEOUTS_S = {"identite": 180, "install": 1800, "scan": 900, "sync": 3600}
+PIP_TIMEOUT_S = 900
+
 
 class GuestError(RuntimeError):
     """L'invité est injoignable, ou une commande n'a pas rendu ce qu'il faut."""
+
+
+class GuestTimeout(GuestError):
+    """A guest call did not return within its bound; its client was killed."""
 
 
 def _ps_quote(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def _winrm_run(kind: str, script: str, guest_ip: str | None = None):
+def _winrm_run(kind: str, script: str, guest_ip: str | None = None,
+               timeout: float = WINRM_TIMEOUT_S):
     """Une commande dans l'invité, par le même chemin que testdomain.py.
 
     winrm_exec.py lit le mot de passe dans un fichier, jamais depuis argv :
@@ -261,8 +281,15 @@ def _winrm_run(kind: str, script: str, guest_ip: str | None = None):
     env.setdefault("GUEST_PASS_FILE", ADMIN_PASSWORD_FILE)
     if guest_ip:
         env["GUEST_IP"] = guest_ip
-    proc = subprocess.run([sys.executable, str(WINRM_EXEC), kind, script],
-                          capture_output=True, text=True, env=env)
+    try:
+        proc = subprocess.run([sys.executable, str(WINRM_EXEC), kind, script],
+                              capture_output=True, text=True, env=env,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # subprocess.run has killed the client. The command may still run in
+        # the guest: the caller decides what to stop there.
+        raise GuestTimeout(f"the guest did not answer within {timeout:g} s "
+                           f"({kind}: {script[:120]!r})") from None
     return proc.returncode, proc.stdout, proc.stderr
 
 
@@ -281,8 +308,8 @@ class Guest:
         self._guest_ip = guest_ip
         self.retro_exe = retro_exe
 
-    def ps(self, script: str):
-        return self._run("ps", script, self._guest_ip)
+    def ps(self, script: str, timeout: float = WINRM_TIMEOUT_S):
+        return self._run("ps", script, self._guest_ip, timeout=timeout)
 
     def exists(self, path: str) -> bool:
         rc, out, err = self.ps(
@@ -329,7 +356,8 @@ class Guest:
             raise GuestError(f"suppression de {path} impossible dans "
                              f"l'invité : {(err or out).strip()}")
 
-    def execute(self, commande: str, quoi: str):
+    def execute(self, commande: str, quoi: str,
+                timeout: float = WINRM_TIMEOUT_S):
         """(code de sortie, sortie) d'une commande de l'invité, sans mojibake.
 
         PYTHONUTF8/PYTHONIOENCODING et OutputEncoding sont posés ENSEMBLE :
@@ -347,7 +375,8 @@ class Guest:
             "$code = $LASTEXITCODE; "
             "[Console]::Out.Write(\"EXIT=$code`n\"); "
             "[Console]::Out.Write([Convert]::ToBase64String("
-            "[System.Text.Encoding]::UTF8.GetBytes($sortie)))")
+            "[System.Text.Encoding]::UTF8.GetBytes($sortie)))",
+            timeout=timeout)
         tete, _, corps = out.partition("\n")
         if not tete.startswith("EXIT="):
             raise GuestError(
@@ -369,8 +398,27 @@ class Guest:
     def retro(self, args):
         """`retro <args>` dans l'invité : (code de sortie, rapport)."""
         quoted = " ".join(_ps_quote(a) for a in args)
-        return self.execute(f"{_ps_quote(self.retro_exe)} {quoted}",
-                            f"retro {' '.join(args)}")
+        try:
+            return self.execute(f"{_ps_quote(self.retro_exe)} {quoted}",
+                                f"retro {' '.join(args)}",
+                                timeout=RETRO_TIMEOUTS_S.get(args[0], WINRM_TIMEOUT_S))
+        except GuestTimeout as exc:
+            # Killing the client left retro running in the guest, and it could
+            # still write shortcuts.vdf once the hold is gone and Steam is
+            # back. Stop its process tree (the console-script launcher and its
+            # python child) before the caller removes the hold.
+            raise GuestTimeout(f"{exc}; {self._stop_retro()}") from None
+
+    def _stop_retro(self) -> str:
+        image = PureWindowsPath(self.retro_exe).name
+        try:
+            rc, out, err = self.ps(f"taskkill /F /T /IM {_ps_quote(image)}")
+        except GuestError as exc:
+            return f"stopping {image} in the guest failed too: {exc}"
+        if rc == 0:
+            return f"{image} was stopped in the guest"
+        return (f"{image} could not be stopped in the guest (taskkill {rc}): "
+                f"{(err or out).strip()[:200]}")
 
 
 # --------------------------------------------------------------------------
@@ -639,7 +687,7 @@ def reinstaller_paquet(guest, wheelhouse, partage,
     code, rapport = guest.execute(
         f"{_ps_quote(python_exe)} -m pip install --no-index --find-links "
         f"{_ps_quote(wheels_invite)} --upgrade retro",
-        "pip install retro")
+        "pip install retro", timeout=PIP_TIMEOUT_S)
     print(rapport.rstrip())
     if code != 0:
         raise GuestError(
@@ -753,7 +801,11 @@ class HoldKeeper:
         return self
 
     def stop(self):
+        # Join: a touch_hold in flight would otherwise write the hold again
+        # after remove_hold. Each touch is bounded by WINRM_TIMEOUT_S.
         self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join()
 
 
 def stop_steam(guest) -> str:

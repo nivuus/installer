@@ -53,12 +53,13 @@ test:
 	          test_windows_guest_media test_windows_guest_payload \
 	          test_windows_guest_pinned_installers \
 	          test_windows_guest_production_domain test_windows_guest_provision \
-	          test_windows_guest_retro_sync test_windows_guest_winrm_exec; do \
+	          test_windows_guest_retro_sync test_windows_guest_winrm_exec \
+	          test_retro_sync_bounds; do \
 	    echo "--- $$t"; \
 	    $(PYTHON) $(CONSOLE_DIR)/tests/$$t.py || exit 1; \
 	done
 	@for t in test_handle_vm_start test_vm_control test_vm_idle_shutdown test_winvm \
-	          test_vm_forward_hooks; do \
+	          test_vm_forward_hooks test_libvirt_hook_dispatcher; do \
 	    echo "--- $$t"; \
 	    bash $(CONSOLE_DIR)/tests/$$t.sh || exit 1; \
 	done

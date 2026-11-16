@@ -83,15 +83,45 @@ status() {
 # The probe is ARP, as on a Livebox, never ICMP: a gateway may ignore echo
 # requests for ever while routing perfectly, and each restart sends a RELEASE
 # and drops the route. A router cannot ignore ARP and still route.
+#
+# The arping is the one of Debian's `arping` package (Thomas Habets), which
+# wan-cutover.sh requires. Read in its 2.25 source: it exits 0 when a reply
+# came back and 1 otherwise, but ALSO 1 on its own errors (unknown option,
+# interface lookup, pcap). Its exit code alone cannot tell a silent gateway
+# from a probe that never ran, and a probe that never ran must not release
+# the lease: that cut the WAN every 150 s for ever. So the verdict is read
+# from the statistics line it prints only after a real run ("N packets
+# transmitted, M packets received"). Anything else - no arping, iputils'
+# arping (other output, exit 2 on errors), an interface error - fails this
+# check loudly and leaves the silence count alone. -i, not -I: -i is the
+# interface option Habets' manual documents.
+arp_probe() { # $1: gateway. 0 = answered, 1 = silent, 2 = the probe could not run
+    if ! command -v arping >/dev/null; then
+        echo "wan-orange: could not probe gateway $1: arping is not installed (Debian package 'arping')" >&2
+        return 2
+    fi
+    out=$(LC_ALL=C arping -i "$IF" -c 2 -w 3 "$1"); rc=$?
+    stats=$(printf '%s\n' "$out" | sed -n 's/^\([0-9][0-9]*\) packets transmitted, \([0-9][0-9]*\) packets received.*/\1 \2/p')
+    sent=${stats% *}; got=${stats#* }
+    if [ -n "$stats" ] && [ "$rc" = 0 ] && [ "$got" -gt 0 ]; then return 0; fi
+    if [ -n "$stats" ] && [ "$rc" = 1 ] && [ "$sent" -gt 0 ] && [ "$got" = 0 ]; then return 1; fi
+    echo "wan-orange: could not probe gateway $1: arping exited $rc with no verdict" \
+         "(sent ${sent:-?}, received ${got:-?}); is Debian's 'arping' package the one installed?" >&2
+    return 2
+}
+
 check() {
     mkdir -p "$STATE"
     gw=$(ip route show default dev "$IF" 2>/dev/null | awk '{print $3; exit}')
     # No default route means no lease yet: the client is still asking and
     # retries by itself. Restarting it would only add RELEASEs and DISCOVERs.
     if [ -z "$gw" ]; then rm -f "$STATE/wan-orange.failures"; return 0; fi
-    if arping -q -I "$IF" -c 2 -w 3 "$gw" >/dev/null 2>&1; then
-        rm -f "$STATE/wan-orange.failures"; return 0
-    fi
+    arp_probe "$gw"
+    case $? in
+        0) rm -f "$STATE/wan-orange.failures"; return 0 ;;
+        1) ;;
+        *) return 1 ;;
+    esac
     n=$(( $(cat "$STATE/wan-orange.failures" 2>/dev/null || echo 0) + 1 ))
     echo "$n" > "$STATE/wan-orange.failures"
     echo "wan-orange: gateway $gw silent, failure $n" >&2

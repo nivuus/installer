@@ -46,6 +46,11 @@ case "\$*" in
 esac
 printf %s "\$code"
 EOF
+    # The liveness check's arping (Debian package `arping`) is installed unless told otherwise.
+    cat > "$F/bin/dpkg-query" <<EOF
+#!/bin/sh
+case "\$*" in *" arping") [ -e "$F/no_arping" ] && { echo "dpkg-query: no packages found matching arping" >&2; exit 1; }; printf 'ii ' ;; *) exit 1 ;; esac
+EOF
     printf '#!/bin/sh\nexit 0\n' > "$F/bin/sleep"; cp "$F/bin/sleep" "$F/bin/journalctl"
     chmod +x "$F/bin/"*
 }
@@ -67,6 +72,13 @@ fakes; : > "$F/pppoe_state"; cutover to-dhcp --detached
 check "refuses when PPPoE is not the active uplink" '[ $RC -ne 0 ] && ! called "con down|StartUnit"'
 fakes; exec 8>"$F/lock"; flock -n 8; cutover to-dhcp --detached; exec 8>&-
 check "refuses while another cutover holds the lock" '[ $RC -ne 0 ] && ! called "con down"'
+# The liveness check cannot tell a silent gateway without its arping: running
+# DHCP without it would fail every check (2026-11-16 audit, before which it
+# released the lease every 150 s instead).
+fakes; touch "$F/no_arping"; cutover to-dhcp --detached
+check "refuses without the arping package the liveness check needs" '[ $RC -ne 0 ] && ! called "con down|StartUnit" && echo "$OUT" | grep -q arping'
+fakes; touch "$F/no_arping"; cutover to-dhcp
+check "... and says so before detaching" '[ $RC -ne 0 ] && echo "$OUT" | grep -q arping'
 fakes; cutover sideways; check "unknown mode is a usage error" '[ $RC -eq 2 ]'
 
 echo "== dry run executes nothing, whatever the flag order =="

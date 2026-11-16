@@ -35,8 +35,20 @@ mkdir -p "$STATE_DIR"
 
 reset_state() { echo "0 0 0" > "$STATE_FILE"; }
 
+# The domain state, or nothing when virsh itself failed (libvirtd slow or
+# restarting). A failed query is NOT "not running": read that way it started
+# the VM-off self-heal (ollama on the GPU, every CPU to the host) next to a VM
+# that may be running, and counted a hibernation that never happened.
+VIRSH_ERR="$STATE_DIR/virsh.stderr"
+domstate() { LC_ALL=C virsh domstate "$VM_NAME" 2>"$VIRSH_ERR"; }
+
+STATE_NOW=$(domstate) || {
+    logger -t "$LOG_TAG" "virsh domstate $VM_NAME failed ($(head -n1 "$VIRSH_ERR")): VM state unknown, nothing decided"
+    exit 1
+}
+
 # --- VM not running: nothing to do, keep wake trigger healthy ---
-if ! LC_ALL=C virsh domstate "$VM_NAME" 2>/dev/null | grep -q running; then
+if [ "$STATE_NOW" != running ]; then
     reset_state
     for p in 47984 47989; do
         if ! systemctl is-active --quiet "vm-trigger-$p.socket"; then
@@ -51,8 +63,8 @@ if ! LC_ALL=C virsh domstate "$VM_NAME" 2>/dev/null | grep -q running; then
         docker compose -f /opt/nivuus/ollama/docker-compose.yml --env-file /opt/nivuus/ollama/.env up -d 2>&1 | logger -t "$LOG_TAG"
     fi
     # Self-heal: VM off means the host owns every CPU. The release hook shares a
-    # directory with rebind-host-gpu.sh, which the dispatcher runs in unordered
-    # find(1) order and which has deadlocked before - so re-assert it here.
+    # directory with rebind-host-gpu.sh, which has deadlocked before and can
+    # take the whole release phase down with it - so re-assert it here.
     if [ "$(cat /sys/fs/cgroup/system.slice/cpuset.cpus.effective 2>/dev/null)" \
          != "$(tr -d '\n' < /sys/devices/system/cpu/online)" ]; then
         logger -t "$LOG_TAG" "VM off but host cpuset still restricted - releasing CPUs"
@@ -158,12 +170,24 @@ if [ "$STRIKES" -ge "$IDLE_STRIKES_LIMIT" ]; then
     # hibernation file (measured 2026-09-30: 80 s from the request to "shut
     # off"); a 90 s budget left 10 s of margin, and an ACPI shutdown sent to a
     # guest that is still hibernating loses the session.
+    # A failed query is retried at the next tick; LAST_STATE stays empty
+    # until virsh answers.
+    LAST_STATE=""
     for _ in $(seq 1 90); do
         sleep 2
-        if ! LC_ALL=C virsh domstate "$VM_NAME" 2>/dev/null | grep -q running; then
-            HIBERNATED=1; break
+        if LAST_STATE=$(domstate); then
+            [ "$LAST_STATE" != running ] && { HIBERNATED=1; break; }
+        else
+            LAST_STATE=""
         fi
     done
+    if [ "$HIBERNATED" -eq 0 ] && [ -z "$LAST_STATE" ]; then
+        # Unknown is not "still running": an ACPI shutdown sent to a guest
+        # that is hibernating loses the session. Keep the strikes so the next
+        # pass that can read the state decides again.
+        logger -t "$LOG_TAG" "virsh domstate $VM_NAME failed ($(head -n1 "$VIRSH_ERR")) while waiting for the hibernation: outcome unknown, no ACPI fallback, strikes kept"
+        exit 1
+    fi
     if [ "$HIBERNATED" -eq 0 ]; then
         logger -t "$LOG_TAG" "Hibernate did not complete - falling back to ACPI shutdown"
         virsh shutdown --mode acpi "$VM_NAME"
