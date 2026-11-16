@@ -11,3 +11,34 @@ ExecStartPre=/usr/sbin/radvd --configtest --config /run/nivuus/radvd.conf
 ExecStart=/usr/sbin/radvd --nodaemon --config /run/nivuus/radvd.conf --pidfile /run/nivuus-lan6-radvd.pid
 Restart=on-failure
 RestartSec=10
+# Sandbox (audit 2026-11-16, N10). The capability set, private /tmp and
+# /dev, read-only /usr and /etc, hidden homes and no_new_privs are what
+# Debian's own radvd.service ships for this binary; this unit only moves the
+# config and pid file to /run. Added from radvd 2.20's sources: it opens an
+# AF_INET6 raw ICMPv6 socket, an AF_NETLINK route socket and an AF_INET
+# datagram socket for interface ioctls (device-common.c), logs through
+# syslog (AF_UNIX), loads no module, touches no cgroup, clock or hostname.
+# Left out on purpose:
+#  - ProtectKernelTunables: radvd writes /proc/sys/net/ipv6/conf/<if>/*
+#    (privsep-linux.c) to apply the advertised MTU and timers.
+#  - --username radvd: radvd re-reads its config on SIGHUP after dropping
+#    root, and /run/nivuus/radvd.conf is written by nivuus-wan-orange-lan6.py
+#    with a mode this unit does not control.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native

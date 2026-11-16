@@ -4,3 +4,27 @@ Description=Classify Windows guest provisioning readiness (not started / install
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/guest-ready-watch.py
+# Sandbox (audit 2026-11-16, N20). guest-ready-watch.py runs as root: virsh
+# domstate/dumpxml and domain.py define (AF_UNIX to libvirtd), `ip neigh`
+# (netlink), winrm_exec.py to the guest (AF_INET), state in /var/lib/nivuus.
+# Only what holds whatever paths domain.py and the pending rewrite of this
+# script (installer#67) write to or hand to libvirtd.
+# Left out on purpose: PrivateTmp (a /tmp path handed to libvirtd would not
+# exist on its side), PrivateDevices and ProtectKernelTunables (domain.py
+# resolves the passthrough disk through /dev and /sys, console/hardware.py), ProtectSystem=full (domain
+# definitions), MemoryDenyWriteExecute (pywinrm/cffi), ProtectHome=yes
+# (virsh ~/.config/libvirt, winrm_exec.py's default password path).
+NoNewPrivileges=yes
+ProtectSystem=yes
+ProtectHome=read-only
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native

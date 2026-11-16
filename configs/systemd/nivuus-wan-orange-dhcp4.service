@@ -9,6 +9,39 @@ ExecStart=/sbin/dhclient -4 -d -v -e IF_METRIC=50 -cf /etc/dhcp/nivuus-orange/dh
 ExecStop=/sbin/dhclient -4 -r -cf /etc/dhcp/nivuus-orange/dhclient-orange-v4.conf -lf /var/lib/dhcp/dhclient-orange-v4.lease -pf /run/dhclient-orange-v4.pid enp5s0.832
 Restart=on-failure
 RestartSec=30
+# Sandbox (audit 2026-11-16, N10). dhclient faces the WAN as root; it runs
+# /sbin/dhclient-script, which sources /etc/dhcp/dhclient-{enter,exit}-hooks.d
+# (the Orange hooks, and Debian's resolved/timesyncd/rfc3442 hooks). Between
+# them they write /var/lib/dhcp, /run, /etc/resolv.conf when not disarmed, and
+# mktemp files; they drive addresses and routes through `ip` (netlink),
+# resolved and timesyncd through systemctl/resolvectl (D-Bus).
+# Left out on purpose:
+#  - NoNewPrivileges: the dhclient AppArmor profile runs dhclient-script as
+#    `Uxr` (unconfined); under no_new_privs AppArmor refuses that transition
+#    and no lease would ever be applied.
+#  - CapabilityBoundingSet: dhclient-script's set_hostname may call
+#    hostname(1) (CAP_SYS_ADMIN), the resolved hook chowns into a directory
+#    owned by systemd-resolve (CAP_CHOWN, CAP_DAC_OVERRIDE); trimming the set
+#    is an owner decision, not a reading of the code.
+#  - ProtectHostname: same set_hostname path.
+#  - ProtectSystem=full/strict: /etc/resolv.conf is written whenever the Orange
+#    enter hook is not installed.
+ProtectSystem=yes
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6 AF_PACKET
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

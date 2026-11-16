@@ -8,3 +8,31 @@ StartLimitIntervalSec=0
 Type=oneshot
 ExecStart=/usr/local/sbin/handle-vm-start.sh
 TimeoutStartSec=300
+# Sandbox (audit 2026-11-16, N20). handle-vm-start.sh runs as root: it asks
+# libvirtd (virsh, AF_UNIX) to start the VM, opens forward-ports through
+# firewalld (firewall-cmd and the started/begin/rules.sh hook, D-Bus),
+# reads /proc/net/nf_conntrack, takes a flock on /run/vm-trigger-start.lock
+# and logs. Those daemons act outside this sandbox; this process writes only
+# /run. No binary on the path is setuid or has an AppArmor profile, so
+# no_new_privs changes nothing it needs.
+# Left out on purpose: MemoryDenyWriteExecute (firewall-cmd is Python with
+# GObject introspection, whose libffi closures need writable+executable
+# memory), CapabilityBoundingSet and SystemCallFilter (not derivable from
+# the scripts), ProtectHome=yes (virsh as root reads ~/.config/libvirt).
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
