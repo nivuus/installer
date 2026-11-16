@@ -202,6 +202,7 @@ def _firewall(config, target, emit) -> None:
     except ZoneFileError as exc:
         raise StepError(f"cannot bind {GUEST_VPN_TUN} to the external zone: {exc}") from exc
     _close_ssh_on_wan(target, emit)
+    _ssh_port(target, int(config.get("user", {}).get("ssh_port", 22)), emit)
     # Persist IP forwarding for routing between WAN and bridges.
     write_file(os.path.join(target, "etc/sysctl.d/99-nivuus-forward.conf"),
                "net.ipv4.ip_forward = 1\n")
@@ -257,6 +258,35 @@ def _docker(target, suite, emit) -> None:
             f"after installing {' '.join(DOCKER_APT)}")
     install_daemon_config(target, emit)
     chroot_run(target, ["systemctl", "enable", "docker"])
+
+
+def _ssh_port(target, port: int, emit) -> None:
+    """Make firewalld's `ssh` service and fail2ban's sshd jail use `port`.
+
+    The zones name the service, not a port: firewalld's own ssh.xml says
+    22/tcp, so an sshd moved to another port was reachable from no zone at
+    all. A service file in /etc/firewalld/services shadows the vendor one
+    (firewalld.service(5)), so overriding it moves every zone that lists
+    `ssh` - the LAN ones - and none that does not - the WAN ones, closed by
+    _close_ssh_on_wan(). fail2ban's sshd jail says `port = ssh`, i.e. 22 from
+    /etc/services: without the override it would ban on a port sshd no longer
+    listens on.
+    """
+    if port != 22:
+        write_file(os.path.join(target, "etc/firewalld/services/ssh.xml"),
+                   '<?xml version="1.0" encoding="utf-8"?>\n'
+                   "<!-- Managed by the Nivuus installer: sshd listens on "
+                   f"{port} (sshd_config.d/10-nivuus.conf). -->\n"
+                   "<service>\n"
+                   "  <short>SSH</short>\n"
+                   "  <description>Secure Shell on the port the installer "
+                   "configured.</description>\n"
+                   f'  <port protocol="tcp" port="{port}"/>\n'
+                   "</service>\n")
+        emit.info("features", 90, f"firewalld service ssh moved to port {port}")
+    write_file(os.path.join(target, "etc/fail2ban/jail.d/nivuus-sshd.local"),
+               "# Managed by the Nivuus installer\n"
+               f"[sshd]\nport = {port}\n")
 
 
 # --------------------------------------------------------------------------- #

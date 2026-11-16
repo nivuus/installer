@@ -234,6 +234,58 @@ with tempfile.TemporaryDirectory() as tmp:
     check("public is not assumed when it is not the DefaultZone",
           zone_has_ssh(target, "public"), True)
 
+# --- the configured SSH port is the one firewalld opens --------------------- #
+VENDOR_SSH = ('<?xml version="1.0" encoding="utf-8"?>\n<service>\n  <short>SSH</short>\n'
+              '  <port protocol="tcp" port="22"/>\n</service>\n')
+
+
+def open_ports(target, zone):
+    """tcp ports firewalld opens in `zone`: its <port>s and its services'.
+
+    A service is read the way firewalld reads it: /etc/firewalld/services
+    shadows /usr/lib/firewalld/services.
+    """
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(zone_text(target, zone))
+    ports = {p.get("port") for p in root.findall("port") if p.get("protocol") == "tcp"}
+    for svc in root.findall("service"):
+        path = target / "etc/firewalld/services" / f"{svc.get('name')}.xml"
+        if not path.is_file():
+            path = target / "usr/lib/firewalld/services" / f"{svc.get('name')}.xml"
+        if path.is_file():
+            ports |= {p.get("port") for p in ET.parse(path).getroot().findall("port")
+                      if p.get("protocol") == "tcp"}
+    return ports
+
+
+def firewall_target(tmp):
+    target = pathlib.Path(tmp)
+    vendor = target / "usr/lib/firewalld/zones"
+    vendor.mkdir(parents=True)
+    for zone, text in VENDOR.items():
+        (vendor / f"{zone}.xml").write_text(text)
+    services = target / "usr/lib/firewalld/services"
+    services.mkdir(parents=True)
+    (services / "ssh.xml").write_text(VENDOR_SSH)
+    return target
+
+
+for port in (2222, 22):
+    with tempfile.TemporaryDirectory() as tmp:
+        target = firewall_target(tmp)
+        features.apply_features({"features": ["os-base", "firewall"],
+                                 "user": {"ssh_port": port}}, str(target),
+                                "/opt/nivuus", {}, FakeEmit())
+        for zone in ("home", "internal"):
+            check(f"port {port}: {zone} opens exactly the configured SSH port",
+                  open_ports(target, zone), {str(port)})
+        for zone in ("external", "public"):
+            check(f"port {port}: {zone} (WAN) does not open it",
+                  str(port) in open_ports(target, zone), False)
+        jail = target / "etc/fail2ban/jail.d/nivuus-sshd.local"
+        check(f"port {port}: fail2ban's sshd jail watches the configured port",
+              jail.is_file() and f"port = {port}" in jail.read_text(), True)
+
 # Les features VM ont quitte ce fichier.
 check("plus de _kvm_vfio_thermal", hasattr(features, "_kvm_vfio_thermal"), False)
 check("plus de _retro", hasattr(features, "_retro"), False)
