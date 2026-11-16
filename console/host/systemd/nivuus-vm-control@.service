@@ -7,3 +7,28 @@ StandardInput=socket
 StandardOutput=socket
 StandardError=journal
 TimeoutStartSec=15
+# Sandbox (audit 2026-11-16, N20). vm-control.sh reads one line from the
+# accepted socket (stdin), then either asks systemd to start
+# nivuus-vm-wake.service (systemctl, D-Bus over AF_UNIX) or writes
+# /run/nivuus-vm-idle/app-activity, and logs (logger, AF_UNIX). bash,
+# coreutils, systemctl and logger only: no device, no other write, no IP
+# socket, no setuid. Root is kept: systemd authorises StartUnit for uid 0;
+# a dedicated user would need a polkit rule (owner decision).
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native

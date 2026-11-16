@@ -3,3 +3,31 @@ Description=Shut down Windows VM after sustained inactivity
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/vm-idle-shutdown.sh
+# Sandbox (audit 2026-11-16, N20). vm-idle-shutdown.sh runs as root: virsh
+# (AF_UNIX to libvirtd), winvm -> winrm_exec.py (pywinrm over AF_INET to the
+# guest, reading /var/lib/nivuus/guest/secrets), docker compose for ollama
+# (AF_UNIX), systemctl start/set-property (vm-cpu-partition.sh release:
+# systemd writes the cgroups, this process only reads them), reads
+# /proc/net/nf_conntrack and /sys, and writes /run/nivuus-vm-idle. No
+# binary on the path is setuid or has an AppArmor profile.
+# Left out on purpose: MemoryDenyWriteExecute (pywinrm's NTLM goes through
+# cffi/cryptography), ProtectHome=yes (docker reads ~/.docker for registry
+# credentials, virsh ~/.config/libvirt), CapabilityBoundingSet and
+# SystemCallFilter (not derivable from the scripts).
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native

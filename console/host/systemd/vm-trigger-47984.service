@@ -7,3 +7,31 @@ After=vm-trigger-47984.socket
 Type=oneshot
 ExecStart=/usr/local/sbin/vm-wake-gate.py 47984
 TimeoutStartSec=300
+# Sandbox (audit 2026-11-16, N20). For 47984 vm-wake-gate.py only accepts
+# on the socket systemd passes (fd 3), reads up to 256 bytes, and logs to
+# syslog: its is_legit() never matches this port, so it never execs
+# handle-vm-start.sh. Nothing here needs root, a writable file, a device or
+# a new socket (RestrictAddressFamilies only governs socket(2); the passed
+# listener and accept(2) are unaffected). DynamicUser also implies
+# NoNewPrivileges, ProtectSystem=strict, ProtectHome=read-only and PrivateTmp.
+# The script is installed 0755, so the dynamic user can run it.
+DynamicUser=yes
+CapabilityBoundingSet=
+PrivateDevices=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
